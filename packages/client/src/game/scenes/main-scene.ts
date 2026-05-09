@@ -1,5 +1,4 @@
 import Phaser from "phaser";
-import { Bobber } from "../objects/bobber";
 
 export class MainScene extends Phaser.Scene {
   private water!: Phaser.GameObjects.Sprite;
@@ -13,7 +12,6 @@ export class MainScene extends Phaser.Scene {
   private castTimer: Phaser.Time.TimerEvent | null = null;
   private isFishing = false;
   private mode: "day" | "night" = "day";
-  private bobber!: Bobber;
 
   // fishing.gif natural duration: 9 frames × 200ms.
   private static readonly FISHING_GIF_DURATION_MS = 1800;
@@ -131,8 +129,6 @@ export class MainScene extends Phaser.Scene {
     ]);
     this.shipGroup.setDepth(1);
 
-    this.bobber = new Bobber(this);
-
     this.layoutAssets();
     this.scale.on("resize", this.onResize, this);
 
@@ -140,12 +136,6 @@ export class MainScene extends Phaser.Scene {
     this.game.events.on("fishBite", this.onFishBite, this);
     this.game.events.on("stopFishing", this.stopFishing, this);
     this.game.events.on("setMode", this.setMode, this);
-    // New nibble-flow bobber events. The React hook drives state; the
-    // scene only renders.
-    this.game.events.on("bobber:cast", this.onBobberCast, this);
-    this.game.events.on("bobber:nibble", this.onBobberNibble, this);
-    this.game.events.on("bobber:hook", this.onBobberHook, this);
-    this.game.events.on("bobber:escape", this.onBobberEscape, this);
 
     const initialMode = this.game.registry.get("mode") as
       | "day"
@@ -158,51 +148,7 @@ export class MainScene extends Phaser.Scene {
       this.game.events.off("fishBite", this.onFishBite, this);
       this.game.events.off("stopFishing", this.stopFishing, this);
       this.game.events.off("setMode", this.setMode, this);
-      this.game.events.off("bobber:cast", this.onBobberCast, this);
-      this.game.events.off("bobber:nibble", this.onBobberNibble, this);
-      this.game.events.off("bobber:hook", this.onBobberHook, this);
-      this.game.events.off("bobber:escape", this.onBobberEscape, this);
     });
-  }
-
-  private getBobberAnchorPoints(): {
-    rodTip: { x: number; y: number };
-    landing: { x: number; y: number };
-  } {
-    // Anchor points are computed off the ship group's world position so
-    // they track the ship's drift tween. The rod tip sits at the right of
-    // the character, and the bobber lands a configurable distance off the
-    // bow into the water.
-    const baseDim = Math.min(this.scale.width, this.scale.height);
-    const ship = this.shipGroup;
-    const rodTipX = ship.x + baseDim * 0.05;
-    const rodTipY = ship.y - baseDim * 0.04;
-    const landingX = ship.x + baseDim * 0.16;
-    const landingY = ship.y + baseDim * 0.08;
-    return {
-      rodTip: { x: rodTipX, y: rodTipY },
-      landing: { x: landingX, y: landingY },
-    };
-  }
-
-  private onBobberCast(): void {
-    if (!this.bobber) return;
-    const baseDim = Math.min(this.scale.width, this.scale.height);
-    this.bobber.setScale(Math.max(2, baseDim * 0.005));
-    const { rodTip, landing } = this.getBobberAnchorPoints();
-    void this.bobber.cast(rodTip.x, rodTip.y, landing.x, landing.y);
-  }
-
-  private onBobberNibble(): void {
-    this.bobber?.playNibble();
-  }
-
-  private onBobberHook(): void {
-    this.bobber?.playHookYank();
-  }
-
-  private onBobberEscape(): void {
-    this.bobber?.playEscape();
   }
 
   private setMode(mode: "day" | "night") {
@@ -288,7 +234,6 @@ export class MainScene extends Phaser.Scene {
     this.characterSprite.setVisible(true);
     this.fishingDom.setVisible(false);
     this.waitingDom.setVisible(false);
-    this.bobber?.reset();
   }
 
   private onResize(gameSize: Phaser.Structs.Size) {

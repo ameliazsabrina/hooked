@@ -30,9 +30,9 @@ export type FishingState =
   | "idle"
   // Cast tap fired; waiting for the server to ack with cast_accepted.
   | "casting"
-  // Cast acked; bobber arc + splash anim is playing.
+  // Cast acked; cast animation window before nibble timer starts.
   | "cast_animating"
-  // Bobber idling on water — server is silently holding the nibble timer.
+  // Cast settled — server is silently holding the nibble timer.
   | "idle_waiting"
   // Nibble fired; player must tap anywhere within 2s.
   | "nibble_window"
@@ -407,11 +407,7 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
         activeCastIdRef.current = msg.clientCastId;
         if (msg.sessionId) setSessionId(msg.sessionId);
         setCastStartedAtMs(msg.castTimestamp);
-        // Bobber arcs from rod tip into the water; idle loop kicks in once
-        // the splash settles. The scene drives the actual tweens; we just
-        // gate the React-side state here.
         setState("cast_animating");
-        gameRef.current?.events.emit("bobber:cast");
         if (castAnimTimerRef.current) clearTimeout(castAnimTimerRef.current);
         castAnimTimerRef.current = setTimeout(() => {
           castAnimTimerRef.current = null;
@@ -424,9 +420,6 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
       case "nibble_event": {
         if (activeCastIdRef.current !== msg.clientCastId) return;
         nibbleServerTsRef.current = msg.serverTs;
-        // Three sensory channels: visual (bobber dip + glow via scene),
-        // audio (cue), and tactile (vibration on supported devices).
-        gameRef.current?.events.emit("bobber:nibble");
         playSfx("nibbleBite");
         // Escalating triple-pulse: two short jolts + one strong sustain so
         // the nibble registers physically even through a pocket / case.
@@ -450,7 +443,6 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
           clearTimeout(nibbleWindowTimerRef.current);
           nibbleWindowTimerRef.current = null;
         }
-        gameRef.current?.events.emit("bobber:escape");
         setLastCatch(null);
         setState("missed");
         playSfx("fishGotAway");
@@ -666,7 +658,6 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
           clientTs,
         }),
       );
-      gameRef.current?.events.emit("bobber:hook");
       setState("hooking");
       if (hookAnimTimerRef.current) clearTimeout(hookAnimTimerRef.current);
       // No timer-driven transition out of `hooking` — the server's

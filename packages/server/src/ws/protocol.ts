@@ -57,9 +57,9 @@ export interface CastInitiateMessage {
   clientCastId: string;
 }
 
-// Acks the cast and tells the client the bobber may begin its splash + idle
-// loop. The on-chain initiate_cast has already committed (bait spent, fish
-// rolled); the server is now silently holding the nibble timer.
+// Acks the cast. The on-chain initiate_cast has already committed
+// (bait spent, fish rolled); the server is now silently holding the
+// nibble timer.
 export interface CastAcceptedMessage {
   type: "cast_accepted";
   sessionId: string;
