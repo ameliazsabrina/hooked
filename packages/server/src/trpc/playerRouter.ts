@@ -1,0 +1,389 @@
+import { z } from "zod";
+import { TRPCError } from "@trpc/server";
+import { Connection, clusterApiUrl } from "@solana/web3.js";
+import { router, protectedProcedure } from "./trpc.js";
+import { Player, PoolTier, Catch, Room, FishingSession } from "../db/schema.js";
+import type { Types } from "mongoose";
+import { env } from "../config/env.js";
+import { isValidDepositAmount, VALID_DEPOSIT_AMOUNTS } from "@hooked/shared";
+import { assignWindow } from "../services/fishing/window.js";
+import { baitAmountForDeposit } from "../services/baitAmount.js";
+
+const BUCKET_TIER = 1;
+
+const RARITY_LABELS = ["basic", "rare", "monster", "legendary", "apex"] as const;
+
+function currentSessionStart(now: Date): Date {
+  const hour = now.getUTCHours();
+  const start = new Date(
+    Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()),
+  );
+  if (hour < 2) {
+    start.setUTCDate(start.getUTCDate() - 1);
+    start.setUTCHours(14);
+  } else if (hour < 14) {
+    start.setUTCHours(2);
+  } else {
+    start.setUTCHours(14);
+  }
+  return start;
+}
+
+function parseSpeciesId(species: string): number {
+  const m = /^species_(\d+)$/.exec(species);
+  return m ? Number(m[1]) : 0;
+}
+
+const rpcUrl = env.HELIUS_API_KEY
+  ? `https://devnet.helius-rpc.com/?api-key=${env.HELIUS_API_KEY}`
+  : clusterApiUrl("devnet");
+
+const solanaConnection = new Connection(rpcUrl, "confirmed");
+
+export const playerRouter = router({
+  me: protectedProcedure.query(async ({ ctx }) => {
+    const now = new Date();
+    const existing = await Player.findOne({ walletAddress: ctx.walletAddress }).lean();
+
+    const utcDay = (d: Date) =>
+      `${d.getUTCFullYear()}-${d.getUTCMonth()}-${d.getUTCDate()}`;
+    const todayKey = utcDay(now);
+    const yesterday = new Date(now);
+    yesterday.setUTCDate(yesterday.getUTCDate() - 1);
+    const yesterdayKey = utcDay(yesterday);
+
+    let nextStreak = existing?.loginStreak ?? 0;
+    const prevSeen = existing?.lastSeenAt ?? null;
+    if (!prevSeen) {
+      nextStreak = 1;
+    } else {
+      const prevKey = utcDay(prevSeen);
+      if (prevKey === todayKey) {
+        if (nextStreak === 0) nextStreak = 1;
+      } else if (prevKey === yesterdayKey) {
+        nextStreak += 1;
+      } else {
+        nextStreak = 1;
+      }
+    }
+
+    const player = await Player.findOneAndUpdate(
+      { walletAddress: ctx.walletAddress },
+      {
+        $set: {
+          lastSeenAt: now,
+          ipCountry: ctx.ipCountry,
+          loginStreak: nextStreak,
+        },
+        $setOnInsert: { walletAddress: ctx.walletAddress },
+      },
+      { new: true, upsert: true }
+    ).lean();
+
+    if (!player || !player.nickname) {
+      return { exists: false as const };
+    }
+
+    // Active = SOL still locked on-chain. The keeper sets `returned=true`
+    // exactly when `return_principal` lands, so that flag is the canonical
+    // signal. `expiresAt` tracks the room window (informational, surfaced as
+    // the Window Timer) and must NOT gate this predicate — otherwise users
+    // get prompted to redeposit between window-end and keeper return, even
+    // though their SOL is still on-chain.
+    const activeDeposit =
+      player.deposits?.find((d) => !d.returned) ?? null;
+
+    const lpEnabled = env.FEATURES_LP_ENABLED;
+
+    return {
+      exists: true as const,
+      nickname: player.nickname,
+      skin: player.skin ?? null,
+      depositAmount: activeDeposit?.amount ?? null,
+      depositedAt: activeDeposit?.depositedAt?.toISOString() ?? null,
+      roomId: activeDeposit?.poolId ?? null,
+      activeMonth: lpEnabled ? activeDeposit?.activeMonth ?? null : null,
+      // Emit unconditionally — under the rooms model `expiresAt` is the
+      // room's `closesAt` (Window Timer) and is meaningful regardless of
+      // FEATURES_LP_ENABLED. The flag used to gate monthly LP epoch ends
+      // under the legacy JupSOL design and no longer applies here.
+      expiresAt: activeDeposit?.expiresAt?.toISOString() ?? null,
+      shellBalance: player.shellBalance,
+      loginStreak: player.loginStreak,
+      totalCatches: player.totalCatches,
+      equipment: player.equipment ?? {
+        rodTier: 0,
+        rodEquipped: "old",
+        baitEquipped: "fly",
+        luckyLureTier: 0,
+        ownedRods: ["old"],
+        ownedBaits: ["fly"],
+      },
+    };
+  }),
+
+  sessionState: protectedProcedure
+    .input(
+      z
+        .object({
+          limit: z.number().int().min(1).max(500).default(200),
+        })
+        .optional(),
+    )
+    .query(async ({ ctx, input }) => {
+      const limit = input?.limit ?? 200;
+      const now = new Date();
+      const { window, dateKey } = assignWindow(now);
+      // Wire field stays as the legacy `date` name so clients with cached
+      // tRPC responses don't crash on the rename; the value is now the full
+      // dateKey (no `% 65_536` truncation) since off-chain has no u16 limit.
+      const date = dateKey;
+
+      const player = await Player.findOne({
+        walletAddress: ctx.walletAddress,
+      }).lean();
+
+      if (!player) {
+        return {
+          bait: 0,
+          score: 0,
+          catches: [],
+          discoveredSpeciesIds: [],
+          date,
+          window,
+        };
+      }
+
+      // See playerRouter.me — active = SOL still on-chain (`!returned`).
+      const activeDeposit = player.deposits?.find((d) => !d.returned);
+
+      // Bait: prefer the live session if one exists for this window. Fall
+      // back to the deposit-projected amount when the session hasn't been
+      // lazy-created yet (otherwise the cast button would gate on bait>0
+      // and prevent the first cast from ever firing — see
+      // services/fishing/wsExecutor.ts:ensureActiveSession).
+      let bait = 0;
+      try {
+        const session = await FishingSession.findOne(
+          { walletAddress: ctx.walletAddress, dateKey, window },
+          { baitRemaining: 1 },
+        ).lean();
+        if (session) {
+          bait = session.baitRemaining;
+        } else if (activeDeposit) {
+          bait = baitAmountForDeposit(activeDeposit.amount);
+        }
+      } catch {
+        // Defensive: never let bait math break the rest of the query.
+      }
+      const activeRoom = activeDeposit
+        ? await Room.findOne({ roomId: activeDeposit.poolId }).lean()
+        : null;
+
+      // Fallback to current window if the player has no active room yet.
+      const windowStart = activeRoom
+        ? activeRoom.createdAt
+        : currentSessionStart(now);
+      const windowEnd = activeRoom ? activeRoom.closesAt : now;
+
+      const playerId = player._id as Types.ObjectId;
+
+      // Score aggregation covers the full window (sold fish still count).
+      const scoreAgg = await Catch.aggregate<{ total: number }>([
+        {
+          $match: {
+            playerId,
+            caughtAt: { $gte: windowStart, $lte: windowEnd },
+          },
+        },
+        { $group: { _id: null, total: { $sum: "$score" } } },
+      ]);
+      const score = scoreAgg[0]?.total ?? 0;
+
+      // Inventory: most-recent un-released catches, capped at `limit`.
+      const inventory = await Catch.find({
+        playerId,
+        caughtAt: { $gte: windowStart, $lte: windowEnd },
+        released: { $ne: true },
+      })
+        .sort({ caughtAt: -1 })
+        .limit(limit)
+        .lean();
+
+      // Lifetime-discovered species: every species this player has ever caught,
+      // ignoring the room window and the released flag. The Fish Index uses
+      // this so unlock state survives selling and room rotation.
+      const discoveredRaw = await Catch.distinct("species", { playerId });
+      const discoveredSpeciesIds = (discoveredRaw as string[]).map(
+        parseSpeciesId,
+      );
+
+      return {
+        bait,
+        score,
+        date,
+        window,
+        discoveredSpeciesIds,
+        catches: inventory.map((c) => ({
+          id: String(c._id),
+          speciesId: parseSpeciesId(c.species),
+          rarity: Math.max(
+            0,
+            RARITY_LABELS.indexOf(c.rarity as typeof RARITY_LABELS[number]),
+          ),
+          weightHg: Math.round(c.weightKg * 10),
+          score: c.score,
+          sellValue: c.sellValue ?? 0,
+          caughtAt: c.caughtAt.toISOString(),
+        })),
+      };
+    }),
+
+  setNickname: protectedProcedure
+    .input(
+      z.object({
+        nickname: z
+          .string()
+          .min(3, "Nickname must be at least 3 characters")
+          .max(16, "Nickname must be at most 16 characters")
+          .regex(/^[a-zA-Z0-9]+$/, "Nickname must be alphanumeric"),
+      })
+    )
+    .mutation(async ({ ctx, input }) => {
+      const taken = await Player.findOne({ nickname: input.nickname }).lean();
+      if (taken && taken.walletAddress !== ctx.walletAddress) {
+        throw new TRPCError({
+          code: "CONFLICT",
+          message: "Nickname already taken",
+        });
+      }
+
+      const player = await Player.findOneAndUpdate(
+        { walletAddress: ctx.walletAddress },
+        { $set: { nickname: input.nickname }, $setOnInsert: { walletAddress: ctx.walletAddress } },
+        { upsert: true, new: true }
+      ).lean();
+
+      return {
+        nickname: player!.nickname,
+        shellBalance: player!.shellBalance,
+        loginStreak: player!.loginStreak,
+        totalCatches: player!.totalCatches,
+      };
+    }),
+
+  setSkin: protectedProcedure
+    .input(
+      z.object({
+        head: z.number().int().min(1).max(3),
+        shirt: z.number().int().min(1).max(3),
+        pants: z.number().int().min(1).max(3),
+        shoes: z.number().int().min(1).max(2),
+      })
+    )
+    .mutation(async ({ ctx, input }) => {
+      const existing = await Player.findOne({ walletAddress: ctx.walletAddress }).lean();
+      if (!existing || !existing.nickname) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: "Set nickname first" });
+      }
+
+      await Player.updateOne(
+        { walletAddress: ctx.walletAddress },
+        { $set: { skin: input } }
+      );
+
+      return { skin: input };
+    }),
+
+  confirmDeposit: protectedProcedure
+    .input(
+      z.object({
+        txSignature: z.string(),
+        depositAmount: z.number().refine(isValidDepositAmount, {
+          message: `Deposit must be one of ${VALID_DEPOSIT_AMOUNTS.join(", ")} SOL`,
+        }),
+        poolId: z.string().optional(),
+      })
+    )
+    .mutation(async ({ ctx, input }) => {
+      const existing = await Player.findOne({ walletAddress: ctx.walletAddress }).lean();
+      if (!existing || !existing.nickname) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: "Complete onboarding first" });
+      }
+
+      // Block stacking deposits while SOL is still locked on-chain.
+      const activeDeposit = existing.deposits?.find((d) => !d.returned);
+      if (activeDeposit) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: "Already deposited" });
+      }
+
+      const duplicate = await Player.findOne({
+        "deposits.depositTxSignature": input.txSignature,
+      }).lean();
+      if (duplicate) {
+        throw new TRPCError({ code: "CONFLICT", message: "Transaction already used" });
+      }
+
+      const tx = await solanaConnection.getTransaction(input.txSignature, {
+        maxSupportedTransactionVersion: 0,
+      });
+
+      if (!tx) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: "Transaction not found" });
+      }
+
+      if (tx.meta?.err) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: "Transaction failed on-chain" });
+      }
+
+      const staticKeys = tx.transaction.message.staticAccountKeys;
+      const walletInvolved = staticKeys.some(
+        (key) => key.toBase58() === ctx.walletAddress
+      );
+      if (!walletInvolved) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: "Transaction does not involve your wallet" });
+      }
+
+      const now = new Date();
+      const activeMonth = now.toISOString().slice(0, 7);
+      const lpEnabled = env.FEATURES_LP_ENABLED;
+      const serverPoolId = lpEnabled ? `${BUCKET_TIER}_${activeMonth}` : null;
+      const expiresAt = lpEnabled
+        ? new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000)
+        : null;
+
+      const depositEntry = {
+        poolId: serverPoolId ?? "vault",
+        amount: input.depositAmount,
+        depositTxSignature: input.txSignature,
+        activeMonth,
+        depositedAt: now,
+        expiresAt: expiresAt ?? new Date(now.getTime() + 365 * 24 * 60 * 60 * 1000),
+        returned: false,
+      };
+
+      await Player.updateOne(
+        { walletAddress: ctx.walletAddress },
+        {
+          $push: { deposits: depositEntry },
+          $set: { currentPoolId: serverPoolId },
+        },
+      );
+
+      if (lpEnabled) {
+        await PoolTier.findOneAndUpdate(
+          { tier: BUCKET_TIER, activeMonth },
+          { $inc: { realPlayerCount: 1, totalDepositedSol: input.depositAmount } },
+          { upsert: true, new: true }
+        ).lean();
+      }
+
+      return {
+        depositAmount: depositEntry.amount,
+        depositedAt: depositEntry.depositedAt,
+        activeMonth: lpEnabled ? activeMonth : null,
+        expiresAt: expiresAt?.toISOString() ?? null,
+        currentPoolId: serverPoolId,
+      };
+    }),
+});

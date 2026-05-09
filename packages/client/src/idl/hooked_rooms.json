@@ -1,0 +1,1404 @@
+{
+  "address": "4iF8DPptdoSYt4BX549pzieaoeCg6x7BwbMEwWF5M2hd",
+  "metadata": {
+    "name": "hooked_rooms",
+    "version": "0.1.0",
+    "spec": "0.1.0",
+    "description": "Hooked rooms program — weekly LP rooms (PRD v2.2), SOL-native deposits + keeper-driven settlement"
+  },
+  "instructions": [
+    {
+      "name": "add_gateway_key",
+      "discriminator": [
+        173,
+        179,
+        219,
+        116,
+        125,
+        182,
+        12,
+        206
+      ],
+      "accounts": [
+        {
+          "name": "registry",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  103,
+                  97,
+                  116,
+                  101,
+                  119,
+                  97,
+                  121,
+                  95,
+                  114,
+                  101,
+                  103,
+                  105,
+                  115,
+                  116,
+                  114,
+                  121
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "admin",
+          "signer": true
+        }
+      ],
+      "args": [
+        {
+          "name": "key",
+          "type": "pubkey"
+        }
+      ]
+    },
+    {
+      "name": "close_room",
+      "discriminator": [
+        152,
+        197,
+        88,
+        192,
+        98,
+        197,
+        51,
+        211
+      ],
+      "accounts": [
+        {
+          "name": "room",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  111,
+                  111,
+                  109
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "room.room_id",
+                "account": "Room"
+              }
+            ]
+          }
+        },
+        {
+          "name": "config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "room_vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  111,
+                  111,
+                  109,
+                  95,
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "room"
+              }
+            ]
+          }
+        },
+        {
+          "name": "treasury",
+          "writable": true
+        },
+        {
+          "name": "admin",
+          "signer": true
+        }
+      ],
+      "args": [
+        {
+          "name": "yield_lamports",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "create_room",
+      "discriminator": [
+        130,
+        166,
+        32,
+        2,
+        247,
+        120,
+        178,
+        53
+      ],
+      "accounts": [
+        {
+          "name": "room",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  111,
+                  111,
+                  109
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "room_id"
+              }
+            ]
+          }
+        },
+        {
+          "name": "room_vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  111,
+                  111,
+                  109,
+                  95,
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "room"
+              }
+            ]
+          }
+        },
+        {
+          "name": "admin",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "room_id",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "deposit_room",
+      "discriminator": [
+        115,
+        68,
+        86,
+        65,
+        55,
+        130,
+        202,
+        23
+      ],
+      "accounts": [
+        {
+          "name": "room",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  111,
+                  111,
+                  109
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "room.room_id",
+                "account": "Room"
+              }
+            ]
+          }
+        },
+        {
+          "name": "room_vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  111,
+                  111,
+                  109,
+                  95,
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "room"
+              }
+            ]
+          }
+        },
+        {
+          "name": "entry",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  111,
+                  111,
+                  109,
+                  95,
+                  101,
+                  110,
+                  116,
+                  114,
+                  121
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "room"
+              },
+              {
+                "kind": "account",
+                "path": "authority"
+              }
+            ]
+          }
+        },
+        {
+          "name": "authority",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "deposit_lamports",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "finalize_room",
+      "discriminator": [
+        138,
+        6,
+        78,
+        73,
+        213,
+        216,
+        51,
+        199
+      ],
+      "accounts": [
+        {
+          "name": "room",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  111,
+                  111,
+                  109
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "room.room_id",
+                "account": "Room"
+              }
+            ]
+          }
+        },
+        {
+          "name": "config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "room_vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  111,
+                  111,
+                  109,
+                  95,
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "room"
+              }
+            ]
+          }
+        },
+        {
+          "name": "treasury",
+          "writable": true
+        },
+        {
+          "name": "admin",
+          "signer": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "init_gateway_registry",
+      "discriminator": [
+        59,
+        186,
+        55,
+        90,
+        147,
+        236,
+        182,
+        70
+      ],
+      "accounts": [
+        {
+          "name": "registry",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  103,
+                  97,
+                  116,
+                  101,
+                  119,
+                  97,
+                  121,
+                  95,
+                  114,
+                  101,
+                  103,
+                  105,
+                  115,
+                  116,
+                  114,
+                  121
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "admin",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "initial_keeper",
+          "type": "pubkey"
+        }
+      ]
+    },
+    {
+      "name": "init_program_config",
+      "discriminator": [
+        185,
+        54,
+        237,
+        229,
+        219,
+        179,
+        109,
+        20
+      ],
+      "accounts": [
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "admin",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "treasury",
+          "type": "pubkey"
+        },
+        {
+          "name": "lp_manager",
+          "type": "pubkey"
+        }
+      ]
+    },
+    {
+      "name": "remove_gateway_key",
+      "discriminator": [
+        156,
+        42,
+        146,
+        40,
+        196,
+        25,
+        60,
+        153
+      ],
+      "accounts": [
+        {
+          "name": "registry",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  103,
+                  97,
+                  116,
+                  101,
+                  119,
+                  97,
+                  121,
+                  95,
+                  114,
+                  101,
+                  103,
+                  105,
+                  115,
+                  116,
+                  114,
+                  121
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "admin",
+          "signer": true
+        }
+      ],
+      "args": [
+        {
+          "name": "key",
+          "type": "pubkey"
+        }
+      ]
+    },
+    {
+      "name": "return_principal",
+      "discriminator": [
+        27,
+        177,
+        124,
+        34,
+        3,
+        16,
+        96,
+        76
+      ],
+      "accounts": [
+        {
+          "name": "room",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  111,
+                  111,
+                  109
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "room.room_id",
+                "account": "Room"
+              }
+            ]
+          }
+        },
+        {
+          "name": "room_vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  111,
+                  111,
+                  109,
+                  95,
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "room"
+              }
+            ]
+          }
+        },
+        {
+          "name": "entry",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  111,
+                  111,
+                  109,
+                  95,
+                  101,
+                  110,
+                  116,
+                  114,
+                  121
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "room"
+              },
+              {
+                "kind": "account",
+                "path": "recipient"
+              }
+            ]
+          }
+        },
+        {
+          "name": "recipient",
+          "writable": true
+        },
+        {
+          "name": "admin",
+          "signer": true
+        }
+      ],
+      "args": [
+        {
+          "name": "yield_share_lamports",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "set_lp_manager",
+      "discriminator": [
+        197,
+        249,
+        1,
+        150,
+        211,
+        172,
+        233,
+        5
+      ],
+      "accounts": [
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "admin",
+          "signer": true
+        }
+      ],
+      "args": [
+        {
+          "name": "new_lp_manager",
+          "type": "pubkey"
+        }
+      ]
+    },
+    {
+      "name": "set_treasury",
+      "discriminator": [
+        57,
+        97,
+        196,
+        95,
+        195,
+        206,
+        106,
+        136
+      ],
+      "accounts": [
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "admin",
+          "signer": true
+        }
+      ],
+      "args": [
+        {
+          "name": "new_treasury",
+          "type": "pubkey"
+        }
+      ]
+    },
+    {
+      "name": "update_room_entry_score",
+      "discriminator": [
+        16,
+        56,
+        121,
+        156,
+        240,
+        49,
+        103,
+        13
+      ],
+      "accounts": [
+        {
+          "name": "room",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  111,
+                  111,
+                  109
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "room.room_id",
+                "account": "Room"
+              }
+            ]
+          }
+        },
+        {
+          "name": "entry",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  111,
+                  111,
+                  109,
+                  95,
+                  101,
+                  110,
+                  116,
+                  114,
+                  121
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "room"
+              },
+              {
+                "kind": "account",
+                "path": "entry.authority",
+                "account": "RoomEntry"
+              }
+            ]
+          }
+        },
+        {
+          "name": "registry",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  103,
+                  97,
+                  116,
+                  101,
+                  119,
+                  97,
+                  121,
+                  95,
+                  114,
+                  101,
+                  103,
+                  105,
+                  115,
+                  116,
+                  114,
+                  121
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "keeper",
+          "signer": true
+        }
+      ],
+      "args": [
+        {
+          "name": "score_delta",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "withdraw_to_lp_manager",
+      "discriminator": [
+        33,
+        167,
+        51,
+        58,
+        24,
+        101,
+        74,
+        62
+      ],
+      "accounts": [
+        {
+          "name": "room",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  111,
+                  111,
+                  109
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "room.room_id",
+                "account": "Room"
+              }
+            ]
+          }
+        },
+        {
+          "name": "config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "room_vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  111,
+                  111,
+                  109,
+                  95,
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "room"
+              }
+            ]
+          }
+        },
+        {
+          "name": "lp_manager",
+          "docs": [
+            "LP cycle. Pinned to `config.lp_manager`; recorded on `room.lp_manager`",
+            "for per-room auditability."
+          ],
+          "writable": true
+        },
+        {
+          "name": "admin",
+          "signer": true
+        }
+      ],
+      "args": [
+        {
+          "name": "amount",
+          "type": "u64"
+        }
+      ]
+    }
+  ],
+  "accounts": [
+    {
+      "name": "GatewayRegistry",
+      "discriminator": [
+        207,
+        115,
+        197,
+        33,
+        28,
+        106,
+        182,
+        209
+      ]
+    },
+    {
+      "name": "ProgramConfig",
+      "discriminator": [
+        196,
+        210,
+        90,
+        231,
+        144,
+        149,
+        140,
+        63
+      ]
+    },
+    {
+      "name": "Room",
+      "discriminator": [
+        156,
+        199,
+        67,
+        27,
+        222,
+        23,
+        185,
+        94
+      ]
+    },
+    {
+      "name": "RoomEntry",
+      "discriminator": [
+        174,
+        36,
+        23,
+        226,
+        207,
+        56,
+        245,
+        129
+      ]
+    }
+  ],
+  "errors": [
+    {
+      "code": 6000,
+      "name": "Unauthorized",
+      "msg": "Unauthorized — signer does not match authority"
+    },
+    {
+      "code": 6001,
+      "name": "Overflow",
+      "msg": "Arithmetic overflow"
+    },
+    {
+      "code": 6002,
+      "name": "RoomNotAcceptingDeposits",
+      "msg": "Room is not in Entry status — deposits closed"
+    },
+    {
+      "code": 6003,
+      "name": "RoomEntryWindowClosed",
+      "msg": "Room entry window has closed"
+    },
+    {
+      "code": 6004,
+      "name": "RoomFull",
+      "msg": "Room is full — capacity reached"
+    },
+    {
+      "code": 6005,
+      "name": "RoomCapacityExceeded",
+      "msg": "Room TVL cap would be exceeded by this deposit"
+    },
+    {
+      "code": 6006,
+      "name": "DepositBelowMinimum",
+      "msg": "Deposit below minimum (0.5 SOL)"
+    },
+    {
+      "code": 6007,
+      "name": "DepositAboveMaximum",
+      "msg": "Deposit above maximum (2 SOL)"
+    },
+    {
+      "code": 6008,
+      "name": "InvalidDepositAmount",
+      "msg": "Deposit must be one of 0.5, 1.0, 1.5, or 2.0 SOL"
+    },
+    {
+      "code": 6009,
+      "name": "RoomNotClosable",
+      "msg": "Room has not reached its close timestamp"
+    },
+    {
+      "code": 6010,
+      "name": "RoomAlreadyClosed",
+      "msg": "Room is already closed"
+    },
+    {
+      "code": 6011,
+      "name": "RoomNotActive",
+      "msg": "Room is not in Active status — LP cannot be deployed"
+    },
+    {
+      "code": 6012,
+      "name": "PrincipalAlreadyReturned",
+      "msg": "Principal for this entry has already been returned"
+    },
+    {
+      "code": 6013,
+      "name": "VaultInsufficientFunds",
+      "msg": "Insufficient vault balance to return principal"
+    },
+    {
+      "code": 6014,
+      "name": "RoomNotSettling",
+      "msg": "Room is not in Settling status"
+    },
+    {
+      "code": 6015,
+      "name": "EntryRoomMismatch",
+      "msg": "Entry does not belong to the provided room"
+    },
+    {
+      "code": 6016,
+      "name": "NotGateway",
+      "msg": "Signer is not a whitelisted gateway/keeper key"
+    },
+    {
+      "code": 6017,
+      "name": "GatewayRegistryFull",
+      "msg": "Gateway registry is full — cannot add more keys"
+    },
+    {
+      "code": 6018,
+      "name": "GatewayKeyAlreadyPresent",
+      "msg": "Gateway key already present in the registry"
+    },
+    {
+      "code": 6019,
+      "name": "GatewayKeyNotFound",
+      "msg": "Gateway key not found in the registry"
+    },
+    {
+      "code": 6020,
+      "name": "RankedEntryMismatch",
+      "msg": "Remaining-account top-3 entries do not match the ranked_entry argument"
+    },
+    {
+      "code": 6021,
+      "name": "LpAlreadyDeployed",
+      "msg": "LP principal has already been withdrawn for this room"
+    },
+    {
+      "code": 6022,
+      "name": "LpDeployWindowNotOpen",
+      "msg": "LP deploy window is not open — too early or too late"
+    },
+    {
+      "code": 6023,
+      "name": "LpAmountExceedsDeposited",
+      "msg": "LP withdraw amount exceeds room deposited principal"
+    },
+    {
+      "code": 6024,
+      "name": "LpAmountZero",
+      "msg": "LP withdraw amount must be greater than zero"
+    },
+    {
+      "code": 6025,
+      "name": "TreasuryMismatch",
+      "msg": "Treasury account does not match the canonical ProgramConfig.treasury"
+    },
+    {
+      "code": 6026,
+      "name": "LpManagerMismatch",
+      "msg": "LP manager account does not match the canonical ProgramConfig.lp_manager"
+    }
+  ],
+  "types": [
+    {
+      "name": "GatewayRegistry",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "admin",
+            "type": "pubkey"
+          },
+          {
+            "name": "key_count",
+            "type": "u8"
+          },
+          {
+            "name": "keys",
+            "type": {
+              "array": [
+                "pubkey",
+                8
+              ]
+            }
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ProgramConfig",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "admin",
+            "type": "pubkey"
+          },
+          {
+            "name": "treasury",
+            "type": "pubkey"
+          },
+          {
+            "name": "lp_manager",
+            "type": "pubkey"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Room",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "admin",
+            "type": "pubkey"
+          },
+          {
+            "name": "room_id",
+            "type": "u64"
+          },
+          {
+            "name": "created_at",
+            "type": "i64"
+          },
+          {
+            "name": "entry_closes_at",
+            "type": "i64"
+          },
+          {
+            "name": "lp_deploy_at",
+            "type": "i64"
+          },
+          {
+            "name": "closes_at",
+            "type": "i64"
+          },
+          {
+            "name": "capacity_lamports",
+            "type": "u64"
+          },
+          {
+            "name": "deposited_lamports",
+            "type": "u64"
+          },
+          {
+            "name": "human_count",
+            "type": "u16"
+          },
+          {
+            "name": "max_humans",
+            "type": "u16"
+          },
+          {
+            "name": "status",
+            "type": "u8"
+          },
+          {
+            "name": "lp_position",
+            "type": "pubkey"
+          },
+          {
+            "name": "lp_manager",
+            "type": "pubkey"
+          },
+          {
+            "name": "lp_deployed_lamports",
+            "type": "u64"
+          },
+          {
+            "name": "yield_lamports",
+            "type": "u64"
+          },
+          {
+            "name": "first_place",
+            "type": "pubkey"
+          },
+          {
+            "name": "second_place",
+            "type": "pubkey"
+          },
+          {
+            "name": "third_place",
+            "type": "pubkey"
+          },
+          {
+            "name": "first_place_score",
+            "type": "u64"
+          },
+          {
+            "name": "second_place_score",
+            "type": "u64"
+          },
+          {
+            "name": "third_place_score",
+            "type": "u64"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          },
+          {
+            "name": "vault_bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "RoomEntry",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "room",
+            "type": "pubkey"
+          },
+          {
+            "name": "authority",
+            "type": "pubkey"
+          },
+          {
+            "name": "deposit_lamports",
+            "type": "u64"
+          },
+          {
+            "name": "final_score",
+            "type": "u64"
+          },
+          {
+            "name": "final_rank",
+            "type": "u16"
+          },
+          {
+            "name": "yield_awarded_lamports",
+            "type": "u64"
+          },
+          {
+            "name": "joined_at",
+            "type": "i64"
+          },
+          {
+            "name": "returned",
+            "type": "bool"
+          },
+          {
+            "name": "returned_at",
+            "type": "i64"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    }
+  ]
+}

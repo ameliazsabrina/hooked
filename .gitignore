@@ -1,0 +1,70 @@
+# --- Logs ---
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# --- Dependencies & build output ---
+node_modules
+.pnpm-store
+dist
+dist-ssr
+build
+.next
+.vite
+.turbo
+coverage
+*.tsbuildinfo
+*.local
+
+# --- Editor / OS ---
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# --- Local agent / tooling state ---
+.claude
+design
+claude-session.jsonl
+codex-session.jsonl
+.superstack/
+
+# --- Env files (NEVER COMMIT) ---
+.env
+.env.*
+!.env.example
+
+# --- Solana / Anchor build artifacts ---
+.anchor
+target
+**/*.rs.bk
+test-ledger
+
+# --- Solana keypairs (NEVER COMMIT — full secret bytes live in these) ---
+# Catches target/deploy/*-keypair.json, any keypair.json next to a program,
+# and ad-hoc files like treasury-keypair.json, keeper-keypair.json, etc.
+*.keypair.json
+**/keypair.json
+**/id.json
+**/*-keypair.json
+**/*_keypair.json
+
+# --- Generic secret formats ---
+*.pem
+*.key
+*.p12
+*.pfx
+secrets/
+.secrets/
+
+# --- Test fixtures we don't ship ---
+packages/server/tests/

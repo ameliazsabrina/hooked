@@ -1,0 +1,16 @@
+[package]
+name = "hooked-common"
+version = "0.1.0"
+description = "Shared types, constants, seeds and enums used by hooked-fishing and hooked-rooms"
+edition = "2021"
+
+[lib]
+crate-type = ["lib"]
+name = "hooked_common"
+
+[features]
+default = []
+idl-build = ["anchor-lang/idl-build"]
+
+[dependencies]
+anchor-lang = { version = "0.32.1" }

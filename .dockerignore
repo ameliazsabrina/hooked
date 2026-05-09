@@ -1,0 +1,13 @@
+node_modules
+**/node_modules
+packages/*/dist
+packages/*/.turbo
+.git
+.env
+.env.*
+**/.env
+**/.env.*
+target
+programs/**/target
+.DS_Store
+*.log

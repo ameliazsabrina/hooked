@@ -1,0 +1,231 @@
+import BN from "bn.js";
+import { PublicKey } from "@solana/web3.js";
+import { env } from "../config/env.js";
+import {
+  getRoomsProgram,
+  getRoomPda,
+  getRoomVaultPda,
+  getProgramConfigPda,
+  loadLpManagerKeypair,
+} from "../solana/roomsProgram.js";
+import { Room } from "../db/schema.js";
+import {
+  checkLpReady,
+  deployRoomLiquidity,
+  exitRoomLiquidity,
+} from "./lpManager.js";
+
+type LpLogger = {
+  info: (msg: string) => void;
+  error: (msg: string) => void;
+};
+
+const noopLogger: LpLogger = { info: () => {}, error: () => {} };
+
+/**
+ * Find rooms that just transitioned to `active` and don't yet have an LP
+ * position deployed, withdraw their principal into LP_MANAGER, and open the
+ * DLMM position. Idempotent: re-running on already-deployed rooms is a no-op.
+ */
+export async function deployReadyRoomLp(logger: LpLogger = noopLogger) {
+  if (!env.FEATURES_LP_ENABLED) return;
+
+  const rooms = await Room.find({
+    phase: "active",
+    onChainPoolId: { $ne: null },
+    "lp.status": "pending",
+  }).lean();
+  if (rooms.length === 0) return;
+
+  const ready = checkLpReady({
+    requiredBufferLamports: BigInt(env.IL_BUFFER_LAMPORTS_MIN),
+  });
+  if (!ready.ok) {
+    logger.info(`lpDeploy skipped — ${ready.reason}`);
+    return;
+  }
+
+  const loaded = getRoomsProgram();
+  if (!loaded) {
+    logger.info("lpDeploy skipped — TREASURY_KEYPAIR not configured");
+    return;
+  }
+  const { program, signer: treasury } = loaded;
+  const lpManager = loadLpManagerKeypair();
+  if (!lpManager) return; // already validated by checkLpReady, but appeases TS
+
+  for (const room of rooms) {
+    try {
+      const onChainRoomId = BigInt(room.onChainPoolId!);
+      const roomPda = getRoomPda(onChainRoomId);
+      const roomVaultPda = getRoomVaultPda(roomPda);
+      const onChainRoom = await program.account.room.fetchNullable(roomPda);
+      if (!onChainRoom) continue;
+
+      // Already deployed on-chain (e.g. previous run crashed mid-flight after
+      // the withdraw tx confirmed but before DB write). Skip the on-chain
+      // call; the deploy step below is what we want to retry.
+      const alreadyOnChain =
+        BigInt(onChainRoom.lpDeployedLamports.toString()) > 0n;
+
+      const principal = BigInt(onChainRoom.depositedLamports.toString());
+      if (principal === 0n) {
+        await Room.updateOne(
+          { roomId: room.roomId },
+          { $set: { "lp.status": "skipped", "lp.lastError": "no deposits" } },
+        );
+        continue;
+      }
+
+      let withdrawSig: string | null = null;
+      if (!alreadyOnChain) {
+        withdrawSig = await program.methods
+          .withdrawToLpManager(new BN(principal.toString()))
+          .accounts({
+            room: roomPda,
+            config: getProgramConfigPda(),
+            roomVault: roomVaultPda,
+            lpManager: lpManager.publicKey,
+            admin: treasury.publicKey,
+          } as never)
+          .rpc();
+        logger.info(
+          `room=${room.roomId} withdraw_to_lp_manager ${principal} lamports tx=${withdrawSig}`,
+        );
+      }
+
+      // 2) Open the DLMM position (or synthesize in dry-run).
+      const deploy = await deployRoomLiquidity({
+        roomPdaStr: roomPda.toBase58(),
+        lamports: principal,
+      });
+      logger.info(
+        `room=${room.roomId} lp deploy ok pos=${deploy.positionPubkey} dryRun=${deploy.dryRun}`,
+      );
+
+      await Room.updateOne(
+        { roomId: room.roomId },
+        {
+          $set: {
+            "lp.status": "deployed",
+            "lp.positionPubkey": deploy.positionPubkey,
+            "lp.deployedLamports": Number(deploy.deployedLamports),
+            "lp.deployedAt": new Date(),
+            "lp.deployTxSignature": withdrawSig,
+            "lp.swapSlippageLamports": Number(deploy.swapSlippageLamports),
+            "lp.withdrawTxSignature": withdrawSig,
+            "lp.swapInTxSignature": deploy.swapInTxSignature,
+            "lp.swapInSolLamports": Number(deploy.swapInSolLamports),
+            "lp.swapInUsdcRaw": deploy.swapInUsdcRaw.toString(),
+            "lp.addLiquidityTxSignature": deploy.addLiquidityTxSignature,
+          },
+        },
+      );
+    } catch (err) {
+      logger.error(`lpDeploy room=${room.roomId} failed: ${(err as Error).message}`);
+      await Room.updateOne(
+        { roomId: room.roomId },
+        {
+          $set: {
+            "lp.status": "failed",
+            "lp.lastError": (err as Error).message,
+          },
+        },
+      );
+    }
+  }
+}
+
+/**
+ * Find rooms whose closes_at is within LP_EXIT_HOURS_BEFORE_CLOSE and have
+ * an outstanding deployed LP position; exit the position, swap back, return
+ * principal+yield to room_vault, write realizedYieldLamports to the DB.
+ * The settlement keeper picks up this value when it runs close_room.
+ */
+export async function exitReadyRoomLp(logger: LpLogger = noopLogger) {
+  if (!env.FEATURES_LP_ENABLED) return;
+
+  const exitWindow = new Date(
+    Date.now() + env.LP_EXIT_HOURS_BEFORE_CLOSE * 60 * 60 * 1000,
+  );
+  const rooms = await Room.find({
+    phase: "active",
+    onChainPoolId: { $ne: null },
+    "lp.status": "deployed",
+    closesAt: { $lte: exitWindow },
+  }).lean();
+  if (rooms.length === 0) return;
+
+  const ready = checkLpReady({
+    requiredBufferLamports: BigInt(env.IL_BUFFER_LAMPORTS_MIN),
+  });
+  if (!ready.ok) {
+    logger.info(`lpExit skipped — ${ready.reason}`);
+    return;
+  }
+
+  for (const room of rooms) {
+    try {
+      const onChainRoomId = BigInt(room.onChainPoolId!);
+      const roomPda = getRoomPda(onChainRoomId);
+      const roomVaultPda = getRoomVaultPda(roomPda);
+      const positionPubkeyStr = room.lp?.positionPubkey;
+      const deployedLamports = BigInt(room.lp?.deployedLamports ?? 0);
+      if (!positionPubkeyStr || deployedLamports === 0n) {
+        await Room.updateOne(
+          { roomId: room.roomId },
+          { $set: { "lp.status": "skipped", "lp.lastError": "no deploy state" } },
+        );
+        continue;
+      }
+
+      const exit = await exitRoomLiquidity({
+        roomPdaStr: roomPda.toBase58(),
+        positionPubkeyStr,
+        deployedLamports,
+        roomVault: new PublicKey(roomVaultPda),
+      });
+      logger.info(
+        `room=${room.roomId} lp exit ok yield=${exit.realizedYieldLamports} ` +
+          `bufferTopUp=${exit.bufferTopUpLamports} dryRun=${exit.dryRun}`,
+      );
+
+      await Room.updateOne(
+        { roomId: room.roomId },
+        {
+          $set: {
+            "lp.status": "exited",
+            "lp.exitedLamports": Number(exit.exitedLamports),
+            "lp.exitedAt": new Date(),
+            "lp.feesLamports": Number(exit.feesLamports),
+            "lp.swapSlippageLamports":
+              Number(exit.swapSlippageLamports) +
+              (room.lp?.swapSlippageLamports ?? 0),
+            "lp.realizedYieldLamports": Number(exit.realizedYieldLamports),
+            "lp.bufferTopUpLamports": Number(exit.bufferTopUpLamports),
+            "lp.removeLiquidityTxSignature": exit.removeLiquidityTxSignature,
+            "lp.removeLiquidityUsdcRaw": exit.removeLiquidityUsdcRaw.toString(),
+            "lp.removeLiquiditySolLamports": Number(
+              exit.removeLiquiditySolLamports,
+            ),
+            "lp.swapOutTxSignature": exit.swapOutTxSignature,
+            "lp.swapOutUsdcRaw": exit.swapOutUsdcRaw.toString(),
+            "lp.swapOutSolLamports": Number(exit.swapOutSolLamports),
+            "lp.depositYieldTxSignature": exit.depositYieldTxSignature,
+          },
+        },
+      );
+    } catch (err) {
+      logger.error(`lpExit room=${room.roomId} failed: ${(err as Error).message}`);
+      await Room.updateOne(
+        { roomId: room.roomId },
+        {
+          $set: {
+            "lp.status": "failed",
+            "lp.lastError": (err as Error).message,
+          },
+        },
+      );
+    }
+  }
+}

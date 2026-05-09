@@ -1,0 +1,14 @@
+[phases.setup]
+nixPkgs = ["nodejs_20", "pnpm-9_x"]
+
+[phases.install]
+cmds = ["pnpm install --frozen-lockfile --ignore-scripts"]
+
+[phases.build]
+cmds = [
+  "pnpm --filter @hooked/shared build",
+  "pnpm --filter @hooked/server build"
+]
+
+[start]
+cmd = "pnpm --filter @hooked/server start"

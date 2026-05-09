@@ -1,0 +1,397 @@
+.fish-index-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.72);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9999999;
+  padding: 16px;
+}
+
+.fish-index-frame {
+  position: relative;
+  width: min(720px, 100%);
+  max-height: 92vh;
+  overflow: hidden;
+  background: linear-gradient(180deg, #0d1f3a 0%, #091528 100%);
+  border: 2px solid #2a7a8a;
+  border-radius: 8px;
+  padding: 12px 18px 16px;
+  color: #f5faff;
+  font-family: inherit;
+  box-shadow: 0 8px 40px rgba(0, 0, 0, 0.55);
+  display: flex;
+  flex-direction: column;
+}
+
+.fish-index-close {
+  position: absolute;
+  top: 8px;
+  right: 10px;
+  width: 28px;
+  height: 28px;
+  background: transparent;
+  border: none;
+  color: #e8eef7;
+  font-size: 18px;
+  font-weight: 700;
+  cursor: pointer;
+  z-index: 3;
+  line-height: 1;
+}
+
+.fish-index-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 8px;
+  padding-right: 28px;
+  flex-shrink: 0;
+}
+
+.fish-index-title {
+  font-family: "Jersey 10", sans-serif;
+  text-shadow: var(--jersey-glow);
+  font-size: clamp(18px, 2.6vw, 26px);
+  color: #fff59a;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.fish-index-counter {
+  font-family: "Jersey 10", sans-serif;
+  text-shadow: var(--jersey-glow);
+  font-size: clamp(12px, 1.6vw, 16px);
+  color: #4fd4d4;
+  letter-spacing: 0.04em;
+}
+
+.fish-index-tiers {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-bottom: 10px;
+  flex-shrink: 0;
+}
+
+.fish-index-tier {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.fish-index-tier-badge {
+  flex: 0 0 72px;
+  text-align: center;
+  padding: 4px 3px;
+  font-family: "Jersey 10", sans-serif;
+  font-size: clamp(10px, 1.3vw, 12px);
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  color: #0b1e36;
+  border-radius: 4px;
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.25), var(--jersey-glow);
+}
+
+.fish-index-tier-slots {
+  flex: 1;
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 5px;
+}
+
+.fish-index-tier-caption {
+  flex: 1;
+  padding: 6px 12px;
+  background: rgba(10, 20, 40, 0.5);
+  border: 1px dashed rgba(224, 86, 77, 0.55);
+  border-radius: 4px;
+  font-size: clamp(11px, 1.4vw, 13px);
+  color: #d8e4f2;
+  font-style: italic;
+  line-height: 1.35;
+}
+
+.fish-index-slot {
+  position: relative;
+  aspect-ratio: 1.35;
+  background: rgba(10, 20, 40, 0.5);
+  border: 2px solid rgba(255, 255, 255, 0.2);
+  border-radius: 4px;
+  padding: 0;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  transition: background 100ms ease, transform 80ms ease;
+}
+
+.fish-index-slot:hover {
+  background: rgba(150, 200, 255, 0.15);
+}
+
+.fish-index-slot-selected {
+  background: rgba(255, 245, 154, 0.18);
+  box-shadow:
+    inset 0 0 0 2px #fff59a,
+    0 0 6px rgba(255, 245, 154, 0.45);
+}
+
+.fish-index-slot-art {
+  width: 85%;
+  height: 85%;
+  object-fit: contain;
+  image-rendering: pixelated;
+}
+
+.fish-index-slot-locked .fish-index-slot-art {
+  filter: brightness(0) opacity(0.35);
+}
+
+.fish-index-slot-lock {
+  position: absolute;
+  bottom: 2px;
+  left: 0;
+  right: 0;
+  text-align: center;
+  font-family: "Jersey 10", sans-serif;
+  text-shadow: var(--jersey-glow);
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.55);
+  letter-spacing: 1px;
+  pointer-events: none;
+}
+
+.fish-index-slot-count {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  padding: 0 4px;
+  font-family: "Jersey 10", sans-serif;
+  text-shadow: var(--jersey-glow);
+  font-size: 11px;
+  font-weight: 700;
+  color: #0b2a12;
+  background: #fff59a;
+  border-radius: 3px;
+  line-height: 1.3;
+  pointer-events: none;
+}
+
+.fish-index-detail {
+  border-top: 1px solid rgba(255, 255, 255, 0.12);
+  padding-top: 10px;
+  display: flex;
+  align-items: center;
+  flex: 1;
+  min-height: 0;
+}
+
+.fish-index-detail-empty {
+  flex: 1;
+  text-align: center;
+  color: #9bb5d8;
+  font-size: clamp(13px, 1.6vw, 16px);
+  font-style: italic;
+  opacity: 0.75;
+}
+
+.fish-index-detail-body {
+  display: flex;
+  gap: 16px;
+  width: 100%;
+  align-items: flex-start;
+}
+
+.fish-index-detail-art {
+  width: 96px;
+  height: 96px;
+  object-fit: contain;
+  image-rendering: pixelated;
+  flex-shrink: 0;
+  background: rgba(0, 0, 0, 0.25);
+  border-radius: 4px;
+  padding: 4px;
+}
+
+.fish-index-detail-art-locked {
+  filter: brightness(0) opacity(0.35);
+}
+
+.fish-index-detail-info {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.fish-index-detail-name {
+  font-family: "Jersey 10", sans-serif;
+  text-shadow: var(--jersey-glow);
+  font-size: clamp(20px, 2.6vw, 28px);
+  letter-spacing: 0.02em;
+  line-height: 1;
+}
+
+.fish-index-detail-rarity {
+  font-size: clamp(12px, 1.6vw, 15px);
+  color: #9bb5d8;
+  text-transform: capitalize;
+  letter-spacing: 0.06em;
+  margin-bottom: 2px;
+}
+
+.fish-index-detail-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: clamp(13px, 1.7vw, 16px);
+  color: #d8e4f2;
+}
+
+.fish-index-detail-row span:first-child {
+  color: #8fa8cc;
+}
+
+.fish-index-detail-hint {
+  font-size: clamp(13px, 1.6vw, 15px);
+  color: rgba(255, 255, 255, 0.55);
+  font-style: italic;
+  margin-top: 4px;
+}
+
+.fish-index-detail-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 4px;
+  flex-wrap: wrap;
+}
+
+.fish-index-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  background: #2b6a3a;
+  border: 1px solid #5ba473;
+  border-radius: 4px;
+  font-family: "Jersey 10", sans-serif;
+  color: #fff;
+  font-weight: 700;
+  font-size: clamp(13px, 1.6vw, 16px);
+  cursor: pointer;
+  letter-spacing: 0.02em;
+  text-shadow: 0 1px 1px rgba(0, 0, 0, 0.5), var(--jersey-glow);
+}
+
+.fish-index-btn:hover:not(:disabled) {
+  background: #34824a;
+}
+
+.fish-index-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.fish-index-btn-all {
+  background: #3a5080;
+  border-color: #5a7ea8;
+}
+
+.fish-index-btn-all:hover:not(:disabled) {
+  background: #466299;
+}
+
+.fish-index-btn-icon {
+  width: 15px;
+  height: 15px;
+  image-rendering: pixelated;
+}
+
+@media (max-width: 640px) {
+  .fish-index-frame {
+    padding: 10px 12px 12px;
+  }
+  .fish-index-title {
+    font-size: 16px;
+  }
+  .fish-index-counter {
+    font-size: 11px;
+  }
+  .fish-index-tiers {
+    gap: 4px;
+    margin-bottom: 6px;
+  }
+  .fish-index-tier {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 3px;
+  }
+  .fish-index-tier-badge {
+    flex: none;
+    width: fit-content;
+    padding: 2px 8px;
+    font-size: 10px;
+  }
+  .fish-index-tier-slots {
+    gap: 4px;
+  }
+  .fish-index-slot {
+    aspect-ratio: 1.2;
+  }
+  .fish-index-slot-lock {
+    font-size: 9px;
+  }
+  .fish-index-slot-count {
+    font-size: 10px;
+  }
+  .fish-index-tier-caption {
+    padding: 5px 10px;
+    font-size: 11px;
+    line-height: 1.3;
+  }
+  .fish-index-detail {
+    padding-top: 6px;
+  }
+  .fish-index-detail-body {
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    gap: 6px;
+  }
+  .fish-index-detail-art {
+    width: 72px;
+    height: 72px;
+    padding: 3px;
+  }
+  .fish-index-detail-name {
+    font-size: 18px;
+  }
+  .fish-index-detail-rarity {
+    font-size: 11px;
+    margin-bottom: 0;
+  }
+  .fish-index-detail-row {
+    justify-content: center;
+    gap: 8px;
+    font-size: 12px;
+  }
+  .fish-index-detail-hint {
+    font-size: 11px;
+  }
+  .fish-index-detail-actions {
+    margin-top: 2px;
+    gap: 5px;
+  }
+  .fish-index-btn {
+    padding: 4px 10px;
+    font-size: 12px;
+  }
+  .fish-index-btn-icon {
+    width: 13px;
+    height: 13px;
+  }
+}

@@ -1,0 +1,27 @@
+[package]
+name = "hooked-rooms"
+version = "0.1.0"
+description = "Hooked rooms program — weekly LP rooms (PRD v2.2), SOL-native deposits + keeper-driven settlement"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "hooked_rooms"
+
+[features]
+default = []
+cpi = ["no-entrypoint"]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+idl-build = ["anchor-lang/idl-build"]
+testing = []
+# No-op features declared so rustc's check-cfg doesn't warn on the
+# `#[cfg(feature = "…")]` attributes that anchor-lang's macros emit.
+anchor-debug = []
+custom-heap = []
+custom-panic = []
+
+[dependencies]
+anchor-lang = { version = "0.32.1" }
+hooked-common = { path = "../../crates/hooked-common" }

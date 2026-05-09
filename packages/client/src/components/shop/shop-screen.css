@@ -1,0 +1,345 @@
+.shop-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+  padding: 16px;
+}
+
+.shop-frame {
+  position: relative;
+  width: min(720px, 100%);
+  aspect-ratio: 989 / 967;
+  background-image: url("/assets/ui/shop.png");
+  background-size: 100% 100%;
+  background-repeat: no-repeat;
+  image-rendering: pixelated;
+  color: #f5faff;
+  font-family: inherit;
+}
+
+.shop-close {
+  position: absolute;
+  top: 1.5%;
+  right: 2%;
+  width: 7%;
+  aspect-ratio: 1;
+  background: transparent;
+  border: none;
+  color: #e8eef7;
+  font-size: clamp(14px, 2.2vw, 20px);
+  font-weight: 700;
+  cursor: pointer;
+  z-index: 3;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.7);
+}
+
+.shop-balance {
+  position: absolute;
+  top: 1.5%;
+  left: -6%;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 7px;
+  background: rgba(0, 0, 0, 0.4);
+  border-radius: 5px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  font-size: clamp(12px, 1.5vw, 14px);
+  z-index: 4;
+}
+
+.shop-shell-icon {
+  width: 16px;
+  height: 16px;
+  image-rendering: pixelated;
+}
+
+.shop-tabs {
+  position: absolute;
+  top: 0%;
+  left: 5.5%;
+  right: 5.5%;
+  height: 10%;
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 5.5%;
+  align-items: center;
+  justify-items: stretch;
+  z-index: 2;
+}
+
+.shop-tab {
+  width: 100%;
+  height: 100%;
+  background: transparent;
+  border: none;
+  color: #e8eef7;
+  font-weight: 700;
+  font-family: "Jersey 10", sans-serif;
+  font-size: clamp(12px, 1.7vw, 20px);
+  letter-spacing: 0.03em;
+  cursor: pointer;
+  padding: 0;
+  text-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.65),
+    var(--jersey-glow);
+  opacity: 0.6;
+  transition:
+    opacity 120ms ease,
+    color 120ms ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+}
+
+.shop-tab:hover:not(.shop-tab-disabled) {
+  opacity: 0.9;
+}
+
+.shop-tab-active {
+  opacity: 1;
+  color: #fff59a;
+}
+
+.shop-tab-disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.shop-grid {
+  position: absolute;
+  top: 13.8%;
+  left: 8%;
+  right: 7.4%;
+  height: 40%;
+  display: grid;
+  grid-template-columns: repeat(8, 1fr);
+  grid-template-rows: repeat(4, 1fr);
+  gap: 5%;
+  z-index: 2;
+}
+
+.shop-slot {
+  position: relative;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  padding: 0;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: visible;
+  transition:
+    background 100ms ease,
+    transform 80ms ease;
+}
+
+.shop-slot-empty {
+  cursor: default;
+}
+
+.shop-slot:hover:not(.shop-slot-empty):not(.shop-slot-selected) {
+  background: rgba(150, 200, 255, 0.15);
+}
+
+.shop-slot-selected {
+  background: rgba(255, 245, 154, 0.2);
+  box-shadow:
+    inset 0 0 0 2px #fff59a,
+    0 0 6px rgba(255, 245, 154, 0.5);
+}
+
+.shop-slot-equipped::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border: 2px solid #8ee599;
+  border-radius: 4px;
+  pointer-events: none;
+  box-shadow: 0 0 4px rgba(142, 229, 153, 0.4);
+}
+
+.shop-slot-locked .shop-slot-art {
+  filter: grayscale(0.5) brightness(0.78);
+  opacity: 0.85;
+}
+
+.shop-slot-art {
+  width: 92%;
+  height: 92%;
+  object-fit: contain;
+  image-rendering: pixelated;
+}
+
+.shop-slot-badge {
+  position: absolute;
+  bottom: 1px;
+  right: 1px;
+  font-size: clamp(7px, 0.9vw, 10px);
+  font-weight: 800;
+  color: #0b2a12;
+  background: #8ee599;
+  padding: 0 3px;
+  border-radius: 2px;
+  line-height: 1.25;
+  z-index: 2;
+}
+
+.shop-detail {
+  position: absolute;
+  top: 65%;
+  left: 8%;
+  right: 8%;
+  bottom: 7%;
+  padding: 2% 3%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2;
+}
+
+.shop-detail-empty {
+  color: #b0c4e0;
+  font-size: clamp(14px, 1.8vw, 18px);
+  font-style: italic;
+  opacity: 0.8;
+}
+
+.shop-detail-body {
+  display: flex;
+  align-items: center;
+  gap: 4%;
+  width: 100%;
+  height: 100%;
+}
+
+.shop-detail-art {
+  height: 90%;
+  aspect-ratio: 1;
+  object-fit: contain;
+  image-rendering: pixelated;
+  flex-shrink: 0;
+}
+
+.shop-detail-info {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.shop-detail-name {
+  font-weight: 800;
+  font-size: clamp(16px, 2.2vw, 32px);
+  color: #fff;
+  letter-spacing: 0.02em;
+  margin-bottom: 4px;
+}
+
+.shop-detail-tier {
+  font-size: clamp(12px, 1.5vw, 14px);
+  color: #9bb5d8;
+  font-weight: 600;
+}
+
+.shop-detail-effect {
+  font-size: clamp(12px, 1.5vw, 14px);
+  color: #d8e4f2;
+  margin-bottom: 6px;
+}
+
+.shop-detail-action {
+  margin-top: 4px;
+}
+
+.shop-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  background: #2f4a78;
+  border: 1px solid #5a7ea8;
+  border-radius: 4px;
+  font-family: "Jersey 10", sans-serif;
+  color: #fff;
+  font-weight: 700;
+  font-size: clamp(12px, 1.6vw, 16px);
+  cursor: pointer;
+  letter-spacing: 0.02em;
+  text-shadow:
+    0 1px 1px rgba(0, 0, 0, 0.5),
+    var(--jersey-glow);
+}
+
+.shop-btn:hover:not(:disabled) {
+  background: #3a5d95;
+}
+
+.shop-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.shop-btn-buy {
+  background: #2b6a3a;
+  border-color: #5ba473;
+}
+
+.shop-btn-buy:hover:not(:disabled) {
+  background: #34824a;
+}
+
+.shop-btn-icon {
+  width: 14px;
+  height: 14px;
+  image-rendering: pixelated;
+}
+
+.shop-detail-equipped {
+  display: inline-block;
+  padding: 6px 14px;
+  background: #1e3a22;
+  color: #8ee599;
+  border: 1px solid #4a7a54;
+  border-radius: 4px;
+  font-size: clamp(11px, 1.5vw, 13px);
+  font-weight: 700;
+}
+
+.shop-error {
+  position: absolute;
+  left: 7.5%;
+  right: 7.5%;
+  bottom: -42px;
+  padding: 6px 12px;
+  background: rgba(90, 25, 25, 0.9);
+  border: 1px solid #a94444;
+  border-radius: 4px;
+  color: #ffd0d0;
+  font-size: 12px;
+  text-align: center;
+}
+
+.shop-notice {
+  position: absolute;
+  left: 8%;
+  right: 8%;
+  bottom: 5%;
+  padding: 5px 10px;
+  background: rgba(30, 50, 80, 0.92);
+  border: 1px solid #4a78c8;
+  border-radius: 4px;
+  color: #d4e4ff;
+  font-size: clamp(10px, 1.3vw, 13px);
+  text-align: center;
+  z-index: 3;
+}
