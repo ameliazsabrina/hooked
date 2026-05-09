@@ -1,0 +1,31 @@
+name: gitleaks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Weekly full-history scan in case patterns or rules change.
+    - cron: "0 6 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    name: scan repo for secrets
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Full history so the scan covers every commit, not just the tip.
+          fetch-depth: 0
+
+      - name: Run gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          # Personal repos do not require GITLEAKS_LICENSE — the action runs
+          # for free. Only org repos need a license. Add GITLEAKS_LICENSE as
+          # a repo secret if/when this repo is transferred to an org.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
