@@ -6,7 +6,7 @@ pub mod state;
 
 pub use instructions::*;
 
-declare_id!("4iF8DPptdoSYt4BX549pzieaoeCg6x7BwbMEwWF5M2hd");
+declare_id!("4ERUTWVN3aJP5tghEcZNd555NGcK3Jr8B21mnBB8JSMg");
 
 #[program]
 pub mod hooked_rooms {

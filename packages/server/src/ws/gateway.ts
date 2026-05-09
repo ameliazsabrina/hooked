@@ -69,6 +69,8 @@ async function loadEquippedBaitSlug(wallet: PublicKey): Promise<string> {
 import {
   BAR_MAX_Y,
   FishRarity,
+  PHYSICS_FIXED_DT,
+  PHYSICS_MAX_STEP_ACCUM,
   buildDifficultyProfile,
   buildCircularTapState,
   computeModifiers,
@@ -110,6 +112,11 @@ interface SessionContext {
   // Physics starts only once the client has sent its first input sample.
   physicsStarted: boolean;
   lastTickAt: number;
+  // Fixed-timestep accumulator (seconds). Mirrors the client's RAF-driven
+  // accumulator in components/fishing/timing-bar.tsx — both sides MUST step
+  // at PHYSICS_FIXED_DT or the shared mulberry32 RNG state diverges within
+  // a few seconds and the fish swims down different trajectories.
+  physicsAccumS: number;
   profile: VerticalProfile;
   greenBarHeight: number;
   game: FishingGameState;
@@ -352,9 +359,25 @@ function advancePhysics(ctx: SessionContext, now: number): void {
   if (!ctx.physicsStarted) return;
   const dtRaw = (now - ctx.lastTickAt) / 1000;
   ctx.lastTickAt = now;
-  const dt = Math.max(0, Math.min(0.1, dtRaw));
-  if (dt === 0) return;
-  stepAll(ctx.game, ctx.profile, ctx.greenBarHeight, ctx.heldLatest, dt);
+  if (dtRaw <= 0) return;
+  // Fixed-timestep loop: drain wall-time into PHYSICS_FIXED_DT chunks. The
+  // client's TimingBar uses the identical accumulator so both sides issue
+  // the same number of stepFishPosition calls per second and consume the
+  // shared mulberry32 RNG sequence in lockstep.
+  ctx.physicsAccumS = Math.min(
+    ctx.physicsAccumS + dtRaw,
+    PHYSICS_MAX_STEP_ACCUM,
+  );
+  while (ctx.physicsAccumS >= PHYSICS_FIXED_DT) {
+    stepAll(
+      ctx.game,
+      ctx.profile,
+      ctx.greenBarHeight,
+      ctx.heldLatest,
+      PHYSICS_FIXED_DT,
+    );
+    ctx.physicsAccumS -= PHYSICS_FIXED_DT;
+  }
 }
 
 function fallbackScore(ctx: SessionContext, hit: boolean): number {
@@ -516,6 +539,7 @@ function resolveCatch(
   ctx.samples = [];
   ctx.heldLatest = false;
   ctx.physicsStarted = false;
+  ctx.physicsAccumS = 0;
   ctx.hooked = false;
   ctx.nibbleSentAt = null;
   ctx.reactionTimeMs = null;
@@ -665,14 +689,47 @@ export default fp(async (fastify) => {
           tickIndex: ctx.game.sampleCount,
         });
       }
-      // Server-authoritative resolution. Both the safety timeout below and
-      // the `final:true` input_samples path read the verdict from
-      // terminalState() — the client's `held` stream drives the physics but
-      // never decides the outcome.
+      // Diagnostic: state snapshot every ~1s. Drop once verified.
+      if (ctx.game.sampleCount % 60 === 0 && ctx.physicsStarted) {
+        console.warn(
+          `[gateway] tick @${ctx.game.sampleCount} ` +
+            `progress=${ctx.game.progress.toFixed(3)} ` +
+            `barY=${ctx.game.barY.toFixed(0)} ` +
+            `fishY=${ctx.game.fishY.toFixed(0)} ` +
+            `held=${ctx.heldLatest}`,
+        );
+      }
+      // Server-authoritative resolution. The server runs its own copy of
+      // the physics every tick; as soon as terminalState() declares a
+      // verdict, we resolve. Previously the server only checked at safety
+      // timeout / on `input_samples final`, which forced resolution against
+      // whatever the server's state happened to be at the moment the client
+      // gave up — even if the server's physics had a different fish position
+      // due to RNG/rate drift. Always resolving on the server's own terminal
+      // state means the player can never lose a cast the server thinks is
+      // still in progress.
+      const terminalNow = terminalState(ctx.game, ctx.greenBarHeight);
+      if (terminalNow !== null) {
+        console.warn(
+          `[gateway] terminal-resolve verdict=${terminalNow} ` +
+            `progress=${ctx.game.progress.toFixed(3)} ` +
+            `fishY=${ctx.game.fishY.toFixed(1)} ` +
+            `castMs=${now - ctx.castStartedAt}`,
+        );
+        resolveCatch(socket, terminalNow === "caught");
+        return;
+      }
       const SAFETY_TIMEOUT_MS = 30_000;
       if (now - ctx.castStartedAt > SAFETY_TIMEOUT_MS) {
-        const terminal = terminalState(ctx.game, ctx.greenBarHeight);
-        resolveCatch(socket, terminal === "caught");
+        console.warn(
+          `[gateway] safety-timeout fired ` +
+            `progress=${ctx.game.progress.toFixed(3)} ` +
+            `barY=${ctx.game.barY.toFixed(1)} ` +
+            `fishY=${ctx.game.fishY.toFixed(1)} ` +
+            `held=${ctx.heldLatest}`,
+        );
+        // Force escape — physics didn't reach terminal in time.
+        resolveCatch(socket, false);
       }
     }, PHYSICS_TICK_MS);
 
@@ -691,19 +748,21 @@ export default fp(async (fastify) => {
 
       switch (msg.type) {
         case "authenticate": {
+          // Temporary diagnostic log — surface why auth keeps failing in the
+          // dev loop. Drop once we've stabilized the auth path.
+          const authFail = (reason: string) => {
+            console.warn(
+              `[gateway] auth_failed wallet=${msg.wallet?.slice(0, 8)}… reason=${reason} hasDelegation=${!!msg.delegation}`,
+            );
+            safeSend(socket, { type: "auth_failed", reason });
+          };
           if (!consumeNonce(msg.wallet, msg.nonce)) {
-            safeSend(socket, {
-              type: "auth_failed",
-              reason: "unknown or expired nonce",
-            });
+            authFail("unknown or expired nonce");
             return;
           }
           if (msg.delegation) {
             if (!verifyDelegation(msg.wallet, msg.delegation)) {
-              safeSend(socket, {
-                type: "auth_failed",
-                reason: "delegation verification failed",
-              });
+              authFail("delegation verification failed");
               return;
             }
             if (
@@ -713,26 +772,17 @@ export default fp(async (fastify) => {
                 msg.signature,
               )
             ) {
-              safeSend(socket, {
-                type: "auth_failed",
-                reason: "session key signature verification failed",
-              });
+              authFail("session key signature verification failed");
               return;
             }
           } else if (!verifySignature(msg.wallet, msg.nonce, msg.signature)) {
-            safeSend(socket, {
-              type: "auth_failed",
-              reason: "signature verification failed",
-            });
+            authFail("signature verification failed");
             return;
           }
           try {
             socket.wallet = new PublicKey(msg.wallet);
           } catch {
-            safeSend(socket, {
-              type: "auth_failed",
-              reason: "invalid wallet pubkey",
-            });
+            authFail("invalid wallet pubkey");
             return;
           }
           addWalletSocket(msg.wallet, socketId);
@@ -851,6 +901,7 @@ export default fp(async (fastify) => {
               // a valid nibble_response.
               physicsStarted: false,
               lastTickAt: castTimestamp,
+              physicsAccumS: 0,
               profile,
               greenBarHeight,
               game,
@@ -900,6 +951,7 @@ export default fp(async (fastify) => {
             heldLatest: false,
             physicsStarted: false,
             lastTickAt: Date.now(),
+            physicsAccumS: 0,
             profile: {} as VerticalProfile,
             greenBarHeight: 0,
             game: {} as FishingGameState,
@@ -990,6 +1042,7 @@ export default fp(async (fastify) => {
           ctx.mechanic = TIMING_BAR_MECHANIC;
           ctx.physicsStarted = true;
           ctx.lastTickAt = Date.now();
+          ctx.physicsAccumS = 0;
           return;
         }
 
@@ -1017,6 +1070,7 @@ export default fp(async (fastify) => {
           if (!ctx.physicsStarted && ctx.mechanic === TIMING_BAR_MECHANIC) {
             ctx.physicsStarted = true;
             ctx.lastTickAt = Date.now();
+            ctx.physicsAccumS = 0;
           }
           // Circular-tap is now resolved exclusively via the
           // `circular_tap_complete` handler, which replays the client's
@@ -1033,15 +1087,21 @@ export default fp(async (fastify) => {
             });
             return;
           }
-          // Timing-bar: server is authoritative. Advance physics to "now" on
-          // the freshest held state, then read the verdict from the server's
-          // own simulation. The client's final-sample `held` bit is ignored —
-          // a player can only catch the fish if the server's physics says
-          // they earned it.
+          // Timing-bar: server is authoritative and resolves on its own
+          // physicsTimer when terminalState() declares a verdict. We do NOT
+          // resolve here on `msg.final` — the client's view of fish position
+          // can drift (different RAF rate vs setInterval rate, different
+          // cumulative RNG state) and forcing resolution against the
+          // server's snapshot at an arbitrary client-driven moment is what
+          // produced the "every cast escapes" bug. Just keep the held state
+          // fresh and let the server's physicsTimer decide.
           if (msg.final && ctx.mechanic === TIMING_BAR_MECHANIC) {
-            advancePhysics(ctx, Date.now());
-            const verdict = terminalState(ctx.game, ctx.greenBarHeight);
-            resolveCatch(socket, verdict === "caught");
+            // No-op intentionally. Logged so we can see when client gives up.
+            console.warn(
+              `[gateway] client-final-ignored ` +
+                `progress=${ctx.game.progress.toFixed(3)} ` +
+                `castMs=${Date.now() - ctx.castStartedAt}`,
+            );
             return;
           }
           return;

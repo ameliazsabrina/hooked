@@ -27,7 +27,7 @@ const envSchema = z.object({
     .default("5wmNbyiSign3mt4dG5ufpcRdizBKqyTGbTtRHvFh94cK"),
   HOOKED_ROOMS_PROGRAM_ID: z
     .string()
-    .default("4iF8DPptdoSYt4BX549pzieaoeCg6x7BwbMEwWF5M2hd"),
+    .default("4ERUTWVN3aJP5tghEcZNd555NGcK3Jr8B21mnBB8JSMg"),
   FEATURES_LP_ENABLED: z
     .enum(["true", "false"])
     .default("false")

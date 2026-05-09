@@ -12,6 +12,17 @@ export const FILL_RATE_PER_SEC = 22 / 100;
 export const BASE_DRAIN_RATE_PER_SEC = (22 / 100) * 1.9;
 export const TICK_HZ = 30;
 export const TICK_DT = 1 / TICK_HZ;
+// Authoritative physics step rate. MUST be identical on client and server:
+// `stepFishPosition` consumes the shared `mulberry32` RNG state once per
+// step (jitter) plus on each direction change, so any rate divergence makes
+// the fish swim down different trajectories on the two sides — the player
+// tracks what they see locally while the server's fish is elsewhere, and
+// every cast resolves as escaped because progress never fills.
+export const PHYSICS_FIXED_DT = 1 / 60;
+// Cap on how much wall-time the accumulator can absorb in a single tick,
+// so a long pause / GC doesn't dump a huge backlog of physics steps in one
+// frame. Mirrors the client's local cap.
+export const PHYSICS_MAX_STEP_ACCUM = 0.1;
 export const INPUT_SAMPLE_HZ = 20;
 export const CHEST_BASE_SPAWN_CHANCE = 0.15;
 export const CHEST_HOLD_SECONDS_REQUIRED = 2;

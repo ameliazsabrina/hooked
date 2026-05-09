@@ -2,11 +2,12 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   BAR_MAX_Y,
   BAR_MIN_Y,
+  PHYSICS_FIXED_DT,
+  PHYSICS_MAX_STEP_ACCUM,
   initialFishingGameState,
   isFishInGreenBar,
   resolveGreenBarHeight,
-  stepAll,
-  terminalState,
+  stepPhysics,
   type FishSpecies,
   type FishingGameState,
   type VerticalProfile,
@@ -34,8 +35,20 @@ interface TimingBarProps {
   } | null;
 }
 
-const FIXED_DT = 1 / 60;
-const MAX_STEP_ACCUM = 0.1;
+// Physics step rate is shared with the server (`PHYSICS_FIXED_DT` /
+// `PHYSICS_MAX_STEP_ACCUM` in @hooked/shared). They MUST match: the
+// fish-position RNG sequence is consumed once per step, so any rate
+// divergence makes the fish swim down different trajectories on the two
+// sides and every cast resolves as escaped. Local aliases kept for terseness
+// in the existing tick loop.
+const FIXED_DT = PHYSICS_FIXED_DT;
+const MAX_STEP_ACCUM = PHYSICS_MAX_STEP_ACCUM;
+// Exponential rate at which the local-predicted bar position is corrected
+// toward the server's authoritative bar position. High because the bar is
+// player-driven and the player needs the input to feel responsive — the
+// correction is mostly invisible because local prediction matches server
+// prediction closely (same heldRef → same stepPhysics).
+const BAR_CORRECTION_PER_SEC = 18;
 // Mirrors server `SAFETY_TIMEOUT_MS` in ws/gateway.ts — cast is force-resolved
 // as escaped once this elapses.
 const CAST_TIMEOUT_S = 30;
@@ -51,7 +64,7 @@ export function TimingBar({
   castStartedAtMs = null,
   onHoldChange,
   onResolve,
-  serverState: _serverState,
+  serverState,
 }: TimingBarProps) {
   const greenBarHeight = useMemo(
     () => resolveGreenBarHeight(profile, rodTier),
@@ -83,29 +96,85 @@ export function TimingBar({
   const resolvedRef = useRef(false);
   const [, force] = useState(0);
 
+  // Snapshot interpolation buffer for fish position + progress. The server
+  // pushes `fishing_state` ~20Hz; we render at 60Hz, interpolating linearly
+  // between the two most recent snapshots with a one-frame display delay.
+  // This is much smoother than chasing a moving target with an exponential
+  // lerp because (a) we never run local stepFishPosition (so there's no
+  // local-vs-server tug-of-war), and (b) the visual fishY/progress are
+  // exact intermediate points between known-good server samples.
+  const prevSnapRef = useRef<{
+    fishY: number;
+    progress: number;
+    recvAt: number;
+  } | null>(null);
+  const lastSnapRef = useRef<{
+    fishY: number;
+    progress: number;
+    recvAt: number;
+  } | null>(null);
+  // Bar (player-controlled): kept locally predicted for input responsiveness.
+  // Lerped toward server snapshots much faster than fish to keep the
+  // catchable area honest without lagging player input.
+  const serverBarTargetRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (!serverState) return;
+    const recvAt =
+      typeof performance !== "undefined" ? performance.now() : Date.now();
+    prevSnapRef.current = lastSnapRef.current;
+    lastSnapRef.current = {
+      fishY: serverState.fishY,
+      progress: serverState.progress,
+      recvAt,
+    };
+    serverBarTargetRef.current = serverState.barY;
+  }, [serverState]);
+
   useEffect(() => {
     const tick = (now: number) => {
       if (!lastFrameRef.current) lastFrameRef.current = now;
       const raw = (now - lastFrameRef.current) / 1000;
       lastFrameRef.current = now;
+
+      // Bar: local prediction at fixed-dt for input feel. Fish is NOT
+      // stepped locally — pure server interpolation below — so the shared
+      // RNG state on the client never advances and there's no local-vs-
+      // server divergence to fight against.
       accumRef.current = Math.min(accumRef.current + raw, MAX_STEP_ACCUM);
       while (accumRef.current >= FIXED_DT) {
-        stepAll(
-          stateRef.current,
-          profile,
-          greenBarHeight,
-          heldRef.current,
-          FIXED_DT,
-        );
+        stepPhysics(stateRef.current, heldRef.current, FIXED_DT);
         accumRef.current -= FIXED_DT;
       }
-      if (!resolvedRef.current) {
-        const outcome = terminalState(stateRef.current, greenBarHeight);
-        if (outcome !== null) {
-          resolvedRef.current = true;
-          onResolve?.(outcome);
-        }
+      // Soft-correct the bar toward server's view — much faster than fish
+      // because the player is actively driving it. This bounds local-bar
+      // drift without lagging the input feel.
+      const barTarget = serverBarTargetRef.current;
+      if (barTarget !== null) {
+        const k = 1 - Math.exp(-BAR_CORRECTION_PER_SEC * raw);
+        stateRef.current.barY += (barTarget - stateRef.current.barY) * k;
       }
+
+      // Fish + progress: snapshot interpolation. With two snapshots, we
+      // render at `last.recvAt` (one server frame behind real-time) and
+      // linearly interpolate to `this.recvAt` as wall time advances. The
+      // 50ms display delay is invisible against typical RAF jitter and
+      // gives perfectly smooth fish motion regardless of when snapshots
+      // happen to land.
+      const last = lastSnapRef.current;
+      const prev = prevSnapRef.current;
+      if (last && prev) {
+        const interval = Math.max(1, last.recvAt - prev.recvAt);
+        const elapsed = now - last.recvAt;
+        const t = Math.max(0, Math.min(1, elapsed / interval));
+        stateRef.current.fishY = prev.fishY + (last.fishY - prev.fishY) * t;
+        stateRef.current.progress =
+          prev.progress + (last.progress - prev.progress) * t;
+      } else if (last) {
+        stateRef.current.fishY = last.fishY;
+        stateRef.current.progress = last.progress;
+      }
+
+      // Don't fire local terminal-resolve — the server is the authority.
       force((n) => (n + 1) % 1_000_000);
       rafRef.current = requestAnimationFrame(tick);
     };
