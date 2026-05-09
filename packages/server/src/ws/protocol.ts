@@ -118,7 +118,18 @@ export interface FishHookedMessage {
   type: "fish_hooked";
   sessionId: string;
   clientCastId: string;
+  /** SPECIES_TABLE index for non-apex casts; -1 when apex rolled. */
   speciesId: number;
+  /** ApexFish ObjectId (24-char hex) when apex rolled; null otherwise. */
+  apexFishId: string | null;
+  /**
+   * Public asset URL for apex catches (admin-uploaded image). Null for
+   * non-apex casts; the client renders those from the static FISH_SPECIES
+   * table lookup keyed on `speciesId`.
+   */
+  apexAssetUrl: string | null;
+  /** Display name (FISH_SPECIES for non-apex, ApexFish.name for apex). */
+  speciesName: string;
   rarity: number;
   mechanic: number;
   greenZoneStart: number;
@@ -154,7 +165,11 @@ export interface CatchResolvedMessage {
   sessionId: string;
   clientCastId: string;
   hit: boolean;
+  /** SPECIES_TABLE index for non-apex catches; -1 when apex was resolved. */
   speciesId: number;
+  apexFishId: string | null;
+  apexAssetUrl: string | null;
+  speciesName: string;
   rarity: number;
   weightHg: number;
   score: number;
@@ -182,20 +197,44 @@ export interface BaitRefilledMessage {
   date: number;
 }
 
-// Client sends this when the circular-tap phase completes with all hits,
-// signalling the server to switch to timing-bar mechanics so the chained
-// second phase resolves correctly (physics, safety-timeout, resolution path).
+/**
+ * One tap as the renderer recorded it. `msSinceTapStart` is the per-tap-local
+ * elapsed time (the renderer resets its tap clock each time it advances), so
+ * the server can replay the spinner physics without needing absolute clocks
+ * or RTT correction.
+ */
+export interface CircularTapInputMsg {
+  tapIndex: number;
+  msSinceTapStart: number;
+}
+
+// Client sends this once the circular-tap phase has completed (whether
+// every tap landed or not). The server replays the taps through its own
+// spinner physics — the boolean outcome is server-authoritative; the
+// client cannot win the encounter by lying about hits. On a server-verified
+// pass the server then chains into the timing-bar second phase (physics,
+// safety-timeout, resolution path) for Legendary/Apex casts.
 export interface CircularTapCompleteMessage {
   type: "circular_tap_complete";
   sessionId: string;
   clientCastId: string;
+  /** Submission order matters; index 0 = first tap of the encounter. */
+  taps: CircularTapInputMsg[];
 }
 
 // Server→client push when the active event transitions (or on initial auth).
 // `active=false` clears any active-event UI. `name` is empty when inactive
-// so the client doesn't need a separate null check; `apexSpeciesIds` is
-// included so the client can render the right fish thumbnails in event
-// announcement HUDs without re-querying.
+// so the client doesn't need a separate null check; `apexFishes` carries
+// each apex fish's id + name + asset URL so HUD banners and announcement
+// modals can render the active pool without re-querying.
+export interface EventStatusApexFish {
+  id: string;
+  name: string;
+  weightMinKg: number;
+  weightMaxKg: number;
+  assetUrl: string;
+}
+
 export interface EventStatusMessage {
   type: "event_status";
   active: boolean;
@@ -203,7 +242,7 @@ export interface EventStatusMessage {
   startsAt: number;
   endsAt: number;
   apexBp: number;
-  apexSpeciesIds: number[];
+  apexFishes: EventStatusApexFish[];
 }
 
 export interface PingMessage {

@@ -70,11 +70,14 @@ import {
   BAR_MAX_Y,
   FishRarity,
   buildDifficultyProfile,
+  buildCircularTapState,
   computeModifiers,
   initialFishingGameState,
   resolveGreenBarHeight,
   stepAll,
   terminalState,
+  validateCircularTapTaps,
+  type CircularProfile,
   type FishingGameState,
   type VerticalProfile,
 } from "@hooked/shared";
@@ -92,6 +95,10 @@ interface SessionContext {
   activeCastId: string | null;
   castStartedAt: number;
   speciesId: number;
+  /** Set when the rolled cast was Apex; otherwise null. */
+  apexFishId: string | null;
+  apexAssetUrl: string | null;
+  speciesName: string;
   rarity: number;
   mechanic: number;
   weightHg: number;
@@ -119,6 +126,14 @@ interface SessionContext {
   // Becomes true after a valid nibble_response (and fish_hooked has been sent).
   // Until then, input_samples are rejected.
   hooked: boolean;
+  // Server-authoritative spinner state for Legendary/Apex casts. Computed at
+  // startSession() time from the same `(rarity, profile)` the renderer sees
+  // so `validateCircularTapTaps` can replay client-reported taps and decide
+  // pass/fail without trusting any boolean from the wire (C-1 fix).
+  circularTap: {
+    profile: CircularProfile;
+    targets: number[];
+  } | null;
 }
 
 const NIBBLE_DELAY_MS = 3000;
@@ -282,7 +297,7 @@ function eventStatusMessage(status: EventStatus | null): ServerMessage {
       startsAt: 0,
       endsAt: 0,
       apexBp: 0,
-      apexSpeciesIds: [],
+      apexFishes: [],
     };
   }
   // Self-healing: an event whose endsAt has passed reads as inactive on the
@@ -297,7 +312,7 @@ function eventStatusMessage(status: EventStatus | null): ServerMessage {
       startsAt: status.startsAt,
       endsAt: status.endsAt,
       apexBp: 0,
-      apexSpeciesIds: [],
+      apexFishes: [],
     };
   }
   return {
@@ -307,7 +322,7 @@ function eventStatusMessage(status: EventStatus | null): ServerMessage {
     startsAt: live.startsAt,
     endsAt: live.endsAt,
     apexBp: live.apexBp,
-    apexSpeciesIds: live.apexSpeciesIds,
+    apexFishes: live.apexFishes,
   };
 }
 
@@ -457,6 +472,9 @@ function resolveCatch(
   const activeCastId = ctx.activeCastId;
   const sessionIdStr = ctx.sessionPda ?? "";
   const speciesId = ctx.speciesId;
+  const apexFishId = ctx.apexFishId;
+  const apexAssetUrl = ctx.apexAssetUrl;
+  const speciesName = ctx.speciesName;
   const rarity = ctx.rarity;
   const fallbackWeight = hit ? ctx.weightHg : 0;
   const fallback = fallbackScore(ctx, hit);
@@ -510,6 +528,9 @@ function resolveCatch(
       clientCastId: activeCastId,
       hit,
       speciesId,
+      apexFishId,
+      apexAssetUrl,
+      speciesName,
       rarity,
       weightHg,
       score,
@@ -763,6 +784,17 @@ export default fp(async (fastify) => {
               rolled.rngSeed,
               computeModifiers({ streak: 0, poolTier: 0, sessionElapsedMs: 0 }),
             ) as VerticalProfile;
+            // For circular casts we additionally pre-compute the canonical
+            // spinner state so the gateway can replay client-reported taps
+            // without trusting any wire boolean (C-1). Targets are derived
+            // deterministically from `(rarity, castCount=0)` — same call
+            // shape the renderer uses on the client.
+            const circularTap =
+              rolled.mechanic === CIRCULAR_TAP_MECHANIC &&
+              (rolled.rarityEnum === FishRarity.Legendary ||
+                rolled.rarityEnum === FishRarity.Apex)
+                ? buildCircularTapState(rolled.rarityEnum, 0)
+                : null;
             const greenBarHeight = resolveGreenBarHeight(profile, 0);
             const game = initialFishingGameState({
               sessionId: sessionPdaStr ?? "local",
@@ -787,6 +819,9 @@ export default fp(async (fastify) => {
               sessionId: sessionPdaStr ?? "",
               clientCastId,
               speciesId: rolled.speciesId,
+              apexFishId: rolled.apexFishId,
+              apexAssetUrl: rolled.apexAssetUrl,
+              speciesName: rolled.speciesName,
               rarity: rolled.rarity,
               mechanic: rolled.mechanic,
               greenZoneStart: 0,
@@ -801,6 +836,9 @@ export default fp(async (fastify) => {
               activeCastId: clientCastId,
               castStartedAt: castTimestamp,
               speciesId: rolled.speciesId,
+              apexFishId: rolled.apexFishId,
+              apexAssetUrl: rolled.apexAssetUrl,
+              speciesName: rolled.speciesName,
               rarity: rolled.rarity,
               mechanic: rolled.mechanic,
               weightHg: rolled.weightHg,
@@ -823,6 +861,7 @@ export default fp(async (fastify) => {
               reactionTimeMs: null,
               preNibbleTapCount: 0,
               hooked: false,
+              circularTap,
             };
             // Acks the cast so the client may begin its splash + idle anim.
             // The fish has been rolled and bait is consumed; the gateway is
@@ -850,6 +889,9 @@ export default fp(async (fastify) => {
             activeCastId: clientCastId,
             castStartedAt: Date.now(),
             speciesId: 0,
+            apexFishId: null,
+            apexAssetUrl: null,
+            speciesName: "",
             rarity: 0,
             mechanic: TIMING_BAR_MECHANIC,
             weightHg: 0,
@@ -868,6 +910,7 @@ export default fp(async (fastify) => {
             reactionTimeMs: null,
             preNibbleTapCount: 0,
             hooked: false,
+            circularTap: null,
           };
           void (async () => {
             const baitSlug = await loadEquippedBaitSlug(wallet);
@@ -907,16 +950,44 @@ export default fp(async (fastify) => {
         }
 
         case "circular_tap_complete": {
-          // Client signals that all circular-tap hits landed. Transition this
-          // cast to timing-bar mechanic so the chained second phase (vertical
-          // timing bar) resolves via the correct server path, including physics
-          // and the safety-timeout safety net.
+          // Server-authoritative resolution of the circular-tap phase. We
+          // replay the client-reported per-tap timestamps through our copy
+          // of the spinner physics; the client's hit/miss claims are never
+          // trusted. On a verified pass we then chain into the timing-bar
+          // second phase (still server-authoritative) for Legendary/Apex.
+          // On a verified fail we resolve the catch as missed immediately.
+          //
+          // C-1 fix: the previous handler trusted the client's "all hits
+          // landed" signal. Sending `circular_tap_complete` was enough to
+          // skip the spinner entirely. Now the gateway recomputes hits from
+          // submitted timestamps against its own copy of the spinner.
           const ctx = socket.session;
           if (!ctx?.activeCastId || ctx.activeCastId !== msg.clientCastId) return;
           if (!ctx.hooked) return;
           if (ctx.mechanic !== CIRCULAR_TAP_MECHANIC) return;
+          if (!ctx.circularTap) {
+            // Should be impossible — startSession sets this for every
+            // circular cast — but fail closed if it ever isn't.
+            console.warn(
+              "[gateway] circular_tap_complete with no server-side state",
+            );
+            resolveCatch(socket, false);
+            return;
+          }
+          const verdict = validateCircularTapTaps({
+            profile: ctx.circularTap.profile,
+            targets: ctx.circularTap.targets,
+            taps: msg.taps ?? [],
+          });
+          if (!verdict.passed) {
+            resolveCatch(socket, false);
+            return;
+          }
+          // Pass. Chain into the timing-bar phase: switch the mechanic and
+          // start physics so the server safety timeout / timing-bar resolver
+          // can take over from here. This matches the legacy path that the
+          // client used to drive after a clean spinner.
           ctx.mechanic = TIMING_BAR_MECHANIC;
-          // Kick off physics so the server safety timeout can act as a fallback.
           ctx.physicsStarted = true;
           ctx.lastTickAt = Date.now();
           return;
@@ -947,20 +1018,19 @@ export default fp(async (fastify) => {
             ctx.physicsStarted = true;
             ctx.lastTickAt = Date.now();
           }
-          // Circular-tap: client encodes per-tap hit/miss as `held` on each
-          // sample. A single miss fails the cast (missesAllowed: 0).
-          //
-          // KNOWN LIMITATION: the server does not yet simulate the spinner
-          // timing windows for circular-tap, so a client that lies and sends
-          // all-`held:true` samples will be accepted here. Closing this needs
-          // a server-side per-tap timing model (track when each hit-zone
-          // opens/closes, validate sample timestamps against the windows).
-          // Tracked as Phase 2 of the C-1 fix. Until then, circular-tap
-          // (Legendary/Apex only) remains client-trusted.
+          // Circular-tap is now resolved exclusively via the
+          // `circular_tap_complete` handler, which replays the client's
+          // tap timestamps through server-side spinner physics (C-1 fix).
+          // Reject any attempt to resolve circular casts via input_samples,
+          // including the legacy "final sample + held bit" path that an
+          // attacker could otherwise use to bypass the spinner entirely.
           if (msg.final && ctx.mechanic === CIRCULAR_TAP_MECHANIC) {
-            const allHit =
-              msg.samples.length > 0 && msg.samples.every((s) => s.held);
-            resolveCatch(socket, allHit);
+            safeSend(socket, {
+              type: "error",
+              code: "wrong_resolution_path",
+              message:
+                "circular-tap casts must resolve via circular_tap_complete",
+            });
             return;
           }
           // Timing-bar: server is authoritative. Advance physics to "now" on

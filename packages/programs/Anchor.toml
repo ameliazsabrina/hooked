@@ -24,7 +24,7 @@ url = "https://api.apr.dev"
 # RPC, set ANCHOR_PROVIDER_URL in your shell — never paste an API-keyed URL here,
 # Anchor.toml is committed to git.
 cluster = "devnet"
-wallet = "~/.config/solana/id.json"
+wallet = "~/.config/solana/hooked.json"
 
 [scripts]
 test = "pnpm ts-mocha -p ./tsconfig.json -t 1000000 tests/**/*.ts"

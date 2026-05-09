@@ -11,6 +11,7 @@ import { ShopScreen } from "~/components/shop/shop-screen";
 import { StorageScreen } from "~/components/storage/storage-screen";
 import { HudOverlay } from "~/components/hud/hud-overlay";
 import { EventAlert } from "~/components/hud/event-alert";
+import { EventBanner } from "~/components/hud/event-banner";
 import { EquippedGear } from "~/components/hud/equipped-gear";
 import { BaitTimer } from "~/components/hud/bait-timer";
 import { TimingBar } from "~/components/fishing/timing-bar";
@@ -188,6 +189,7 @@ export function GameLayout({ nickname, ready }: GameLayoutProps) {
               score={fishing.score}
             />
             <EventAlert status={fishing.eventStatus} />
+            <EventBanner status={fishing.eventStatus} />
             <BaitTimer />
             <EquippedGear />
 

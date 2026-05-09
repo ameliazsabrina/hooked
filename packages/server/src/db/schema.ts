@@ -90,8 +90,15 @@ const catchSchema = new Schema(
     castIndex: { type: Number, default: null },
     // Numeric species id (matches SPECIES_TABLE in services/fishing/constants.ts).
     // The string `species` field is the human-facing label; speciesId is the
-    // canonical identifier for audit and migrations.
+    // canonical identifier for audit and migrations. Null on apex catches —
+    // those are identified by `apexFishId` instead.
     speciesId: { type: Number, default: null },
+    apexFishId: {
+      type: Schema.Types.ObjectId,
+      ref: "ApexFish",
+      default: null,
+      index: true,
+    },
     species: { type: String, required: true },
     rarity: {
       type: String,
@@ -436,6 +443,49 @@ playerBountyProgressSchema.index(
 );
 
 // ---------------------------------------------------------------------------
+// ApexFish — admin-uploaded apex fish definition. Replaces the legacy
+// filesystem catalog (PNGs in client/public/assets/fish/apex + entries in
+// FISH_SPECIES). Image bytes are stored inline as a Buffer; the public
+// `GET /admin/apex-fish/:id/image` route streams them. Weights are stored
+// in kilograms (admin UX); converted to hectograms (×10) when snapshot onto
+// a session for the cast roll's integer math.
+// ---------------------------------------------------------------------------
+const APEX_IMAGE_MIME_TYPES = [
+  "image/png",
+  "image/jpeg",
+  "image/webp",
+] as const;
+
+const apexFishSchema = new Schema(
+  {
+    name: {
+      type: String,
+      required: true,
+      unique: true,
+      trim: true,
+      minlength: 1,
+      maxlength: 64,
+    },
+    weightMinKg: { type: Number, required: true, min: 0 },
+    weightMaxKg: { type: Number, required: true, min: 0 },
+    imageData: { type: Buffer, required: true },
+    imageMimeType: {
+      type: String,
+      required: true,
+      enum: APEX_IMAGE_MIME_TYPES,
+    },
+    createdBy: { type: String, required: true },
+  },
+  { timestamps: true },
+);
+apexFishSchema.pre("validate", function (next) {
+  if (this.weightMaxKg < this.weightMinKg) {
+    return next(new Error("weightMaxKg must be ≥ weightMinKg"));
+  }
+  next();
+});
+
+// ---------------------------------------------------------------------------
 // FishingEvent — admin-managed event window that gates Apex fish drops and
 // holds an optional SOL prize pool. One document per event; `active: true`
 // is enforced as unique by a partial index so only one event is live at a
@@ -443,9 +493,11 @@ playerBountyProgressSchema.index(
 // next-scheduled event to active when its `startsAt` arrives and demotes
 // it when `endsAt` passes.
 //
-// `apexSpeciesIds` references FISH_SPECIES indices (in @hooked/shared) where
-// rarity === Apex. Cast rolls during this event only pick from this list
-// when the rarity tier lands on Apex (services/fishing/rng.ts:rollCast).
+// `apexFishIds` references the `ApexFish` collection. Cast rolls during this
+// event only pick from this list when the rarity tier lands on Apex (see
+// services/fishing/rng.ts:rollCast). The session-start snapshot
+// (`eventApexFishesAtStart`) freezes the chosen pool + weight ranges so an
+// admin can't retroactively change Apex availability mid-session.
 //
 // `finalRanks` is computed after `endsAt` by services/eventWinners.ts and
 // mirrors `roomWinnerSchema` so the existing `bountySolPayout` keeper
@@ -478,14 +530,14 @@ const fishingEventSchema = new Schema(
     // distribution stays well-formed; see effectiveRarityWeights in rng.ts.
     apexBp: { type: Number, required: true, min: 0, max: 5000 },
     prizePoolSol: { type: Number, required: true, default: 0, min: 0 },
-    // FISH_SPECIES indices (rarity === Apex). At least one required so a cast
-    // that rolls Apex during this event always has a species to land on.
-    apexSpeciesIds: {
-      type: [Number],
+    // ApexFish ObjectIds (admin-uploaded catalog). At least one required so a
+    // cast that rolls Apex during this event always has a fish to land on.
+    apexFishIds: {
+      type: [{ type: Schema.Types.ObjectId, ref: "ApexFish" }],
       required: true,
       validate: {
-        validator: (v: number[]) => Array.isArray(v) && v.length >= 1,
-        message: "apexSpeciesIds must contain at least one species id",
+        validator: (v: unknown[]) => Array.isArray(v) && v.length >= 1,
+        message: "apexFishIds must contain at least one fish id",
       },
     },
     // Populated by services/eventWinners.computeEventWinners after endsAt.
@@ -560,7 +612,16 @@ const fishingDailySeedSchema = new Schema(
 const pendingCastSchema = new Schema(
   {
     castIndex: { type: Number, required: true },
-    speciesId: { type: Number, required: true },
+    // Numeric SPECIES_TABLE index for non-apex casts. Null when the cast
+    // rolled Apex — the rolled fish is identified by `apexFishId` (a doc
+    // in the admin-managed `ApexFish` collection) instead, since the apex
+    // catalog is dynamic and not represented in SPECIES_TABLE.
+    speciesId: { type: Number, default: null },
+    apexFishId: { type: Schema.Types.ObjectId, ref: "ApexFish", default: null },
+    // Display name from FISH_SPECIES (non-apex) or ApexFish.name (apex).
+    // Persisted at cast time so the catch row gets a stable label even if
+    // the apex fish is later renamed.
+    speciesName: { type: String, default: null },
     rarity: { type: Number, required: true, min: 0, max: 4 },
     weightHg: { type: Number, required: true },
     greenZoneStart: { type: Number, required: true },
@@ -632,15 +693,28 @@ const fishingSessionSchema = new Schema(
 
     // Snapshot of the active FishingEvent at session start so an admin can't
     // retroactively change Apex availability or species choice for an already-
-    // rolled session. `eventNameAtStart` replaces the legacy numeric `kind`
-    // since events are now admin-named (Phase: events). `eventApexSpeciesAtStart`
-    // pins the apex species pool so cast rolls in this session only return
-    // species the admin selected at session-start time, even if the event is
-    // later edited.
+    // rolled session. `eventApexFishesAtStart` pins the apex fish pool +
+    // weight ranges so cast rolls in this session always resolve against the
+    // pool the admin selected at session-start time, even if the event (or
+    // an individual ApexFish doc) is later edited.
     eventActiveAtStart: { type: Boolean, required: true, default: false },
     eventNameAtStart: { type: String, default: null },
     eventApexBpAtStart: { type: Number, required: true, default: 0 },
-    eventApexSpeciesAtStart: { type: [Number], required: true, default: [] },
+    eventApexFishesAtStart: {
+      type: [
+        new Schema(
+          {
+            apexFishId: { type: Schema.Types.ObjectId, required: true },
+            name: { type: String, required: true },
+            weightMinHg: { type: Number, required: true },
+            weightMaxHg: { type: Number, required: true },
+          },
+          { _id: false },
+        ),
+      ],
+      required: true,
+      default: [],
+    },
   },
   { timestamps: true },
 );
@@ -661,6 +735,7 @@ export type FishingSessionDocument = InferSchemaType<typeof fishingSessionSchema
 export type FishingDailySeedDocument = InferSchemaType<typeof fishingDailySeedSchema>;
 export type FishingEventDocument = InferSchemaType<typeof fishingEventSchema>;
 export type FishingEventFinalRank = InferSchemaType<typeof fishingEventFinalRankSchema>;
+export type ApexFishDocument = InferSchemaType<typeof apexFishSchema>;
 export type ReactionLogDocument = InferSchemaType<typeof reactionLogSchema>;
 export type PoolTierDocument = InferSchemaType<typeof poolTierSchema>;
 export type DailyLeaderboardDocument = InferSchemaType<typeof dailyLeaderboardSchema>;
@@ -668,6 +743,9 @@ export type RoomDocument = InferSchemaType<typeof roomSchema>;
 export type AdminAuditLogDocument = InferSchemaType<typeof adminAuditLogSchema>;
 export type BountyPeriodDocument = InferSchemaType<typeof bountyPeriodSchema>;
 export type PlayerBountyProgressDocument = InferSchemaType<typeof playerBountyProgressSchema>;
+
+export const APEX_IMAGE_MIME_TYPES_LIST = APEX_IMAGE_MIME_TYPES;
+export type ApexImageMimeType = (typeof APEX_IMAGE_MIME_TYPES)[number];
 
 // Reuse an already-registered model if the module graph is loaded twice
 // (happens under Vitest when multiple test files import schema.ts).
@@ -686,6 +764,7 @@ export const Catch = model("Catch", catchSchema);
 export const FishingSession = model("FishingSession", fishingSessionSchema);
 export const FishingDailySeed = model("FishingDailySeed", fishingDailySeedSchema);
 export const FishingEvent = model("FishingEvent", fishingEventSchema);
+export const ApexFish = model("ApexFish", apexFishSchema);
 export const ReactionLog = model("ReactionLog", reactionLogSchema);
 export const PoolTier = model("PoolTier", poolTierSchema);
 export const DailyLeaderboard = model(

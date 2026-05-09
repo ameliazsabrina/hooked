@@ -10,7 +10,18 @@
  * before the lifecycle worker flips the flag. Mirrors the original on-chain
  * `initiate_cast` semantics.
  */
-import { FishingEvent } from "../db/schema.js";
+import { ApexFish, FishingEvent } from "../db/schema.js";
+import { env } from "../config/env.js";
+
+export interface ApexFishStatusEntry {
+  /** ApexFish ObjectId, 24-char hex. */
+  id: string;
+  name: string;
+  weightMinKg: number;
+  weightMaxKg: number;
+  /** Public asset URL for the dashboard / player client to render. */
+  assetUrl: string;
+}
 
 export interface EventStatus {
   /** Admin-typed event display name (e.g. "Colosseum"). */
@@ -21,8 +32,12 @@ export interface EventStatus {
   endsAt: number;
   /** Basis points (0..5000) redirected from Basic to Apex during the event. */
   apexBp: number;
-  /** FISH_SPECIES indices the cast roll picks from when Apex is rolled. */
-  apexSpeciesIds: number[];
+  /**
+   * Apex fish the cast roll picks from when Apex rolls during this event.
+   * Includes assetUrl + name so HUD banners can show fish art without an
+   * extra round-trip.
+   */
+  apexFishes: ApexFishStatusEntry[];
 }
 
 const CACHE_TTL_MS = 30_000;
@@ -39,9 +54,9 @@ function statusEqual(a: EventStatus | null, b: EventStatus | null): boolean {
   if (a.startsAt !== b.startsAt) return false;
   if (a.endsAt !== b.endsAt) return false;
   if (a.apexBp !== b.apexBp) return false;
-  if (a.apexSpeciesIds.length !== b.apexSpeciesIds.length) return false;
-  for (let i = 0; i < a.apexSpeciesIds.length; i++) {
-    if (a.apexSpeciesIds[i] !== b.apexSpeciesIds[i]) return false;
+  if (a.apexFishes.length !== b.apexFishes.length) return false;
+  for (let i = 0; i < a.apexFishes.length; i++) {
+    if (a.apexFishes[i].id !== b.apexFishes[i].id) return false;
   }
   return true;
 }
@@ -56,12 +71,31 @@ async function fetchFromDb(): Promise<EventStatus | null> {
     endsAt: { $gt: now },
   }).lean();
   if (!row) return null;
+  const fishes = await ApexFish.find(
+    { _id: { $in: row.apexFishIds } },
+    { name: 1, weightMinKg: 1, weightMaxKg: 1 },
+  ).lean();
+  // Preserve the order admins selected so deterministic apex picks match
+  // (the cast roll uses the snapshot which is built off the same order).
+  const byId = new Map(fishes.map((f) => [String(f._id), f]));
+  const apexFishes: ApexFishStatusEntry[] = [];
+  for (const id of row.apexFishIds) {
+    const f = byId.get(String(id));
+    if (!f) continue;
+    apexFishes.push({
+      id: String(f._id),
+      name: f.name,
+      weightMinKg: f.weightMinKg,
+      weightMaxKg: f.weightMaxKg,
+      assetUrl: `${env.SERVER_PUBLIC_URL}/admin/apex-fish/${String(f._id)}/image`,
+    });
+  }
   return {
     name: row.name,
     startsAt: Math.floor(row.startsAt.getTime() / 1000),
     endsAt: Math.floor(row.endsAt.getTime() / 1000),
     apexBp: row.apexBp,
-    apexSpeciesIds: row.apexSpeciesIds,
+    apexFishes,
   };
 }
 

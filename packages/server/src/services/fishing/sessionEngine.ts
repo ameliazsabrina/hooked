@@ -23,17 +23,22 @@ export interface StartSessionInput {
   tier: number;
   /**
    * Snapshot of the active FishingEvent at session start. Captured by value
-   * so an admin can't retroactively change Apex availability or species
-   * choice for an already-rolled session. `name` is the admin-set display
-   * name; `apexSpeciesIds` pins which fish the cast roll picks from when
-   * Apex is rolled (see services/fishing/rng.ts:rollCast). Both unused
-   * when no event is active.
+   * so an admin can't retroactively change Apex availability or fish choice
+   * for an already-rolled session. `apexFishes` pins the apex pool + weight
+   * ranges (in hg) used when Apex is rolled — see rng.ts:rollCast. The
+   * `apexFishId`/`name` fields are baked in so a later edit/delete on the
+   * underlying ApexFish doc doesn't change anything mid-session.
    */
   event?: {
     active: true;
     name: string;
     apexBp: number;
-    apexSpeciesIds: number[];
+    apexFishes: Array<{
+      apexFishId: string;
+      name: string;
+      weightMinHg: number;
+      weightMaxHg: number;
+    }>;
   };
   /** Daily seed identifier for audit linkage (e.g. "2026-05-09"). */
   dailySeedDate: string;
@@ -95,7 +100,12 @@ export async function startSession(input: StartSessionInput): Promise<StartSessi
     eventActiveAtStart: input.event?.active ?? false,
     eventNameAtStart: input.event?.name ?? null,
     eventApexBpAtStart: input.event?.apexBp ?? 0,
-    eventApexSpeciesAtStart: input.event?.apexSpeciesIds ?? [],
+    eventApexFishesAtStart: (input.event?.apexFishes ?? []).map((f) => ({
+      apexFishId: f.apexFishId,
+      name: f.name,
+      weightMinHg: f.weightMinHg,
+      weightMaxHg: f.weightMaxHg,
+    })),
   });
 
   return {
@@ -119,10 +129,15 @@ export async function startSession(input: StartSessionInput): Promise<StartSessi
  *
  * Leaf encoding (per catch, big-endian):
  *   castIndex (u32) || speciesId (u8) || rarity (u8) || weightHg (u16) || score (u32)
+ *   if rarity == Apex (4):
+ *     || apexFishId (12 raw ObjectId bytes)
+ *   The speciesId byte is 0xFF for apex catches (sentinel — apex isn't
+ *   represented in SPECIES_TABLE).
  */
 export function computeSessionDigest(catches: ReadonlyArray<{
   castIndex: number;
-  speciesId: number;
+  speciesId: number | null;
+  apexFishId?: string | null;
   rarity: number;
   weightHg: number;
   score: number;
@@ -133,13 +148,24 @@ export function computeSessionDigest(catches: ReadonlyArray<{
   // collide with an arbitrary external sha256 of empty bytes.
   hasher.update("hooked:session:v1\n");
   for (const c of sorted) {
+    const isApex = c.rarity === 4;
+    const speciesByte = isApex ? 0xff : (c.speciesId ?? 0);
     const buf = Buffer.alloc(4 + 1 + 1 + 2 + 4);
     buf.writeUInt32BE(c.castIndex, 0);
-    buf.writeUInt8(c.speciesId, 4);
+    buf.writeUInt8(speciesByte & 0xff, 4);
     buf.writeUInt8(c.rarity, 5);
     buf.writeUInt16BE(c.weightHg, 6);
     buf.writeUInt32BE(c.score, 8);
     hasher.update(buf);
+    if (isApex) {
+      // 12 raw ObjectId bytes — zero-filled when apexFishId is missing
+      // (defensive; the cast-engine path always populates it for apex).
+      const idBuf = Buffer.alloc(12);
+      if (c.apexFishId && /^[0-9a-f]{24}$/i.test(c.apexFishId)) {
+        Buffer.from(c.apexFishId, "hex").copy(idBuf);
+      }
+      hasher.update(idBuf);
+    }
   }
   return hasher.digest();
 }
@@ -205,7 +231,8 @@ export async function commitSession(input: CommitSessionInput): Promise<CommitSe
   const digest = computeSessionDigest(
     catches.map((c) => ({
       castIndex: c.castIndex ?? 0,
-      speciesId: c.speciesId ?? 0,
+      speciesId: c.speciesId ?? null,
+      apexFishId: c.apexFishId ? String(c.apexFishId) : null,
       rarity: RARITY_NAME_TO_INT[c.rarity] ?? 0,
       // weightKg → weightHg (× 10) to match the leaf encoding domain.
       weightHg: Math.round(c.weightKg * 10),

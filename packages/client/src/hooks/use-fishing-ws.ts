@@ -89,6 +89,9 @@ type ServerMessage =
       sessionId: string;
       clientCastId: string;
       speciesId: number;
+      apexFishId: string | null;
+      apexAssetUrl: string | null;
+      speciesName: string;
       rarity: number;
       mechanic: number;
       greenZoneStart: number;
@@ -121,6 +124,9 @@ type ServerMessage =
       clientCastId: string;
       hit: boolean;
       speciesId: number;
+      apexFishId: string | null;
+      apexAssetUrl: string | null;
+      speciesName: string;
       rarity: number;
       weightHg: number;
       score: number;
@@ -135,7 +141,13 @@ type ServerMessage =
       startsAt: number;
       endsAt: number;
       apexBp: number;
-      apexSpeciesIds: number[];
+      apexFishes: Array<{
+        id: string;
+        name: string;
+        weightMinKg: number;
+        weightMaxKg: number;
+        assetUrl: string;
+      }>;
     }
   | { type: "error"; code: string; message: string }
   | { type: "pong"; t: number };
@@ -186,7 +198,13 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
     startsAt: number;
     endsAt: number;
     apexBp: number;
-    apexSpeciesIds: number[];
+    apexFishes: Array<{
+      id: string;
+      name: string;
+      weightMinKg: number;
+      weightMaxKg: number;
+      assetUrl: string;
+    }>;
   } | null>(null);
   const [serverSnapshot, setServerSnapshot] = useState<{
     barY: number;
@@ -459,7 +477,22 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
         const onChainMechanic = getInteractionMechanic(rarity);
         setFishRarity(rarity);
         setMechanic(onChainMechanic);
-        setSpecies(getSpeciesData(msg.speciesId));
+        // For apex casts the catalog lives in MongoDB, not FISH_SPECIES — use
+        // the server-supplied name + URL directly. Non-apex casts keep the
+        // FISH_SPECIES lookup so existing assets (rod-icon mapping, etc.)
+        // continue to resolve.
+        if (msg.apexFishId && msg.apexAssetUrl) {
+          setSpecies({
+            name: msg.speciesName,
+            rarity: FishRarity.Apex,
+            zone: getSpeciesData(0).zone,
+            weightMin: 0,
+            weightMax: 0,
+            asset: msg.apexAssetUrl,
+          });
+        } else {
+          setSpecies(getSpeciesData(msg.speciesId));
+        }
         setServerSnapshot(null);
 
         const diffSeed = msg.rngSeed >>> 0;
@@ -514,15 +547,21 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
       case "catch_resolved": {
         activeCastIdRef.current = null;
         if (msg.hit) {
-          const species = getSpeciesData(msg.speciesId);
           const rarity = mapRarity(msg.rarity);
+          const isApex = !!msg.apexFishId && !!msg.apexAssetUrl;
+          const speciesName = isApex
+            ? msg.speciesName
+            : getSpeciesData(msg.speciesId).name;
+          const speciesAsset = isApex
+            ? msg.apexAssetUrl!
+            : getSpeciesData(msg.speciesId).asset;
           const caught: CaughtFish = {
             id: `pending:${crypto.randomUUID()}`,
-            species: species.name,
+            species: speciesName,
             rarity,
             weightKg: msg.weightHg / 10,
             score: msg.score,
-            asset: species.asset,
+            asset: speciesAsset,
             shellValue: 0,
             caughtAt: new Date().toISOString(),
           };
@@ -530,9 +569,9 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
           setScore((s) => s + msg.score);
           setCatches((c) => [...c, caught]);
           setDiscoveredSpecies((prev) => {
-            if (prev.has(species.name)) return prev;
+            if (prev.has(speciesName)) return prev;
             const next = new Set(prev);
-            next.add(species.name);
+            next.add(speciesName);
             return next;
           });
           setState("caught");
@@ -559,7 +598,7 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
           startsAt: msg.startsAt,
           endsAt: msg.endsAt,
           apexBp: msg.apexBp,
-          apexSpeciesIds: msg.apexSpeciesIds,
+          apexFishes: msg.apexFishes,
         });
         return;
       }
@@ -773,39 +812,44 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
       const seed = difficulty?.seed ?? 1;
       const mods = difficulty?.mods;
 
+      // Send the per-tap timing payload up to the server. The server replays
+      // the spinner physics on these timestamps and decides pass/fail itself
+      // (C-1: server-authoritative resolution). Path is the same whether we
+      // hit or missed locally — the server's verdict is what matters, and
+      // for a verified pass it then drives the chained timing-bar phase.
+      const taps = tapResults.map((r, i) => ({
+        tapIndex: i,
+        msSinceTapStart: r.tapTimeMs ?? -1,
+      }));
+      const ws = wsRef.current;
+      const castId = activeCastIdRef.current;
+      if (ws && ws.readyState === WebSocket.OPEN && castId) {
+        ws.send(
+          JSON.stringify({
+            type: "circular_tap_complete",
+            sessionId: sessionId ?? "",
+            clientCastId: castId,
+            taps,
+          }),
+        );
+      }
+
+      // If our local prediction is allHit + we have a secondary profile,
+      // optimistically transition to the timing-bar UI so the player sees
+      // the second phase mount immediately. The server is doing its own
+      // validation in parallel; if it disagrees the verdict we receive on
+      // catch_resolved will be hit=false and the UI will surface the miss.
       if (allHit && secondary && mods) {
         console.warn("[circular-tap] chaining to timing bar phase");
-        // Notify the server so it switches ctx.mechanic → TIMING_BAR and
-        // starts physics. Without this the server would try to resolve the
-        // timing-bar final sample using CIRCULAR_TAP logic, which works for
-        // a single {held:true} sample but skips physics and the safety timeout.
-        const ws = wsRef.current;
-        const castId = activeCastIdRef.current;
-        if (ws && ws.readyState === WebSocket.OPEN && castId) {
-          ws.send(
-            JSON.stringify({
-              type: "circular_tap_complete",
-              sessionId: sessionId ?? "",
-              clientCastId: castId,
-            }),
-          );
-        }
         setMechanic("timing_bar");
         setDifficulty({ seed, mods, profile: secondary });
         setState("reeling");
-        return;
       }
-
-      const now = Date.now();
-      const samples = tapResults.map((r, i) => ({
-        held: r.hit,
-        index: i,
-        t_ms: now + i,
-      }));
-      console.warn(`[circular-tap] sending ${samples.length} samples to server, final=true, ws=${wsRef.current?.readyState === WebSocket.OPEN ? "open" : "closed"}`);
-      sendInputSamples(samples, true);
+      // If we predicted a miss locally, we keep waiting for catch_resolved
+      // (which the server will send after its own validation). No further
+      // input_samples are needed — the server rejects that path now.
     },
-    [sendInputSamples, difficulty, sessionId],
+    [difficulty, sessionId],
   );
 
   const onTimingBarResolve = useCallback(

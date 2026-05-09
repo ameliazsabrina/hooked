@@ -68,3 +68,5 @@ secrets/
 
 # --- Test fixtures we don't ship ---
 packages/server/tests/
+
+.github

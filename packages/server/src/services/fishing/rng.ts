@@ -1,5 +1,7 @@
 import { createHmac } from "node:crypto";
 
+import { FISH_SPECIES } from "@hooked/shared";
+
 import {
   BPS_SCALE,
   DAY_RARITY_WEIGHTS,
@@ -11,7 +13,13 @@ import {
   SPECIES_PER_RARITY,
   SPECIES_TABLE,
 } from "./constants.js";
-import { Mechanic, Rarity, Window, type CastRoll } from "./types.js";
+import {
+  Mechanic,
+  Rarity,
+  Window,
+  type ApexFishRollEntry,
+  type CastRoll,
+} from "./types.js";
 
 /**
  * Per-cast 32-byte seed derived from a daily secret + cast-identifying inputs.
@@ -69,11 +77,11 @@ export function shouldForceRare(castCount: number, pity: number): boolean {
  * Pure function of inputs — no IO, no Date.now. Caller is responsible for
  * pity bookkeeping and persisting the result.
  *
- * `apexSpeciesIds` (optional): when an Apex tier rolls, pick uniformly from
- * this list instead of the legacy `RARITY_START_INDEX[Apex]..+SPECIES_PER_
- * RARITY[Apex]` slice. Lets the admin restrict which apex fish drop during
- * an event without changing the static SPECIES_TABLE. When undefined or
- * empty, falls back to the legacy slice so non-event sessions keep working.
+ * Apex casts pick uniformly from `apexFishes` (the session-start snapshot of
+ * the active event's `ApexFish` pool) and use the entry's weight range
+ * directly — the apex catalog lives in MongoDB and isn't part of
+ * SPECIES_TABLE. When apex rolls and the snapshot is empty, the function
+ * throws (the session shouldn't have allowed an apex roll without an event).
  */
 export function rollCast(input: {
   seedBytes: Buffer;
@@ -81,34 +89,48 @@ export function rollCast(input: {
   apexBp: number;
   castCount: number;
   pity: number;
-  apexSpeciesIds?: readonly number[];
+  apexFishes?: readonly ApexFishRollEntry[];
 }): CastRoll {
   let rarity = rollRarity(input.seedBytes, input.window, input.apexBp);
   if (shouldForceRare(input.castCount, input.pity) && rarity === Rarity.Basic) {
     rarity = Rarity.Rare;
   }
 
-  let speciesIdx: number;
-  if (
-    rarity === Rarity.Apex &&
-    input.apexSpeciesIds &&
-    input.apexSpeciesIds.length > 0
-  ) {
-    // Event-overridden apex pool. Each id must reference an Apex-rarity entry
-    // in SPECIES_TABLE; the admin router validates this before persisting.
-    const idx = input.seedBytes[2] % input.apexSpeciesIds.length;
-    speciesIdx = input.apexSpeciesIds[idx];
-    if (speciesIdx < 0 || speciesIdx >= SPECIES_COUNT) {
-      throw new Error(`apexSpeciesIds[${idx}]=${speciesIdx} out of range`);
+  if (rarity === Rarity.Apex) {
+    if (!input.apexFishes || input.apexFishes.length === 0) {
+      throw new Error(
+        "Apex rolled but apexFishes snapshot is empty (no event active or " +
+          "no apex fish configured for the event)",
+      );
     }
-  } else {
-    const start = RARITY_START_INDEX[rarity];
-    const count = SPECIES_PER_RARITY[rarity];
-    if (count === 0) throw new Error(`No species for rarity ${rarity}`);
-    const speciesRoll = input.seedBytes[2] % count;
-    speciesIdx = start + speciesRoll;
-    if (speciesIdx >= SPECIES_COUNT) throw new Error(`speciesIdx ${speciesIdx} >= ${SPECIES_COUNT}`);
+    const idx = input.seedBytes[2] % input.apexFishes.length;
+    const fish = input.apexFishes[idx];
+    const weightRand = input.seedBytes.readUInt16LE(3);
+    const range = fish.weightMaxHg - fish.weightMinHg;
+    const weightHg = range > 0
+      ? fish.weightMinHg + (weightRand % (range + 1))
+      : fish.weightMinHg;
+    const greenRand = input.seedBytes.readUInt16LE(5);
+    const maxStart = BPS_SCALE - GREEN_ZONE_WIDTH_BPS;
+    const greenZoneStart = greenRand % (maxStart + 1);
+    return {
+      rarity,
+      speciesId: -1,
+      apexFishId: fish.apexFishId,
+      speciesName: fish.name,
+      weightHg,
+      greenZoneStart,
+      greenZoneWidth: GREEN_ZONE_WIDTH_BPS,
+      mechanic: Mechanic.CircularTap,
+    };
   }
+
+  const start = RARITY_START_INDEX[rarity];
+  const count = SPECIES_PER_RARITY[rarity];
+  if (count === 0) throw new Error(`No species for rarity ${rarity}`);
+  const speciesRoll = input.seedBytes[2] % count;
+  const speciesIdx = start + speciesRoll;
+  if (speciesIdx >= SPECIES_COUNT) throw new Error(`speciesIdx ${speciesIdx} >= ${SPECIES_COUNT}`);
 
   const species = SPECIES_TABLE[speciesIdx];
   const weightRand = input.seedBytes.readUInt16LE(3);
@@ -120,10 +142,13 @@ export function rollCast(input: {
   const greenZoneStart = greenRand % (maxStart + 1);
 
   const mechanic = rarity >= Rarity.Legendary ? Mechanic.CircularTap : Mechanic.TimingBar;
+  const speciesName = FISH_SPECIES[speciesIdx]?.name ?? `species_${speciesIdx}`;
 
   return {
     rarity,
     speciesId: speciesIdx,
+    apexFishId: null,
+    speciesName,
     weightHg,
     greenZoneStart,
     greenZoneWidth: GREEN_ZONE_WIDTH_BPS,

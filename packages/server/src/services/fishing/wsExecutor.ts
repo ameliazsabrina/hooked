@@ -16,6 +16,7 @@ import type { PublicKey } from "@solana/web3.js";
 import { FishRarity } from "@hooked/shared";
 
 import { Player } from "../../db/schema.js";
+import { env } from "../../config/env.js";
 import { baitAmountForDeposit } from "../baitAmount.js";
 import { getActiveEvent } from "../eventConfig.js";
 import {
@@ -29,9 +30,15 @@ import { dailySeedDateFor, loadDailySeed } from "./dailySeed.js";
 import { startSession } from "./sessionEngine.js";
 
 /** Mirrors the on-chain executor's RolledCast shape so the gateway doesn't need
- *  to know which path produced the roll. */
+ *  to know which path produced the roll. Apex casts surface `apexFishId` +
+ *  `apexAssetUrl` + `speciesName` so the WS broadcast can render the rolled
+ *  fish without a follow-up query. */
 export interface RolledCast {
+  /** SPECIES_TABLE index for non-apex casts; -1 when apex rolled. */
   speciesId: number;
+  apexFishId: string | null;
+  apexAssetUrl: string | null;
+  speciesName: string;
   rarity: number;
   rarityEnum: FishRarity;
   mechanic: number;
@@ -98,7 +105,14 @@ async function ensureActiveSession(walletBase58: string): Promise<string> {
           active: true,
           name: event.name,
           apexBp: event.apexBp,
-          apexSpeciesIds: event.apexSpeciesIds,
+          // Convert kg → hg (×10) once at snapshot time so the cast roll
+          // keeps integer math.
+          apexFishes: event.apexFishes.map((f) => ({
+            apexFishId: f.id,
+            name: f.name,
+            weightMinHg: Math.round(f.weightMinKg * 10),
+            weightMaxHg: Math.round(f.weightMaxKg * 10),
+          })),
         }
       : undefined,
     dailySeedDate: dailySeedDateFor(now),
@@ -123,10 +137,16 @@ export async function executeInitiateCastOffchain(
   const result = await initiateCast({ sessionId, dailySeed });
 
   const rarityIdx = Math.max(0, Math.min(RARITY_ORDER.length - 1, result.rarity));
+  const apexAssetUrl = result.apexFishId
+    ? `${env.SERVER_PUBLIC_URL}/admin/apex-fish/${result.apexFishId}/image`
+    : null;
   return {
     sessionId,
     rolled: {
       speciesId: result.speciesId,
+      apexFishId: result.apexFishId,
+      apexAssetUrl,
+      speciesName: result.speciesName,
       rarity: rarityIdx,
       rarityEnum: RARITY_ORDER[rarityIdx],
       mechanic: result.mechanic,

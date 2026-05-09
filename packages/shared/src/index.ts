@@ -7,3 +7,4 @@ export * from "./types.js";
 export * from "./species.js";
 export * from "./equipment.js";
 export * from "./fishing-game.js";
+export * from "./circularTap.js";

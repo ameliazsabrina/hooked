@@ -12,6 +12,11 @@ const envSchema = z.object({
   MONGODB_URI: z.string().startsWith("mongodb"),
   CLIENT_URL: z.string().url().default("http://localhost:5173"),
   ADMIN_CLIENT_URL: z.string().url().default("http://localhost:3000"),
+  // Public origin the API is reachable on. Used to build absolute URLs the
+  // admin dashboard / player client can load over HTTP (e.g. apex fish
+  // images served from `/admin/apex-fish/:id/image`). Default suits local
+  // dev where the server listens on PORT 3001; override in deploy envs.
+  SERVER_PUBLIC_URL: z.string().url().default("http://localhost:3001"),
   HELIUS_API_KEY: z.string().optional(),
   REDIS_URL: z.string().default("redis://localhost:6379"),
   SOLANA_RPC_URL: z.string().default("https://api.mainnet-beta.solana.com"),
@@ -128,10 +133,21 @@ export function isAdminWallet(address: string): boolean {
   return adminWalletSet.has(address);
 }
 
+// Normalize via URL.origin so a trailing slash or path in the env value
+// (e.g. CLIENT_URL=https://hooked.fish/) doesn't silently mismatch the
+// scheme://host[:port] form that browsers send in the Origin header.
+function normalizeOrigin(value: string): string {
+  try {
+    return new URL(value).origin;
+  } catch {
+    throw new Error(`Invalid origin URL in env: ${value}`);
+  }
+}
+
 const allowedOriginSet = new Set(
-  [env.CLIENT_URL, env.ADMIN_CLIENT_URL].filter(
-    (u): u is string => Boolean(u),
-  ),
+  [env.CLIENT_URL, env.ADMIN_CLIENT_URL]
+    .filter((u): u is string => Boolean(u))
+    .map(normalizeOrigin),
 );
 
 // Match CORS semantics: missing Origin header is allowed (covers non-browser

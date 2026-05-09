@@ -1,5 +1,14 @@
 import { useEffect, useState } from "react";
 
+export interface EventStatusApexFish {
+  id: string;
+  name: string;
+  weightMinKg: number;
+  weightMaxKg: number;
+  /** Public asset URL (admin-uploaded image, served by the API). */
+  assetUrl: string;
+}
+
 export interface EventStatus {
   active: boolean;
   /** Admin-set display name (e.g. "Colosseum"). Empty when inactive. */
@@ -8,11 +17,11 @@ export interface EventStatus {
   endsAt: number;
   apexBp: number;
   /**
-   * FISH_SPECIES indices the cast roll picks from when Apex rolls during
-   * this event. Sent on the wire so HUDs/announcement modals can preview
-   * the active apex fish without an extra round-trip.
+   * Apex fish the cast roll picks from when Apex rolls during this event.
+   * Carries id + name + weight range + assetUrl so HUDs and announcement
+   * modals can render thumbnails without a second round-trip.
    */
-  apexSpeciesIds: number[];
+  apexFishes: EventStatusApexFish[];
 }
 
 function formatCountdown(secondsLeft: number): string {

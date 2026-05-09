@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
 
-import { FishingEvent } from "../../db/schema.js";
+import { ApexFish, FishingEvent } from "../../db/schema.js";
 import { readApexCatalog } from "../../services/fishing/apexCatalog.js";
 import { getEventStatus } from "../../services/eventConfig.js";
 import { computeEventWinners } from "../../services/eventWinners.js";
@@ -28,23 +28,37 @@ const datePair = z
     message: "endsAt must be after startsAt",
   });
 
-const apexSpeciesIdsInput = z
-  .array(z.number().int().nonnegative())
-  .min(1, "Pick at least one apex fish")
-  .refine(
-    (ids) => {
-      const allowed = new Set(readApexCatalog().map((e) => e.id));
-      return ids.every((id) => allowed.has(id));
-    },
-    "Each id must be present in the apex catalog (filesystem-driven)",
-  );
+/**
+ * Validate that every passed id corresponds to an existing ApexFish doc.
+ * The DB query runs only when the schema-shape check passes, so the
+ * validator stays cheap on most invalid payloads.
+ */
+async function assertApexFishIdsExist(ids: string[]): Promise<void> {
+  const dedup = Array.from(new Set(ids));
+  const found = await ApexFish.find(
+    { _id: { $in: dedup } },
+    { _id: 1 },
+  ).lean();
+  if (found.length !== dedup.length) {
+    const foundSet = new Set(found.map((d) => String(d._id)));
+    const missing = dedup.filter((id) => !foundSet.has(id));
+    throw new TRPCError({
+      code: "BAD_REQUEST",
+      message: `Unknown apex fish ids: ${missing.join(", ")}`,
+    });
+  }
+}
+
+const apexFishIdsSchema = z
+  .array(ObjectIdString)
+  .min(1, "Pick at least one apex fish");
 
 const createInput = z
   .object({
     name: z.string().trim().min(1).max(64),
     apexBp: z.number().int().min(0).max(MAX_EVENT_APEX_BP),
     prizePoolSol: z.number().nonnegative(),
-    apexSpeciesIds: apexSpeciesIdsInput,
+    apexFishIds: apexFishIdsSchema,
   })
   .and(datePair);
 
@@ -56,7 +70,7 @@ const updateInput = z
     endsAt: z.coerce.date().optional(),
     apexBp: z.number().int().min(0).max(MAX_EVENT_APEX_BP).optional(),
     prizePoolSol: z.number().nonnegative().optional(),
-    apexSpeciesIds: apexSpeciesIdsInput.optional(),
+    apexFishIds: apexFishIdsSchema.optional(),
   })
   .refine(
     (v) =>
@@ -100,7 +114,7 @@ export interface SerializedEvent {
   endsAt: string;
   apexBp: number;
   prizePoolSol: number;
-  apexSpeciesIds: number[];
+  apexFishIds: string[];
   finalRanks: SerializedFinalRank[] | null;
   createdBy: string;
 }
@@ -116,7 +130,7 @@ interface RawEventLike {
   endsAt: Date;
   apexBp: number;
   prizePoolSol: number;
-  apexSpeciesIds: number[];
+  apexFishIds: unknown[];
   finalRanks?: unknown;
   createdBy: string;
 }
@@ -146,7 +160,7 @@ function serializeEvent(ev: RawEventLike): SerializedEvent {
     endsAt: ev.endsAt.toISOString(),
     apexBp: ev.apexBp,
     prizePoolSol: ev.prizePoolSol,
-    apexSpeciesIds: ev.apexSpeciesIds,
+    apexFishIds: ev.apexFishIds.map((id) => String(id)),
     finalRanks,
     createdBy: ev.createdBy,
   };
@@ -207,20 +221,21 @@ export const adminEventRouter = router({
     }),
 
   /**
-   * Apex catalog — filesystem-driven. Enumerates PNGs in the client's
-   * `/assets/fish/apex/` directory and matches each filename against
-   * FISH_SPECIES (by basename) to attach a stable id + weight range.
+   * Apex catalog — DB-backed. Returns every doc in the `ApexFish` collection
+   * with `assetUrl` pointing at the public image route. Source of truth for
+   * "which apex fish the admin can pick during event creation". Cached for
+   * 60s; the `apexFish.{create,update,delete}` mutations invalidate the
+   * cache on write.
    *
    * Adding a new apex fish:
-   *   1. Drop the PNG in `packages/client/public/assets/fish/apex/`
-   *   2. Add a FISH_SPECIES entry in `@hooked/shared/species.ts` with
-   *      `rarity: FishRarity.Apex` and `asset: "<basename>.png"` (or any
-   *      path ending in the same filename — the matcher uses basename).
-   * The cached catalog refreshes every 60s; `force` bypasses the cache.
+   *   1. Use the admin dashboard's apex-fish page (or the inline form on
+   *      events/new) to upload an image + name + weight range.
+   *   2. Run the migration script if seeding the legacy fish:
+   *      `pnpm --filter @hooked/server tsx src/scripts/migrateApexCatalog.ts`
    */
   apexCatalog: adminSessionProcedure
     .input(z.object({ force: z.boolean().default(false) }).optional())
-    .query(({ input }) => {
+    .query(async ({ input }) => {
       return readApexCatalog(input?.force ?? false);
     }),
 
@@ -228,6 +243,7 @@ export const adminEventRouter = router({
   create: adminSessionProcedure
     .input(createInput)
     .mutation(async ({ ctx, input }) => {
+      await assertApexFishIdsExist(input.apexFishIds);
       const ev = await FishingEvent.create({
         name: input.name,
         active: false,
@@ -235,7 +251,7 @@ export const adminEventRouter = router({
         endsAt: input.endsAt,
         apexBp: input.apexBp,
         prizePoolSol: input.prizePoolSol,
-        apexSpeciesIds: input.apexSpeciesIds,
+        apexFishIds: input.apexFishIds,
         createdBy: ctx.adminWallet,
       });
       return serializeEvent(ev.toObject());
@@ -255,13 +271,16 @@ export const adminEventRouter = router({
           message: "Cannot edit an active event. Deactivate first.",
         });
       }
+      if (input.apexFishIds !== undefined) {
+        await assertApexFishIdsExist(input.apexFishIds);
+      }
       const patch: Record<string, unknown> = {};
       if (input.name !== undefined) patch.name = input.name;
       if (input.startsAt !== undefined) patch.startsAt = input.startsAt;
       if (input.endsAt !== undefined) patch.endsAt = input.endsAt;
       if (input.apexBp !== undefined) patch.apexBp = input.apexBp;
       if (input.prizePoolSol !== undefined) patch.prizePoolSol = input.prizePoolSol;
-      if (input.apexSpeciesIds !== undefined) patch.apexSpeciesIds = input.apexSpeciesIds;
+      if (input.apexFishIds !== undefined) patch.apexFishIds = input.apexFishIds;
       const updated = await FishingEvent.findByIdAndUpdate(input.id, { $set: patch }, { new: true });
       if (!updated) {
         throw new TRPCError({ code: "NOT_FOUND", message: "Event vanished mid-update" });

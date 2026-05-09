@@ -43,7 +43,12 @@ export interface SessionListItem {
   eventActiveAtStart: boolean;
   eventNameAtStart: string | null;
   eventApexBpAtStart: number;
-  eventApexSpeciesAtStart: number[];
+  eventApexFishesAtStart: Array<{
+    apexFishId: string;
+    name: string;
+    weightMinHg: number;
+    weightMaxHg: number;
+  }>;
   hasPendingCast: boolean;
 }
 
@@ -94,7 +99,12 @@ export const adminSessionsRouter = router({
         eventActiveAtStart: s.eventActiveAtStart,
         eventNameAtStart: s.eventNameAtStart ?? null,
         eventApexBpAtStart: s.eventApexBpAtStart,
-        eventApexSpeciesAtStart: Array.from(s.eventApexSpeciesAtStart ?? []),
+        eventApexFishesAtStart: (s.eventApexFishesAtStart ?? []).map((f) => ({
+          apexFishId: String(f.apexFishId),
+          name: f.name,
+          weightMinHg: f.weightMinHg,
+          weightMaxHg: f.weightMaxHg,
+        })),
         hasPendingCast: s.pendingCast != null,
       }));
 
@@ -161,7 +171,14 @@ export const adminSessionsRouter = router({
           eventActiveAtStart: session.eventActiveAtStart,
           eventNameAtStart: session.eventNameAtStart ?? null,
           eventApexBpAtStart: session.eventApexBpAtStart,
-          eventApexSpeciesAtStart: Array.from(session.eventApexSpeciesAtStart ?? []) as number[],
+          eventApexFishesAtStart: (session.eventApexFishesAtStart ?? []).map(
+            (f) => ({
+              apexFishId: String(f.apexFishId),
+              name: f.name,
+              weightMinHg: f.weightMinHg,
+              weightMaxHg: f.weightMaxHg,
+            }),
+          ),
           pendingCast: pendingCastSerialized,
         },
         player,

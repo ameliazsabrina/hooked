@@ -1,10 +1,8 @@
 import { createHash } from "node:crypto";
 import type { Types } from "mongoose";
 
-import { FISH_SPECIES } from "@hooked/shared";
-
 import { Catch, FishingSession } from "../../db/schema.js";
-import { MAX_CATCHES, SCORE_MULTIPLIERS } from "./constants.js";
+import { MAX_CATCHES, SCORE_MULTIPLIERS, SPECIES_TABLE } from "./constants.js";
 import { CastEngineError } from "./errors.js";
 import { rollCast, seedForCast } from "./rng.js";
 import { Mechanic, RARITY_LABEL, Rarity, ZONE_OPEN_SEA, Window } from "./types.js";
@@ -28,7 +26,12 @@ export interface InitiateCastInput {
 
 export interface InitiateCastResult {
   castIndex: number;
+  /** SPECIES_TABLE index for non-apex casts; -1 when apex rolled. */
   speciesId: number;
+  /** ApexFish ObjectId (24-char hex) when apex rolled; null otherwise. */
+  apexFishId: string | null;
+  /** Display name (FISH_SPECIES for non-apex, ApexFish.name for apex). */
+  speciesName: string;
   rarity: Rarity;
   weightHg: number;
   greenZoneStart: number;
@@ -74,9 +77,12 @@ export async function initiateCast(input: InitiateCastInput): Promise<InitiateCa
     apexBp: session.eventApexBpAtStart,
     castCount: castIndex,
     pity: session.pityCounter,
-    // Empty snapshot (no event at session start) falls back to the legacy
-    // hardcoded apex slice in rollCast — see rng.ts for the branch.
-    apexSpeciesIds: session.eventApexSpeciesAtStart ?? [],
+    apexFishes: (session.eventApexFishesAtStart ?? []).map((f) => ({
+      apexFishId: String(f.apexFishId),
+      name: f.name,
+      weightMinHg: f.weightMinHg,
+      weightMaxHg: f.weightMaxHg,
+    })),
   });
 
   const castAt = input.now ?? new Date();
@@ -94,7 +100,9 @@ export async function initiateCast(input: InitiateCastInput): Promise<InitiateCa
       $set: {
         pendingCast: {
           castIndex,
-          speciesId: cast.speciesId,
+          speciesId: cast.speciesId >= 0 ? cast.speciesId : null,
+          apexFishId: cast.apexFishId,
+          speciesName: cast.speciesName,
           rarity: cast.rarity,
           weightHg: cast.weightHg,
           greenZoneStart: cast.greenZoneStart,
@@ -114,6 +122,8 @@ export async function initiateCast(input: InitiateCastInput): Promise<InitiateCa
   return {
     castIndex,
     speciesId: cast.speciesId,
+    apexFishId: cast.apexFishId,
+    speciesName: cast.speciesName,
     rarity: cast.rarity,
     weightHg: cast.weightHg,
     greenZoneStart: cast.greenZoneStart,
@@ -222,21 +232,50 @@ export async function submitInputSamples(input: SubmitInputSamplesInput): Promis
   const rarityEnum = pc.rarity as Rarity;
 
   if (input.hit) {
-    const effectiveWeight =
-      !input.weightHg || input.weightHg === 0 ? pc.weightHg : input.weightHg;
+    // Clamp the client-submitted weight to the rolled fish's [min, max] range
+    // so a player can't inflate score by passing an out-of-band weight on
+    // `cast.submit`. Non-apex: SPECIES_TABLE (static). Apex: the session's
+    // pinned `eventApexFishesAtStart` snapshot keyed by apexFishId. If the
+    // bound is missing for any reason, fall back to the rolled weight.
+    const clientWeight = input.weightHg ?? 0;
+    let effectiveWeight = pc.weightHg;
+    if (clientWeight > 0) {
+      let minHg: number | null = null;
+      let maxHg: number | null = null;
+      if (rarityEnum === Rarity.Apex && pc.apexFishId) {
+        const apexId = String(pc.apexFishId);
+        const pinned = (session.eventApexFishesAtStart ?? []).find(
+          (f) => String(f.apexFishId) === apexId,
+        );
+        if (pinned) {
+          minHg = pinned.weightMinHg;
+          maxHg = pinned.weightMaxHg;
+        }
+      } else if (pc.speciesId !== null && pc.speciesId !== undefined) {
+        const sp = SPECIES_TABLE[pc.speciesId];
+        if (sp) {
+          minHg = sp.minWeightHg;
+          maxHg = sp.maxWeightHg;
+        }
+      }
+      if (minHg !== null && maxHg !== null) {
+        effectiveWeight = Math.max(minHg, Math.min(maxHg, clientWeight));
+      }
+    }
     const multiplier = SCORE_MULTIPLIERS[rarityEnum] ?? 1;
     // Ceil((multiplier * weight) / 100), matching the on-chain integer math
     // (a + 99) / 100 — guarantees sub-1kg basics still score 1 point.
     const score = Math.floor((multiplier * effectiveWeight + 99) / 100);
 
-    const speciesName = FISH_SPECIES[pc.speciesId]?.name ?? `species_${pc.speciesId}`;
+    const speciesName = pc.speciesName ?? `species_${pc.speciesId ?? "?"}`;
     const newPity = rarityEnum >= Rarity.Rare ? 0 : session.pityCounter + 1;
 
     const catchDoc = await Catch.create({
       playerId: session.playerId,
       sessionId: session._id,
       castIndex: pc.castIndex,
-      speciesId: pc.speciesId,
+      speciesId: pc.speciesId ?? null,
+      apexFishId: pc.apexFishId ?? null,
       species: speciesName,
       rarity: RARITY_LABEL[rarityEnum],
       weightKg: effectiveWeight / 10, // hg → kg

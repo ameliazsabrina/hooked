@@ -874,6 +874,125 @@
   }
 }
 
+/* HUD-center "live now" banner — pops once on event activation, auto-dismisses
+   after 6s. Sits above the persistent top-pill EventAlert. */
+.hud-event-banner {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 20px 32px;
+  min-width: 280px;
+  max-width: 90%;
+  background: rgba(8, 12, 24, 0.92);
+  border: 2px solid #e0564d;
+  border-radius: 14px;
+  color: #ffe9e6;
+  text-align: center;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5),
+              0 0 24px rgba(224, 86, 77, 0.55);
+  animation: hud-event-banner-in 0.4s ease-out;
+  z-index: 12;
+  pointer-events: auto;
+}
+
+.hud-event-banner-dismiss {
+  position: absolute;
+  top: 6px;
+  right: 10px;
+  background: transparent;
+  border: 0;
+  color: #ffe9e6;
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0.6;
+  padding: 4px 8px;
+}
+.hud-event-banner-dismiss:hover {
+  opacity: 1;
+}
+
+.hud-event-banner-tag {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  color: #ff857a;
+  text-transform: uppercase;
+}
+
+.hud-event-banner-name {
+  font-size: 28px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  color: #fff;
+  text-transform: uppercase;
+}
+
+.hud-event-banner-countdown {
+  font-size: 13px;
+  color: #ffd9d4;
+  font-variant-numeric: tabular-nums;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.hud-event-banner-fishes {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 12px;
+  margin-top: 8px;
+}
+
+.hud-event-banner-fish {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  width: 64px;
+}
+
+.hud-event-banner-fish-img {
+  width: 56px;
+  height: 56px;
+  object-fit: contain;
+  background: rgba(255, 255, 255, 0.04);
+  border-radius: 8px;
+  padding: 4px;
+}
+
+.hud-event-banner-fish-name {
+  font-size: 10px;
+  color: #ffd9d4;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+@keyframes hud-event-banner-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(0.92);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hud-event-banner {
+    animation: none;
+  }
+}
+
 /* --- Stats + Controls Row --- */
 .bottom-panels {
   display: flex;

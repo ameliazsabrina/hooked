@@ -35,9 +35,26 @@ export const ZONE_OPEN_SEA = "open_sea" as const;
 
 export interface CastRoll {
   rarity: Rarity;
+  /**
+   * SPECIES_TABLE index for non-apex casts. -1 when apex rolled — the rolled
+   * fish is identified by `apexFishId` instead, since the apex catalog lives
+   * in MongoDB and isn't represented in SPECIES_TABLE.
+   */
   speciesId: number;
+  /** ApexFish ObjectId (24-char hex). Set only when rarity === Apex. */
+  apexFishId: string | null;
+  /** Display name (FISH_SPECIES for non-apex, ApexFish.name for apex). */
+  speciesName: string;
   weightHg: number;
   greenZoneStart: number;
   greenZoneWidth: number;
   mechanic: Mechanic;
+}
+
+export interface ApexFishRollEntry {
+  /** ApexFish ObjectId, 24-char hex. */
+  apexFishId: string;
+  name: string;
+  weightMinHg: number;
+  weightMaxHg: number;
 }

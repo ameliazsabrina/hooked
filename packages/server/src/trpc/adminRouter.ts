@@ -13,6 +13,7 @@ import { adminCatchesRouter } from "./admin/catchesRouter.js";
 import { adminSeedsRouter } from "./admin/seedsRouter.js";
 import { adminReactionsRouter } from "./admin/reactionsRouter.js";
 import { adminEventRouter } from "./admin/eventRouter.js";
+import { adminApexFishRouter } from "./admin/apexFishRouter.js";
 
 export const adminRouter = router({
   session: adminSessionRouter,
@@ -30,6 +31,10 @@ export const adminRouter = router({
   // DB-backed admin events: full CRUD + lifecycle + winner payout. See
   // services/eventConfig.ts and services/eventWinners.ts for the wiring.
   event: adminEventRouter,
+  // Admin-managed apex fish catalog (replaces the filesystem-driven
+  // catalog). Image bytes live in the ApexFish doc; the public route
+  // `/admin/apex-fish/:id/image` streams them.
+  apexFish: adminApexFishRouter,
 
   /**
    * Backward-compat thin wrapper for any caller that still hits the legacy

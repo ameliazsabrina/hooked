@@ -93,6 +93,14 @@ const SessionCommitOutput = z
   })
   .strict();
 
+const ApexFishStatusEntry = z.object({
+  id: z.string().regex(/^[0-9a-f]{24}$/i),
+  name: z.string(),
+  weightMinKg: z.number().nonnegative(),
+  weightMaxKg: z.number().nonnegative(),
+  assetUrl: z.string().url(),
+});
+
 const EventsCurrentOutput = z
   .object({
     active: z.boolean(),
@@ -100,7 +108,7 @@ const EventsCurrentOutput = z
     startsAt: z.number().nullable(),
     endsAt: z.number().nullable(),
     apexBp: z.number().int().nonnegative(),
-    apexSpeciesIds: z.array(z.number().int().nonnegative()),
+    apexFishes: z.array(ApexFishStatusEntry),
   })
   .strict();
 
@@ -183,7 +191,12 @@ export const fishingRouter = router({
                 active: true,
                 name: event.name,
                 apexBp: event.apexBp,
-                apexSpeciesIds: event.apexSpeciesIds,
+                apexFishes: event.apexFishes.map((f) => ({
+                  apexFishId: f.id,
+                  name: f.name,
+                  weightMinHg: Math.round(f.weightMinKg * 10),
+                  weightMaxHg: Math.round(f.weightMaxKg * 10),
+                })),
               }
             : undefined,
           dailySeedDate: dailySeedDateFor(now),
@@ -349,7 +362,7 @@ export const fishingRouter = router({
           startsAt: null,
           endsAt: null,
           apexBp: 0,
-          apexSpeciesIds: [],
+          apexFishes: [],
         };
       }
       return {
@@ -358,7 +371,7 @@ export const fishingRouter = router({
         startsAt: event.startsAt,
         endsAt: event.endsAt,
         apexBp: event.apexBp,
-        apexSpeciesIds: event.apexSpeciesIds,
+        apexFishes: event.apexFishes,
       };
     }),
 });
