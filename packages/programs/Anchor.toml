@@ -5,6 +5,9 @@ anchor_version = "0.32.1"
 resolution = true
 skip-lint = false
 
+[programs.mainnet]
+hooked_rooms = "4ERUTWVN3aJP5tghEcZNd555NGcK3Jr8B21mnBB8JSMg"
+
 [programs.devnet]
 hooked_rooms = "4ERUTWVN3aJP5tghEcZNd555NGcK3Jr8B21mnBB8JSMg"
 

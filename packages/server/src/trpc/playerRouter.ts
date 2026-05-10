@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
-import { Connection, clusterApiUrl } from "@solana/web3.js";
+import { Connection } from "@solana/web3.js";
 import { router, protectedProcedure } from "./trpc.js";
 import {
   ApexFish,
@@ -37,11 +37,7 @@ function currentSessionStart(now: Date): Date {
   return start;
 }
 
-const rpcUrl = env.HELIUS_API_KEY
-  ? `https://devnet.helius-rpc.com/?api-key=${env.HELIUS_API_KEY}`
-  : clusterApiUrl("devnet");
-
-const solanaConnection = new Connection(rpcUrl, "confirmed");
+const solanaConnection = new Connection(env.SOLANA_RPC_URL, "confirmed");
 
 export const playerRouter = router({
   me: protectedProcedure.query(async ({ ctx }) => {

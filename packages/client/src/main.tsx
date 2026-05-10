@@ -9,7 +9,7 @@ import {
   PhantomWalletAdapter,
   SolflareWalletAdapter,
 } from "@solana/wallet-adapter-wallets";
-import { clusterApiUrl } from "@solana/web3.js";
+import { clusterApiUrl, type Cluster } from "@solana/web3.js";
 import "@solana/wallet-adapter-react-ui/styles.css";
 import "@fontsource/jersey-10";
 import "@fontsource/vt323";
@@ -21,10 +21,8 @@ import App from "./app.tsx";
 
 function Root() {
   const endpoint = useMemo(() => {
-    const heliusKey = import.meta.env.VITE_HELIUS_API_KEY;
-    return heliusKey
-      ? `https://devnet.helius-rpc.com/?api-key=${heliusKey}`
-      : clusterApiUrl("devnet");
+    const cluster = (import.meta.env.VITE_SOLANA_CLUSTER ?? "devnet") as Cluster;
+    return clusterApiUrl(cluster);
   }, []);
   const wallets = useMemo(
     () => [new PhantomWalletAdapter(), new SolflareWalletAdapter()],
