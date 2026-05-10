@@ -138,7 +138,7 @@ async function assertOwnedSession(
  */
 async function deriveBaitForWallet(
   walletAddress: string,
-): Promise<{ baitInitial: number; tier: number }> {
+): Promise<{ baitInitial: number; tier: number; roomId: string }> {
   const player = await Player.findOne({ walletAddress }).lean();
   if (!player) {
     throw new TRPCError({ code: "NOT_FOUND", message: "Player not found" });
@@ -163,7 +163,7 @@ async function deriveBaitForWallet(
   }
   // Tier mirrors on-chain `tier: u8` — derived from deposit in 0.5 SOL steps.
   const tier = Math.min(4, Math.max(1, Math.round(active.amount / 0.5)));
-  return { baitInitial, tier };
+  return { baitInitial, tier, roomId: active.poolId };
 }
 
 // ---------------------------------------------------------------------------
@@ -179,11 +179,14 @@ export const fishingRouter = router({
     .output(SessionStartOutput)
     .mutation(async ({ ctx }) => {
       try {
-        const { baitInitial, tier } = await deriveBaitForWallet(ctx.walletAddress);
+        const { baitInitial, tier, roomId } = await deriveBaitForWallet(
+          ctx.walletAddress,
+        );
         const event = getActiveEvent();
         const now = new Date();
         const result = await startSession({
           walletAddress: ctx.walletAddress,
+          roomId,
           baitInitial,
           tier,
           event: event
@@ -230,6 +233,7 @@ export const fishingRouter = router({
         walletAddress: ctx.walletAddress,
         dateKey,
         window,
+        status: "active",
       }).lean();
       if (!session) return null;
       return {

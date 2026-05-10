@@ -24,16 +24,6 @@ pub mod hooked_rooms {
         instructions::close_room::handler(ctx, yield_lamports)
     }
 
-    /// DEV ONLY — overwrite a room's `closes_at` so the settlement flow
-    /// can be tested without waiting the full 7-day window. Admin-gated;
-    /// remove or feature-flag before mainnet.
-    pub fn dev_force_close_at(
-        ctx: Context<DevForceCloseAt>,
-        new_closes_at: i64,
-    ) -> Result<()> {
-        instructions::dev_force_close::handler(ctx, new_closes_at)
-    }
-
     pub fn return_principal(
         ctx: Context<ReturnPrincipal>,
         yield_share_lamports: u64,

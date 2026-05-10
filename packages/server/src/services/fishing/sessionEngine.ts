@@ -17,6 +17,10 @@ import { assignWindow } from "./window.js";
  */
 export interface StartSessionInput {
   walletAddress: string;
+  /** Room this session is funded by — persisted on the session doc so a
+   *  new deposit into a different room within the same (dateKey, window)
+   *  abandons the prior session instead of reusing its bait. */
+  roomId: string;
   /** SOL deposit on the room — used to derive baitInitial. */
   baitInitial: number;
   /** Bait deposit tier (0 = none, 1+ = derived from deposit). */
@@ -67,11 +71,14 @@ export async function startSession(input: StartSessionInput): Promise<StartSessi
     throw new CastEngineError("SESSION_NOT_FOUND", `No player for wallet ${input.walletAddress}`);
   }
 
-  // Idempotent: return the existing session if one already exists for this slot.
+  // Idempotent within (player, slot) for the *active* session only —
+  // committed/abandoned sessions for the same slot are deliberately
+  // ignored so a fresh deposit can lazy-create a new active session.
   const existing = await FishingSession.findOne({
     playerId: player._id,
     dateKey,
     window,
+    status: "active",
   });
   if (existing) {
     return {
@@ -90,6 +97,7 @@ export async function startSession(input: StartSessionInput): Promise<StartSessi
   const session = await FishingSession.create({
     playerId: player._id,
     walletAddress: input.walletAddress,
+    roomId: input.roomId,
     dateKey,
     window,
     baitInitial: input.baitInitial,

@@ -15,7 +15,7 @@
 import type { PublicKey } from "@solana/web3.js";
 import { FishRarity } from "@hooked/shared";
 
-import { Player } from "../../db/schema.js";
+import { FishingSession, Player } from "../../db/schema.js";
 import { env } from "../../config/env.js";
 import { baitAmountForDeposit } from "../baitAmount.js";
 import { getActiveEvent } from "../eventConfig.js";
@@ -98,6 +98,7 @@ async function ensureActiveSession(walletBase58: string): Promise<string> {
   const now = new Date();
   const result = await startSession({
     walletAddress: walletBase58,
+    roomId: active.poolId,
     baitInitial,
     tier,
     event: event
@@ -118,6 +119,24 @@ async function ensureActiveSession(walletBase58: string): Promise<string> {
     dailySeedDate: dailySeedDateFor(now),
     now,
   });
+
+  // Self-heal stale pendingCast: a cast whose castAt is older than the
+  // 30s "should have resolved by now" threshold means the player either
+  // dropped the connection mid-cast or never tapped, and the bait was
+  // already debited at initiate time. Without this, the next cast hits
+  // CAST_PENDING in initiateCast and the timing-bar / circular-tap UI
+  // never appears. No bait refund — the cast was abandoned, not cancelled
+  // within the 8s grace window.
+  const STALE_CAST_MS = 30_000;
+  await FishingSession.updateOne(
+    {
+      _id: result.sessionId,
+      status: "active",
+      "pendingCast.castAt": { $lt: new Date(now.getTime() - STALE_CAST_MS) },
+    },
+    { $set: { pendingCast: null } },
+  );
+
   return result.sessionId;
 }
 

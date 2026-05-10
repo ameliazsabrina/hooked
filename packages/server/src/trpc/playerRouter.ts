@@ -15,6 +15,7 @@ import { env } from "../config/env.js";
 import { isValidDepositAmount, VALID_DEPOSIT_AMOUNTS } from "@hooked/shared";
 import { assignWindow } from "../services/fishing/window.js";
 import { baitAmountForDeposit } from "../services/baitAmount.js";
+import * as lb from "../services/leaderboard.js";
 
 const BUCKET_TIER = 1;
 
@@ -168,7 +169,12 @@ export const playerRouter = router({
       let bait = 0;
       try {
         const session = await FishingSession.findOne(
-          { walletAddress: ctx.walletAddress, dateKey, window },
+          {
+            walletAddress: ctx.walletAddress,
+            dateKey,
+            window,
+            status: "active",
+          },
           { baitRemaining: 1 },
         ).lean();
         if (session) {
@@ -191,17 +197,26 @@ export const playerRouter = router({
 
       const playerId = player._id as Types.ObjectId;
 
-      // Score aggregation covers the full window (sold fish still count).
-      const scoreAgg = await Catch.aggregate<{ total: number }>([
-        {
-          $match: {
-            playerId,
-            caughtAt: { $gte: windowStart, $lte: windowEnd },
-          },
-        },
-        { $group: { _id: null, total: { $sum: "$score" } } },
-      ]);
-      const score = scoreAgg[0]?.total ?? 0;
+      // Score is room-scoped: the source of truth is the Redis room
+      // leaderboard sorted set (lb:room:<roomId>), populated by
+      // creditCatch on every successful hit. Reading it here means a
+      // fresh deposit into a new room shows score=0 immediately, instead
+      // of the prior aggregation-by-time-window approach which would
+      // include catches from a previous room whose [createdAt, closesAt]
+      // overlapped the new room's window.
+      let score = 0;
+      if (activeRoom) {
+        try {
+          const roomScore = await lb.getRoomPlayerScore(
+            ctx.redis,
+            activeRoom.roomId,
+            playerId.toString(),
+          );
+          score = roomScore ?? 0;
+        } catch {
+          // Defensive: never let score lookup break the rest of the query.
+        }
+      }
 
       // Inventory: most-recent un-released catches, capped at `limit`.
       // Apex catches are excluded — they're surfaced through `discoveredApexFish`

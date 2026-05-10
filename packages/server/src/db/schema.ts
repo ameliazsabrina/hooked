@@ -648,6 +648,12 @@ const fishingSessionSchema = new Schema(
     // and for inclusion in the per-cast HMAC seed input.
     walletAddress: { type: String, required: true, index: true },
 
+    // Room this session is funded by. A new room deposit within the same
+    // (dateKey, window) abandons any prior active session and creates a
+    // fresh one — see roomRouter.markPriorSessionAbandoned. Null on legacy
+    // rows written before this field was added.
+    roomId: { type: String, default: null, index: true },
+
     // Day-grouping (UTC days since epoch) and window (0 day, 1 night).
     dateKey: { type: Number, required: true },
     window: { type: Number, required: true, enum: [0, 1] },
@@ -719,12 +725,14 @@ const fishingSessionSchema = new Schema(
   { timestamps: true },
 );
 
-// One session per (player, dateKey, window) — matches the on-chain PDA seeds
-// `[SESSION_SEED, authority, date_le, window]` so legacy and new code agree
-// on session identity during the cutover.
+// One ACTIVE session per (player, dateKey, window). Committed/abandoned
+// sessions can coexist for the same slot — that's what lets a new room
+// deposit mid-window abandon the prior session and create a fresh one
+// (see roomRouter.markPriorSessionAbandoned) without losing the audit
+// trail of the prior session's catches and merkle root.
 fishingSessionSchema.index(
   { playerId: 1, dateKey: 1, window: 1 },
-  { unique: true },
+  { unique: true, partialFilterExpression: { status: "active" } },
 );
 fishingSessionSchema.index({ status: 1, dateKey: 1 });
 fishingSessionSchema.index({ walletAddress: 1, dateKey: -1 });

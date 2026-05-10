@@ -16,7 +16,7 @@ import {
   protectedProcedure,
   adminSignedProcedure,
 } from "./trpc.js";
-import { Player, Room } from "../db/schema.js";
+import { FishingSession, Player, Room } from "../db/schema.js";
 import {
   getRoomsProgram,
   getRoomPda,
@@ -25,24 +25,41 @@ import {
 import { createRoomOnChainAndDb } from "../services/roomFactory.js";
 import { settleRoom } from "../services/roomKeeper.js";
 import * as lb from "../services/leaderboard.js";
+import { assignWindow } from "../services/fishing/window.js";
 import { bindWalletToRoom } from "../ws/gateway.js";
-import type RedisType from "ioredis";
 
 /**
- * Post-deposit fishing-session bootstrap. Pre-Phase-6 this CPI'd into the
- * on-chain `hooked_fishing.init_session` + `issue_bait` to seed a session
- * PDA with the player's bait. Off-chain v2 creates sessions lazily on
- * first cast (see `executeInitiateCastOffchain`), so the bootstrap is a
- * no-op. Kept as a stub so the deposit flow's call sites don't have to
- * change shape — re-introducing pre-warming logic later (e.g. caching
- * derived bait amount in Redis) can plug in here without touching callers.
+ * Abandon any active FishingSession the player has for the current
+ * (dateKey, window) that belongs to a different room. Called on every
+ * successful `recoverEntry` so that depositing into a new room mid-window
+ * doesn't reuse the prior session's bait counter / castCount / pity /
+ * merkle root. The fresh session is lazy-created on first cast by
+ * `ensureActiveSession` (services/fishing/wsExecutor.ts) and tagged with
+ * the new roomId.
+ *
+ * Idempotent for same-room re-recovery (page reloads): the
+ * `roomId: { $ne }` filter makes it a no-op when the player is already
+ * tied to this room.
  */
-async function bootstrapFishingSession(
-  _authority: PublicKey,
-  _redis: RedisType,
-  _depositSol: number,
+async function markPriorSessionAbandoned(
+  walletAddress: string,
+  roomId: string,
 ): Promise<void> {
-  // intentionally empty — see docstring above.
+  const player = await Player.findOne({ walletAddress }, { _id: 1 }).lean();
+  if (!player) return;
+  const { dateKey, window } = assignWindow(new Date());
+  // updateMany rather than updateOne — defense against any historical
+  // duplicates that pre-date the partial unique index.
+  await FishingSession.updateMany(
+    {
+      playerId: player._id,
+      dateKey,
+      window,
+      status: "active",
+      roomId: { $ne: roomId },
+    },
+    { $set: { status: "abandoned" } },
+  );
 }
 
 async function maybeTriggerCapacityOverflow(roomId: string): Promise<void> {
@@ -211,11 +228,7 @@ export const roomRouter = router({
       // short-circuit this lookup.
       const active = player.deposits?.find((d) => !d.returned);
       if (active) {
-        await bootstrapFishingSession(
-          new PublicKey(ctx.walletAddress),
-          ctx.redis,
-          active.amount,
-        );
+        await markPriorSessionAbandoned(ctx.walletAddress, roomDoc.roomId);
         // Bind any open WS sockets for this wallet to the room so room-
         // scoped broadcasts (leaderboard updates) reach them without a
         // reconnect. Safe no-op if no sockets are open.
@@ -318,7 +331,7 @@ export const roomRouter = router({
         },
       );
 
-      await bootstrapFishingSession(authorityKey, ctx.redis, depositSol);
+      await markPriorSessionAbandoned(ctx.walletAddress, roomDoc.roomId);
 
       // Bind any open WS sockets for this wallet to the new room. The auth-
       // time hydration only runs once per connection; players who deposit
@@ -361,11 +374,7 @@ export const roomRouter = router({
           message: "No active deposit — cannot issue bait",
         });
       }
-      await bootstrapFishingSession(
-        new PublicKey(target),
-        ctx.redis,
-        active.amount,
-      );
+      await markPriorSessionAbandoned(target, active.poolId);
       return { ok: true, targetWallet: target };
     }),
 
