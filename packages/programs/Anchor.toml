@@ -15,11 +15,16 @@ hooked_rooms = "4ERUTWVN3aJP5tghEcZNd555NGcK3Jr8B21mnBB8JSMg"
 url = "https://api.apr.dev"
 
 [provider]
-cluster = "devnet"
+# Tests default to localnet (surfpool on 127.0.0.1:8899). For devnet/mainnet
+# operations, override ANCHOR_PROVIDER_URL in your shell — never paste an
+# API-keyed RPC URL here, Anchor.toml is committed to git.
+cluster = "localnet"
 wallet = "~/.config/solana/hooked.json"
 
 [scripts]
-test = "pnpm ts-mocha -p ./tsconfig.json -t 1000000 tests/**/*.ts"
+# Runs only the room-lifecycle suite. tests/setup/* are operational scripts
+# (not mocha specs) and would pollute output if globbed in.
+test = "pnpm ts-mocha -p ./tsconfig.json -t 1000000 tests/room.ts"
 
 [test]
 genesis = []

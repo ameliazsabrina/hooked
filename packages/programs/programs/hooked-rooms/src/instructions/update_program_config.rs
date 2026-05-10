@@ -27,3 +27,8 @@ pub fn lp_manager(ctx: Context<UpdateProgramConfig>, new_lp_manager: Pubkey) -> 
     ctx.accounts.config.lp_manager = new_lp_manager;
     Ok(())
 }
+
+pub fn paused(ctx: Context<UpdateProgramConfig>, new_paused: bool) -> Result<()> {
+    ctx.accounts.config.paused = new_paused;
+    Ok(())
+}

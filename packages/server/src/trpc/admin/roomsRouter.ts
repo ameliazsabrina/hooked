@@ -8,6 +8,13 @@ import {
 } from "../../solana/roomsProgram.js";
 
 const PHASE_VALUES = ["entry", "active", "settling", "closed"] as const;
+const LP_STATUS_VALUES = [
+  "pending",
+  "deployed",
+  "exited",
+  "failed",
+  "skipped",
+] as const;
 
 type LeanRoom = {
   roomId: string;
@@ -172,6 +179,12 @@ export const adminRoomsRouter = router({
     .input(
       z.object({
         phase: z.enum(PHASE_VALUES).optional(),
+        // Filter rooms by `lp.status`. Combine with phase if needed.
+        lpStatus: z.enum(LP_STATUS_VALUES).optional(),
+        // Surface only rooms with at least one player whose principal hasn't
+        // been returned yet. Implies phase=closed (return only happens after
+        // settling).
+        stuckReturns: z.boolean().optional(),
         search: z.string().trim().optional(),
         page: z.number().int().min(1).default(1),
         limit: z.number().int().min(1).max(100).default(25),
@@ -180,6 +193,11 @@ export const adminRoomsRouter = router({
     .query(async ({ input }) => {
       const filter: Record<string, unknown> = {};
       if (input.phase) filter.phase = input.phase;
+      if (input.lpStatus) filter["lp.status"] = input.lpStatus;
+      if (input.stuckReturns) {
+        filter.phase = "closed";
+        filter["players.returned"] = false;
+      }
       if (input.search) {
         const re = new RegExp(
           input.search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
@@ -204,23 +222,36 @@ export const adminRoomsRouter = router({
       ]);
 
       return {
-        items: items.map((r) => ({
-          roomId: r.roomId,
-          phase: r.phase,
-          createdAt: r.createdAt,
-          entryClosesAt: r.entryClosesAt,
-          closesAt: r.closesAt,
-          capacitySol: r.capacitySol,
-          maxPlayers: r.maxPlayers,
-          depositedSol: r.depositedSol,
-          realPlayerCount: r.realPlayerCount,
-          onChainPoolId: r.onChainPoolId,
-          onChainPoolAddress: r.onChainPoolAddress,
-          totalYieldSol: r.totalYieldSol,
-          lpStatus: (r.lp as { status?: string } | undefined)?.status ?? null,
-          createdByAdmin: r.createdByAdmin,
-          overflowTriggered: r.overflowTriggered ?? false,
-        })),
+        items: items.map((r) => {
+          const players = (r.players ?? []) as Array<{
+            deposit?: number;
+            returned?: boolean;
+          }>;
+          const unreturned = players.filter((p) => p.returned === false);
+          const unreturnedSol = unreturned.reduce(
+            (sum, p) => sum + (p.deposit ?? 0),
+            0,
+          );
+          return {
+            roomId: r.roomId,
+            phase: r.phase,
+            createdAt: r.createdAt,
+            entryClosesAt: r.entryClosesAt,
+            closesAt: r.closesAt,
+            capacitySol: r.capacitySol,
+            maxPlayers: r.maxPlayers,
+            depositedSol: r.depositedSol,
+            realPlayerCount: r.realPlayerCount,
+            onChainPoolId: r.onChainPoolId,
+            onChainPoolAddress: r.onChainPoolAddress,
+            totalYieldSol: r.totalYieldSol,
+            lpStatus: (r.lp as { status?: string } | undefined)?.status ?? null,
+            createdByAdmin: r.createdByAdmin,
+            overflowTriggered: r.overflowTriggered ?? false,
+            unreturnedCount: unreturned.length,
+            unreturnedSol,
+          };
+        }),
         totalCount,
         page: input.page,
         limit: input.limit,

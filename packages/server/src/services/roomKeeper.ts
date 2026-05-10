@@ -1,5 +1,5 @@
 import BN from "bn.js";
-import { PublicKey } from "@solana/web3.js";
+import { PublicKey, SystemProgram } from "@solana/web3.js";
 import {
   getRoomsProgram,
   getRoomPda,
@@ -7,6 +7,7 @@ import {
   getRoomEntryPda,
   getProgramConfigPda,
 } from "../solana/roomsProgram.js";
+import { isProgramPaused } from "../solana/configCache.js";
 import { Player, Room } from "../db/schema.js";
 import { shareForRecipient } from "./yieldShare.js";
 
@@ -109,6 +110,14 @@ export async function settleRoom(
   }
   const { program, signer } = loaded;
 
+  // settle_room calls close + return + finalize, all gated by paused.
+  // Skip the whole batch if paused so we don't fire 1-N principal returns
+  // and have them all fail mid-loop with stale on-chain state.
+  if (await isProgramPaused()) {
+    logger.info(`settleRoom skipped — program paused (room=${roomId})`);
+    return { roomId, status: "skipped", message: "program paused" };
+  }
+
   const onChainRoomId = BigInt(doc.onChainPoolId);
   const roomPda = getRoomPda(onChainRoomId);
   const roomVaultPda = getRoomVaultPda(roomPda);
@@ -142,6 +151,7 @@ export async function settleRoom(
         roomVault: roomVaultPda,
         treasury: signer.publicKey,
         admin: signer.publicKey,
+        systemProgram: SystemProgram.programId,
       } as never)
       .rpc();
     await Room.updateOne({ roomId }, { $set: { closeTxSignature: closeTxSig } });
@@ -156,9 +166,12 @@ export async function settleRoom(
     third: settledRoom.thirdPlace as PublicKey,
   };
 
+  // RoomEntry layout: [8 disc][1 version][32 room]…  so the room pubkey
+  // sits at byte 9, not 8. Filtering at offset 8 was matching the version
+  // byte against the first byte of roomPda, which never hits.
   const entries = await program.account.roomEntry.all([
     {
-      memcmp: { offset: 8, bytes: roomPda.toBase58() },
+      memcmp: { offset: 9, bytes: roomPda.toBase58() },
     },
   ]);
 
@@ -210,6 +223,7 @@ export async function settleRoom(
           entry: entryPda,
           recipient,
           admin: signer.publicKey,
+          systemProgram: SystemProgram.programId,
         } as never)
         .rpc();
 
@@ -255,6 +269,7 @@ export async function settleRoom(
           roomVault: roomVaultPda,
           treasury: signer.publicKey,
           admin: signer.publicKey,
+          systemProgram: SystemProgram.programId,
         } as never)
         .rpc();
       await Room.updateOne(

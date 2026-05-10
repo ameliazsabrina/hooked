@@ -14,6 +14,7 @@ import {
   getRoomPda,
   getRoomVaultPda,
 } from "../solana/roomsProgram.js";
+import { isProgramPaused } from "../solana/configCache.js";
 
 const MAX_ROOMS_PER_UTC_DAY = 2;
 
@@ -44,7 +45,7 @@ export type CreateRoomResult =
   | {
       ok: false;
       skipped: true;
-      reason: "daily-cap" | "treasury-missing" | "cron-already-created";
+      reason: "daily-cap" | "treasury-missing" | "cron-already-created" | "paused";
     };
 
 export async function createRoomOnChainAndDb(opts: {
@@ -56,6 +57,14 @@ export async function createRoomOnChainAndDb(opts: {
     return { ok: false, skipped: true, reason: "treasury-missing" };
   }
   const { program, signer } = loaded;
+
+  // Skip on a paused program. The on-chain `Paused` error would also block
+  // us, but pre-checking saves an RPC roundtrip + noisy error log on every
+  // cron tick during a maintenance window. 5s TTL means a fresh
+  // `set_paused(false)` is observed within seconds.
+  if (await isProgramPaused()) {
+    return { ok: false, skipped: true, reason: "paused" };
+  }
 
   const now = new Date();
 

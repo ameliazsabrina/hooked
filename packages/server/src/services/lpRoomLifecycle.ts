@@ -8,6 +8,7 @@ import {
   getProgramConfigPda,
   loadLpManagerKeypair,
 } from "../solana/roomsProgram.js";
+import { isProgramPaused } from "../solana/configCache.js";
 import { Room } from "../db/schema.js";
 import {
   checkLpReady,
@@ -53,6 +54,11 @@ export async function deployReadyRoomLp(logger: LpLogger = noopLogger) {
   const { program, signer: treasury } = loaded;
   const lpManager = loadLpManagerKeypair();
   if (!lpManager) return; // already validated by checkLpReady, but appeases TS
+
+  if (await isProgramPaused()) {
+    logger.info("lpDeploy skipped — program paused");
+    return;
+  }
 
   for (const room of rooms) {
     try {

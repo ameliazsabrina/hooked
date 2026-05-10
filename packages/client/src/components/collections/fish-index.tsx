@@ -19,9 +19,19 @@ interface CatchEntry {
   shellValue: number;
 }
 
+interface ApexFishEntry {
+  id: string;
+  name: string;
+  weightMinKg: number;
+  weightMaxKg: number;
+  assetUrl: string;
+}
+
 interface FishIndexProps {
   catches?: CatchEntry[];
   discoveredSpecies?: Set<string>;
+  /** Apex fish the player has caught at any point (lifetime). */
+  discoveredApexFish?: ApexFishEntry[];
   onSellFish?: (catchId: string, shellValue: number) => Promise<any>;
   onSellFishBulk?: (catchIds: string[]) => Promise<any>;
   onClose: () => void;
@@ -60,6 +70,7 @@ type ConfirmState =
 export function FishIndex({
   catches = [],
   discoveredSpecies,
+  discoveredApexFish = [],
   onSellFish,
   onSellFishBulk,
   onClose,
@@ -75,6 +86,10 @@ export function FishIndex({
   const entries = useMemo<Map<string, SpeciesEntry>>(() => {
     const map = new Map<string, SpeciesEntry>();
     for (const species of FISH_SPECIES) {
+      // Apex tier slots are admin-managed (event pool ∪ caught), rendered via
+      // `apexSlots` below — skip the static FISH_SPECIES apex entries here so
+      // they don't double-render or collide on name lookups.
+      if (species.rarity === FishRarity.Apex) continue;
       map.set(species.name, {
         species,
         catches: [],
@@ -95,16 +110,42 @@ export function FishIndex({
     return map;
   }, [catches]);
 
+  // Apex slots: the active event's pinned pool plus any apex fish the player
+  // has ever caught. De-duped by ApexFish id so a fish that's both in the
+  // current event and previously caught only shows up once.
+  const apexSlots = useMemo<ApexFishEntry[]>(() => {
+    const byId = new Map<string, ApexFishEntry>();
+    if (apexEventLive) {
+      for (const f of eventStatus?.apexFishes ?? []) byId.set(f.id, f);
+    }
+    for (const f of discoveredApexFish) {
+      if (!byId.has(f.id)) byId.set(f.id, f);
+    }
+    return [...byId.values()];
+  }, [apexEventLive, eventStatus?.apexFishes, discoveredApexFish]);
+
+  const discoveredApexIds = useMemo(
+    () => new Set(discoveredApexFish.map((f) => f.id)),
+    [discoveredApexFish],
+  );
+
   const discoveredCount = useMemo(() => {
     let n = 0;
     entries.forEach((e) => {
       if (discoveredSpecies?.has(e.species.name) || e.catches.length > 0) n++;
     });
-    return n;
-  }, [entries, discoveredSpecies]);
+    return n + discoveredApexIds.size;
+  }, [entries, discoveredSpecies, discoveredApexIds]);
 
-  const totalSpecies = FISH_SPECIES.length;
+  // Total = non-apex species + apex slots currently visible (pool ∪ caught).
+  const totalSpecies =
+    FISH_SPECIES.filter((s) => s.rarity !== FishRarity.Apex).length +
+    apexSlots.length;
   const selected = selectedName ? (entries.get(selectedName) ?? null) : null;
+  const selectedApex = useMemo(() => {
+    if (!selectedName) return null;
+    return apexSlots.find((f) => f.name === selectedName) ?? null;
+  }, [selectedName, apexSlots]);
 
   const dismissConfirm = () => {
     if (!selling) setConfirm(null);
@@ -161,10 +202,27 @@ export function FishIndex({
         <div className="fish-index-tiers">
           {RARITY_ORDER.map((rarity) => {
             const rarityColor = RARITY_COLORS[rarity];
-            const speciesOfTier = FISH_SPECIES.filter(
-              (s) => s.rarity === rarity,
-            );
-            if (rarity === FishRarity.Apex && !apexEventLive) {
+
+            if (rarity === FishRarity.Apex) {
+              if (apexSlots.length === 0) {
+                return (
+                  <div key={rarity} className="fish-index-tier">
+                    <span
+                      className="fish-index-tier-badge"
+                      style={{ backgroundColor: rarityColor }}
+                    >
+                      {RARITY_LABELS[rarity].toUpperCase()}
+                    </span>
+                    <div
+                      className="fish-index-tier-caption"
+                      style={{ borderColor: rarityColor }}
+                    >
+                      Apex catches surface only during seasonal events — keep
+                      an eye out for the next one.
+                    </div>
+                  </div>
+                );
+              }
               return (
                 <div key={rarity} className="fish-index-tier">
                   <span
@@ -173,16 +231,42 @@ export function FishIndex({
                   >
                     {RARITY_LABELS[rarity].toUpperCase()}
                   </span>
-                  <div
-                    className="fish-index-tier-caption"
-                    style={{ borderColor: rarityColor }}
-                  >
-                    Apex catches surface only during seasonal events — keep an
-                    eye out for the next one.
+                  <div className="fish-index-tier-slots">
+                    {apexSlots.map((apex) => {
+                      const caught = discoveredApexIds.has(apex.id);
+                      const isSelected = selectedName === apex.name;
+                      return (
+                        <button
+                          key={apex.id}
+                          type="button"
+                          className={`fish-index-slot fish-index-slot-apex${isSelected ? " fish-index-slot-selected" : ""}${!caught ? " fish-index-slot-locked" : ""}`}
+                          style={{
+                            borderColor: caught
+                              ? rarityColor
+                              : "rgba(255, 255, 255, 0.2)",
+                          }}
+                          onClick={() => setSelectedName(apex.name)}
+                          title={caught ? apex.name : "Undiscovered"}
+                        >
+                          <img
+                            src={apex.assetUrl}
+                            alt={caught ? apex.name : "Undiscovered"}
+                            className="fish-index-slot-art"
+                          />
+                          {!caught && (
+                            <span className="fish-index-slot-lock">???</span>
+                          )}
+                        </button>
+                      );
+                    })}
                   </div>
                 </div>
               );
             }
+
+            const speciesOfTier = FISH_SPECIES.filter(
+              (s) => s.rarity === rarity,
+            );
             if (speciesOfTier.length === 0) return null;
             return (
               <div key={rarity} className="fish-index-tier">
@@ -236,7 +320,12 @@ export function FishIndex({
         </div>
 
         <div className="fish-index-detail">
-          {!selected ? (
+          {selectedApex ? (
+            <ApexDetail
+              apex={selectedApex}
+              discovered={discoveredApexIds.has(selectedApex.id)}
+            />
+          ) : !selected ? (
             <div className="fish-index-detail-empty">
               Select a fish to see details
             </div>
@@ -420,6 +509,44 @@ function SpeciesDetail({
         {inInventory && isApex && (
           <div className="fish-index-detail-hint">Apex cannot be sold</div>
         )}
+      </div>
+    </div>
+  );
+}
+
+interface ApexDetailProps {
+  apex: ApexFishEntry;
+  discovered: boolean;
+}
+
+function ApexDetail({ apex, discovered }: ApexDetailProps) {
+  const rarityColor = RARITY_COLORS[FishRarity.Apex];
+  return (
+    <div className="fish-index-detail-body">
+      <img
+        src={apex.assetUrl}
+        alt={discovered ? apex.name : "Undiscovered"}
+        className={`fish-index-detail-art fish-index-detail-art-apex${!discovered ? " fish-index-detail-art-locked" : ""}`}
+      />
+      <div className="fish-index-detail-info">
+        <div
+          className="fish-index-detail-name"
+          style={{ color: discovered ? rarityColor : "rgba(255,255,255,0.55)" }}
+        >
+          {discovered ? apex.name : "???"}
+        </div>
+        <div className="fish-index-detail-rarity">
+          {RARITY_LABELS[FishRarity.Apex]}
+        </div>
+        <div className="fish-index-detail-row">
+          <span>Weight range</span>
+          <span>
+            {apex.weightMinKg}–{apex.weightMaxKg} kg
+          </span>
+        </div>
+        <div className="fish-index-detail-hint">
+          {discovered ? "Apex cannot be sold" : "Not yet caught"}
+        </div>
       </div>
     </div>
   );

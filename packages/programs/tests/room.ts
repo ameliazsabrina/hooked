@@ -1,12 +1,16 @@
+// Use namespace imports throughout. @coral-xyz/anchor and @solana/web3.js
+// publish CommonJS, so under Node 22+'s native TypeScript stripping (which
+// runs the file as ESM) named imports like `{ BN, Program }` fail with
+// "Named export not found". Namespace imports + value-level destructuring
+// work in both CJS-via-ts-node and ESM-from-Node modes; the destructured
+// classes (PublicKey, Keypair, BN, Program) double as their own types.
 import * as anchor from "@coral-xyz/anchor";
-import { Program, BN } from "@coral-xyz/anchor";
-import {
-  PublicKey,
-  Keypair,
-  LAMPORTS_PER_SOL,
-} from "@solana/web3.js";
+import * as web3 from "@solana/web3.js";
 import { expect } from "chai";
 import type { HookedRooms } from "../target/types/hooked_rooms";
+
+const { Program, BN } = anchor;
+const { PublicKey, Keypair, LAMPORTS_PER_SOL } = web3;
 
 // PRD v2.2 — weekly SOL rooms
 describe("room lifecycle", () => {
@@ -26,6 +30,7 @@ describe("room lifecycle", () => {
   const player2 = Keypair.generate();
 
   const treasury = Keypair.generate();
+  const lpManager = Keypair.generate();
 
   // ─── PDA helpers ─────────────────────────────────────────────────────
 
@@ -50,6 +55,13 @@ describe("room lifecycle", () => {
     )[0];
   }
 
+  function programConfigPda(): PublicKey {
+    return PublicKey.findProgramAddressSync(
+      [Buffer.from("config")],
+      program.programId
+    )[0];
+  }
+
   before(async () => {
     const fund = async (kp: Keypair, sol: number) => {
       const sig = await provider.connection.requestAirdrop(
@@ -63,6 +75,18 @@ describe("room lifecycle", () => {
       fund(player2, 5),
       fund(treasury, 1),
     ]);
+
+    // Bootstrap ProgramConfig. Every state-changing ix (create_room,
+    // deposit_room, close_room, …) requires this account to exist and reads
+    // `paused` from it. Idempotent: if a previous run left it behind, skip.
+    const config = programConfigPda();
+    const existing = await provider.connection.getAccountInfo(config);
+    if (!existing) {
+      await program.methods
+        .initProgramConfig(treasury.publicKey, lpManager.publicKey)
+        .accounts({ admin: admin.publicKey } as any)
+        .rpc();
+    }
   });
 
   // =====================================================================
@@ -331,13 +355,15 @@ describe("room lifecycle", () => {
 
   it("rejects withdraw_to_lp_manager before lp_deploy_at", async () => {
     const room = roomPda(ROOM_ID);
-    const lpManager = Keypair.generate();
 
     try {
       await program.methods
         .withdrawToLpManager(ONE_SOL)
         .accounts({
           room,
+          // Must be the canonical lp_manager pinned in ProgramConfig — a
+          // random key would trigger LpManagerMismatch first and mask the
+          // window-not-open assertion this test is actually checking.
           lpManager: lpManager.publicKey,
           admin: admin.publicKey,
         } as any)
@@ -350,7 +376,6 @@ describe("room lifecycle", () => {
 
   it("rejects withdraw_to_lp_manager from non-admin", async () => {
     const room = roomPda(ROOM_ID);
-    const lpManager = Keypair.generate();
 
     try {
       await program.methods
@@ -375,7 +400,6 @@ describe("room lifecycle", () => {
 
   it("rejects withdraw_to_lp_manager with zero amount", async () => {
     const room = roomPda(ROOM_ID);
-    const lpManager = Keypair.generate();
 
     try {
       await program.methods
@@ -572,6 +596,128 @@ describe("room lifecycle", () => {
 
     reg = await program.account.gatewayRegistry.fetch(registry);
     expect(reg.keyCount).to.equal(1);
+  });
+
+  // =====================================================================
+  // Pause switch — emergency kill-switch on ProgramConfig.
+  //
+  // Before mainnet ship: `set_paused(true)` must block every state-changing
+  // ix until admin flips it back. Using deposit_room as the canary because
+  // it's the highest-volume user-facing path; if pause works there it works
+  // everywhere (the gate is identical).
+  // =====================================================================
+
+  describe("pause switch", () => {
+    const pausePlayer = Keypair.generate();
+    const pauseRoomId = new BN(9_001);
+
+    before(async () => {
+      const sig = await provider.connection.requestAirdrop(
+        pausePlayer.publicKey,
+        3 * LAMPORTS_PER_SOL
+      );
+      await provider.connection.confirmTransaction(sig);
+
+      // Fresh room for this block so we don't collide with the lifecycle
+      // suite's shared room state.
+      await program.methods
+        .createRoom(pauseRoomId)
+        .accounts({ admin: admin.publicKey } as any)
+        .rpc();
+    });
+
+    afterEach(async () => {
+      // Belt-and-suspenders: never leave the program paused between tests.
+      try {
+        await program.methods
+          .setPaused(false)
+          .accounts({ admin: admin.publicKey } as any)
+          .rpc();
+      } catch {
+        // Ignore — config may already be unpaused.
+      }
+    });
+
+    it("admin can flip paused on and off", async () => {
+      const config = programConfigPda();
+
+      await program.methods
+        .setPaused(true)
+        .accounts({ admin: admin.publicKey } as any)
+        .rpc();
+      let cfg = await program.account.programConfig.fetch(config);
+      expect(cfg.paused).to.equal(true);
+
+      await program.methods
+        .setPaused(false)
+        .accounts({ admin: admin.publicKey } as any)
+        .rpc();
+      cfg = await program.account.programConfig.fetch(config);
+      expect(cfg.paused).to.equal(false);
+    });
+
+    it("rejects set_paused from non-admin", async () => {
+      try {
+        await program.methods
+          .setPaused(true)
+          .accounts({ admin: player1.publicKey } as any)
+          .signers([player1])
+          .rpc();
+        expect.fail("should reject non-admin");
+      } catch (err: any) {
+        const s = err.toString();
+        expect(
+          s.includes("Unauthorized") ||
+            s.includes("ConstraintRaw") ||
+            s.includes("2012")
+        ).to.equal(true);
+      }
+    });
+
+    it("blocks deposit_room while paused, succeeds after unpause", async () => {
+      const room = roomPda(pauseRoomId);
+
+      // Pause.
+      await program.methods
+        .setPaused(true)
+        .accounts({ admin: admin.publicKey } as any)
+        .rpc();
+
+      // Deposit must fail with Paused.
+      try {
+        await program.methods
+          .depositRoom(ONE_SOL)
+          .accounts({
+            room,
+            authority: pausePlayer.publicKey,
+          } as any)
+          .signers([pausePlayer])
+          .rpc();
+        expect.fail("deposit should have been blocked by Paused");
+      } catch (err: any) {
+        expect(err.toString()).to.contain("Paused");
+      }
+
+      // Unpause.
+      await program.methods
+        .setPaused(false)
+        .accounts({ admin: admin.publicKey } as any)
+        .rpc();
+
+      // Same deposit now succeeds.
+      await program.methods
+        .depositRoom(ONE_SOL)
+        .accounts({
+          room,
+          authority: pausePlayer.publicKey,
+        } as any)
+        .signers([pausePlayer])
+        .rpc();
+
+      const acc = await program.account.room.fetch(room);
+      expect(acc.depositedLamports.toNumber()).to.equal(ONE_SOL.toNumber());
+      expect(acc.humanCount).to.equal(1);
+    });
   });
 
   it("rejects update for an entry belonging to a different room", async () => {

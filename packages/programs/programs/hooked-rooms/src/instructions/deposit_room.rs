@@ -2,12 +2,12 @@ use anchor_lang::prelude::*;
 use anchor_lang::system_program::{self, Transfer};
 
 use hooked_common::{
-    is_valid_deposit_lamports, MAX_DEPOSIT_LAMPORTS, MIN_DEPOSIT_LAMPORTS, ROOM_ENTRY_SEED,
-    ROOM_SEED, ROOM_VAULT_SEED,
+    is_valid_deposit_lamports, CONFIG_SEED, MAX_DEPOSIT_LAMPORTS, MIN_DEPOSIT_LAMPORTS,
+    ROOM_ENTRY_SEED, ROOM_SEED, ROOM_VAULT_SEED,
 };
 
 use crate::errors::RoomError;
-use crate::state::{Room, RoomEntry, RoomStatus};
+use crate::state::{ProgramConfig, Room, RoomEntry, RoomStatus, ROOM_ENTRY_VERSION};
 
 #[derive(Accounts)]
 pub struct DepositRoom<'info> {
@@ -17,6 +17,12 @@ pub struct DepositRoom<'info> {
         bump = room.bump,
     )]
     pub room: Account<'info, Room>,
+
+    #[account(
+        seeds = [CONFIG_SEED],
+        bump = config.bump,
+    )]
+    pub config: Account<'info, ProgramConfig>,
 
     /// CHECK: Room-owned SOL vault PDA, validated by seeds + room.vault_bump.
     #[account(
@@ -42,6 +48,8 @@ pub struct DepositRoom<'info> {
 }
 
 pub fn handler(ctx: Context<DepositRoom>, deposit_lamports: u64) -> Result<()> {
+    require!(!ctx.accounts.config.paused, RoomError::Paused);
+
     let now = Clock::get()?.unix_timestamp;
     let room = &ctx.accounts.room;
 
@@ -87,6 +95,7 @@ pub fn handler(ctx: Context<DepositRoom>, deposit_lamports: u64) -> Result<()> {
     )?;
 
     let entry = &mut ctx.accounts.entry;
+    entry.version = ROOM_ENTRY_VERSION;
     entry.room = ctx.accounts.room.key();
     entry.authority = ctx.accounts.authority.key();
     entry.deposit_lamports = deposit_lamports;
@@ -97,6 +106,7 @@ pub fn handler(ctx: Context<DepositRoom>, deposit_lamports: u64) -> Result<()> {
     entry.returned = false;
     entry.returned_at = 0;
     entry.bump = ctx.bumps.entry;
+    entry._reserved = [0u8; 32];
 
     let room = &mut ctx.accounts.room;
     room.deposited_lamports = new_total;

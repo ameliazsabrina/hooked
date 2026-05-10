@@ -1,4 +1,5 @@
 use anchor_lang::prelude::*;
+use anchor_lang::system_program::{self, Transfer};
 
 use hooked_common::{BPS_SCALE, CONFIG_SEED, ROOM_SEED, ROOM_VAULT_SEED, YIELD_SHARE_PROTOCOL_BPS};
 
@@ -23,6 +24,9 @@ pub struct CloseRoom<'info> {
     pub config: Account<'info, ProgramConfig>,
 
     /// CHECK: Room-owned SOL vault PDA, validated by seeds + room.vault_bump.
+    /// Owned by System Program (created by depositors via system::transfer),
+    /// so lamport withdrawals must go through a system_program::transfer
+    /// CPI with the vault's PDA seeds for invoke_signed.
     #[account(
         mut,
         seeds = [ROOM_VAULT_SEED, room.key().as_ref()],
@@ -38,9 +42,13 @@ pub struct CloseRoom<'info> {
     pub treasury: UncheckedAccount<'info>,
 
     pub admin: Signer<'info>,
+
+    pub system_program: Program<'info, System>,
 }
 
 pub fn handler(ctx: Context<CloseRoom>, yield_lamports: u64) -> Result<()> {
+    require!(!ctx.accounts.config.paused, RoomError::Paused);
+
     let now = Clock::get()?.unix_timestamp;
     let room = &ctx.accounts.room;
 
@@ -53,20 +61,25 @@ pub fn handler(ctx: Context<CloseRoom>, yield_lamports: u64) -> Result<()> {
         .ok_or(RoomError::Overflow)?;
 
     if protocol_share > 0 {
-        let vault_info = ctx.accounts.room_vault.to_account_info();
-        let treasury_info = ctx.accounts.treasury.to_account_info();
         require!(
-            vault_info.lamports() >= protocol_share,
+            ctx.accounts.room_vault.lamports() >= protocol_share,
             RoomError::VaultInsufficientFunds
         );
-        **vault_info.try_borrow_mut_lamports()? = vault_info
-            .lamports()
-            .checked_sub(protocol_share)
-            .ok_or(RoomError::Overflow)?;
-        **treasury_info.try_borrow_mut_lamports()? = treasury_info
-            .lamports()
-            .checked_add(protocol_share)
-            .ok_or(RoomError::Overflow)?;
+        let room_key = ctx.accounts.room.key();
+        let vault_bump = ctx.accounts.room.vault_bump;
+        let vault_seeds: &[&[u8]] = &[ROOM_VAULT_SEED, room_key.as_ref(), &[vault_bump]];
+        let signer_seeds: &[&[&[u8]]] = &[vault_seeds];
+        system_program::transfer(
+            CpiContext::new_with_signer(
+                ctx.accounts.system_program.to_account_info(),
+                Transfer {
+                    from: ctx.accounts.room_vault.to_account_info(),
+                    to: ctx.accounts.treasury.to_account_info(),
+                },
+                signer_seeds,
+            ),
+            protocol_share,
+        )?;
     }
 
     // first_place / second_place / third_place are not written here. They are

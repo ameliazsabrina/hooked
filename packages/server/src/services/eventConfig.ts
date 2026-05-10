@@ -32,6 +32,8 @@ export interface EventStatus {
   endsAt: number;
   /** Basis points (0..5000) redirected from Basic to Apex during the event. */
   apexBp: number;
+  /** Total SOL prize pool announced to players in the HUD. */
+  prizePoolSol: number;
   /**
    * Apex fish the cast roll picks from when Apex rolls during this event.
    * Includes assetUrl + name so HUD banners can show fish art without an
@@ -54,6 +56,7 @@ function statusEqual(a: EventStatus | null, b: EventStatus | null): boolean {
   if (a.startsAt !== b.startsAt) return false;
   if (a.endsAt !== b.endsAt) return false;
   if (a.apexBp !== b.apexBp) return false;
+  if (a.prizePoolSol !== b.prizePoolSol) return false;
   if (a.apexFishes.length !== b.apexFishes.length) return false;
   for (let i = 0; i < a.apexFishes.length; i++) {
     if (a.apexFishes[i].id !== b.apexFishes[i].id) return false;
@@ -95,6 +98,7 @@ async function fetchFromDb(): Promise<EventStatus | null> {
     startsAt: Math.floor(row.startsAt.getTime() / 1000),
     endsAt: Math.floor(row.endsAt.getTime() / 1000),
     apexBp: row.apexBp,
+    prizePoolSol: row.prizePoolSol,
     apexFishes,
   };
 }

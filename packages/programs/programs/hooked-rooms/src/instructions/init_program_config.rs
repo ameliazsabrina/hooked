@@ -2,7 +2,7 @@ use anchor_lang::prelude::*;
 
 use hooked_common::CONFIG_SEED;
 
-use crate::state::ProgramConfig;
+use crate::state::{ProgramConfig, PROGRAM_CONFIG_VERSION};
 
 #[derive(Accounts)]
 pub struct InitProgramConfig<'info> {
@@ -27,9 +27,12 @@ pub fn handler(
     lp_manager: Pubkey,
 ) -> Result<()> {
     let config = &mut ctx.accounts.config;
+    config.version = PROGRAM_CONFIG_VERSION;
     config.admin = ctx.accounts.admin.key();
     config.treasury = treasury;
     config.lp_manager = lp_manager;
+    config.paused = false;
     config.bump = ctx.bumps.config;
+    config._reserved = [0u8; 128];
     Ok(())
 }

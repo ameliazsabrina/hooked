@@ -14,9 +14,11 @@ import {
  *
  * Required env vars:
  *   ADMIN_KEYPAIR        — signer of init; becomes the only key authorized
- *                          to call set_treasury / set_lp_manager later.
- *                          Should be a separate cold/multisig key, NOT the
- *                          same as TREASURY_KEYPAIR.
+ *                          to call set_treasury / set_lp_manager / set_paused
+ *                          later. Must be a different keypair from
+ *                          TREASURY_KEYPAIR (the script enforces this) so a
+ *                          treasury compromise doesn't double as an admin
+ *                          compromise.
  *   TREASURY_KEYPAIR     — its pubkey is recorded as ProgramConfig.treasury.
  *                          close_room and finalize_room will reject any other
  *                          treasury account.

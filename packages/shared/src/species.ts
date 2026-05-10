@@ -35,9 +35,9 @@ export const FISH_SPECIES: FishSpecies[] = [
   { name: "Colossal Squid", rarity: FishRarity.Legendary, zone: FishingZone.Abyss, weightMin: 20.0, weightMax: 35.0, asset: "FishGiant-Octopus.png" },
 
   // Apex (Colosseum event) — gated server-side by the EventConfig PDA.
-  { name: "Anh Lucerna", rarity: FishRarity.Apex, zone: FishingZone.Abyss, weightMin: 30.0, weightMax: 50.0, asset: "colo-apex-fish/Anh-Lucerna.png" },
-  { name: "Mattus Aureus", rarity: FishRarity.Apex, zone: FishingZone.Abyss, weightMin: 50.0, weightMax: 80.0, asset: "colo-apex-fish/Mattus-Aureus.png" },
-  { name: "Maximus Tridens", rarity: FishRarity.Apex, zone: FishingZone.Abyss, weightMin: 70.0, weightMax: 100.0, asset: "colo-apex-fish/Maximus-Tridens.png" },
+  { name: "Anh Lucerna", rarity: FishRarity.Apex, zone: FishingZone.Abyss, weightMin: 30.0, weightMax: 50.0, asset: "apex/Anh-Lucerna.png" },
+  { name: "Mattus Aureus", rarity: FishRarity.Apex, zone: FishingZone.Abyss, weightMin: 50.0, weightMax: 80.0, asset: "apex/Mattus-Aureus.png" },
+  { name: "Maximus Tridens", rarity: FishRarity.Apex, zone: FishingZone.Abyss, weightMin: 70.0, weightMax: 100.0, asset: "apex/Maximus-Tridens.png" },
 ];
 
 // Mirror of on-chain weights — source of truth is

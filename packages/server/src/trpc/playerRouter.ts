@@ -2,7 +2,14 @@ import { z } from "zod";
 import { TRPCError } from "@trpc/server";
 import { Connection, clusterApiUrl } from "@solana/web3.js";
 import { router, protectedProcedure } from "./trpc.js";
-import { Player, PoolTier, Catch, Room, FishingSession } from "../db/schema.js";
+import {
+  ApexFish,
+  Player,
+  PoolTier,
+  Catch,
+  Room,
+  FishingSession,
+} from "../db/schema.js";
 import type { Types } from "mongoose";
 import { env } from "../config/env.js";
 import { isValidDepositAmount, VALID_DEPOSIT_AMOUNTS } from "@hooked/shared";
@@ -27,11 +34,6 @@ function currentSessionStart(now: Date): Date {
     start.setUTCHours(14);
   }
   return start;
-}
-
-function parseSpeciesId(species: string): number {
-  const m = /^species_(\d+)$/.exec(species);
-  return m ? Number(m[1]) : 0;
 }
 
 const rpcUrl = env.HELIUS_API_KEY
@@ -149,6 +151,7 @@ export const playerRouter = router({
           score: 0,
           catches: [],
           discoveredSpeciesIds: [],
+          discoveredApexFish: [],
           date,
           window,
         };
@@ -201,22 +204,60 @@ export const playerRouter = router({
       const score = scoreAgg[0]?.total ?? 0;
 
       // Inventory: most-recent un-released catches, capped at `limit`.
+      // Apex catches are excluded — they're surfaced through `discoveredApexFish`
+      // (resolved against the admin-managed ApexFish catalog) and rendered by
+      // the Fish Index's apex tier separately. Apex aren't sellable, so they
+      // don't belong in the regular sell-able inventory list.
       const inventory = await Catch.find({
         playerId,
         caughtAt: { $gte: windowStart, $lte: windowEnd },
         released: { $ne: true },
+        speciesId: { $gte: 0 },
       })
         .sort({ caughtAt: -1 })
         .limit(limit)
         .lean();
 
-      // Lifetime-discovered species: every species this player has ever caught,
-      // ignoring the room window and the released flag. The Fish Index uses
-      // this so unlock state survives selling and room rotation.
-      const discoveredRaw = await Catch.distinct("species", { playerId });
-      const discoveredSpeciesIds = (discoveredRaw as string[]).map(
-        parseSpeciesId,
-      );
+      // Lifetime-discovered (non-apex) species: distinct numeric speciesId
+      // across every catch this player has ever made, ignoring window + released.
+      // Filtering `speciesId >= 0` excludes apex (rng stores -1) and any legacy
+      // null rows. The Fish Index uses this so unlock state survives selling
+      // and room rotation.
+      const discoveredSpeciesIds = (
+        (await Catch.distinct("speciesId", {
+          playerId,
+          speciesId: { $gte: 0 },
+        })) as number[]
+      ).filter((id): id is number => typeof id === "number");
+
+      // Lifetime-discovered apex fish: join distinct apexFishIds from this
+      // player's catches against the admin-managed ApexFish catalog so the
+      // client can render apex slots with name + assetUrl. Skip the lookup
+      // when no apex catches exist (the common case) to avoid the join.
+      const apexIds = (await Catch.distinct("apexFishId", {
+        playerId,
+        apexFishId: { $ne: null },
+      })) as Types.ObjectId[];
+      let discoveredApexFish: Array<{
+        id: string;
+        name: string;
+        weightMinKg: number;
+        weightMaxKg: number;
+        assetUrl: string;
+      }> = [];
+      if (apexIds.length > 0) {
+        const docs = await ApexFish.find(
+          { _id: { $in: apexIds } },
+          { name: 1, weightMinKg: 1, weightMaxKg: 1 },
+        ).lean();
+        discoveredApexFish = docs.map((d) => ({
+          id: String(d._id),
+          name: d.name,
+          weightMinKg: d.weightMinKg,
+          weightMaxKg: d.weightMaxKg,
+          assetUrl: `${env.SERVER_PUBLIC_URL}/admin/apex-fish/${String(d._id)}/image`,
+        }));
+      }
 
       return {
         bait,
@@ -224,9 +265,10 @@ export const playerRouter = router({
         date,
         window,
         discoveredSpeciesIds,
+        discoveredApexFish,
         catches: inventory.map((c) => ({
           id: String(c._id),
-          speciesId: parseSpeciesId(c.species),
+          speciesId: c.speciesId ?? 0,
           rarity: Math.max(
             0,
             RARITY_LABELS.indexOf(c.rarity as typeof RARITY_LABELS[number]),

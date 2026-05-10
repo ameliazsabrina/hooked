@@ -4,7 +4,8 @@
   "private": true,
   "scripts": {
     "build": "anchor build",
-    "test": "anchor test"
+    "test": "./scripts/test-surfpool.sh",
+    "test:devnet": "anchor test --skip-local-validator --provider.cluster devnet"
   },
   "dependencies": {
     "@coral-xyz/anchor": "^0.32.0",

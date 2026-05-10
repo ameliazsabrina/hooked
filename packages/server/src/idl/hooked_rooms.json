@@ -1,5 +1,5 @@
 {
-  "address": "4iF8DPptdoSYt4BX549pzieaoeCg6x7BwbMEwWF5M2hd",
+  "address": "4ERUTWVN3aJP5tghEcZNd555NGcK3Jr8B21mnBB8JSMg",
   "metadata": {
     "name": "hooked_rooms",
     "version": "0.1.0",
@@ -116,6 +116,11 @@
         },
         {
           "name": "room_vault",
+          "docs": [
+            "Owned by System Program (created by depositors via system::transfer),",
+            "so lamport withdrawals must go through a system_program::transfer",
+            "CPI with the vault's PDA seeds for invoke_signed."
+          ],
           "writable": true,
           "pda": {
             "seeds": [
@@ -148,6 +153,10 @@
         {
           "name": "admin",
           "signer": true
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
         }
       ],
       "args": [
@@ -187,6 +196,24 @@
               {
                 "kind": "arg",
                 "path": "room_id"
+              }
+            ]
+          }
+        },
+        {
+          "name": "config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
               }
             ]
           }
@@ -271,6 +298,24 @@
           }
         },
         {
+          "name": "config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
           "name": "room_vault",
           "writable": true,
           "pda": {
@@ -346,6 +391,76 @@
       ]
     },
     {
+      "name": "dev_force_close_at",
+      "docs": [
+        "DEV ONLY — overwrite a room's `closes_at` so the settlement flow",
+        "can be tested without waiting the full 7-day window. Admin-gated;",
+        "remove or feature-flag before mainnet."
+      ],
+      "discriminator": [
+        238,
+        149,
+        222,
+        205,
+        94,
+        91,
+        181,
+        244
+      ],
+      "accounts": [
+        {
+          "name": "room",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  111,
+                  111,
+                  109
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "room.room_id",
+                "account": "Room"
+              }
+            ]
+          }
+        },
+        {
+          "name": "config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "admin",
+          "signer": true
+        }
+      ],
+      "args": [
+        {
+          "name": "new_closes_at",
+          "type": "i64"
+        }
+      ]
+    },
+    {
       "name": "finalize_room",
       "discriminator": [
         138,
@@ -400,6 +515,11 @@
         },
         {
           "name": "room_vault",
+          "docs": [
+            "Owned by System Program (created by depositors via system::transfer),",
+            "so lamport withdrawals must go through a system_program::transfer",
+            "CPI with the vault's PDA seeds for invoke_signed."
+          ],
           "writable": true,
           "pda": {
             "seeds": [
@@ -432,6 +552,10 @@
         {
           "name": "admin",
           "signer": true
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
         }
       ],
       "args": []
@@ -638,7 +762,30 @@
           }
         },
         {
+          "name": "config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
           "name": "room_vault",
+          "docs": [
+            "Owned by System Program (created by depositors via system::transfer),",
+            "so lamport withdrawals must go through a system_program::transfer",
+            "CPI with the vault's PDA seeds for invoke_signed."
+          ],
           "writable": true,
           "pda": {
             "seeds": [
@@ -702,6 +849,10 @@
         {
           "name": "admin",
           "signer": true
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
         }
       ],
       "args": [
@@ -752,6 +903,50 @@
         {
           "name": "new_lp_manager",
           "type": "pubkey"
+        }
+      ]
+    },
+    {
+      "name": "set_paused",
+      "discriminator": [
+        91,
+        60,
+        125,
+        192,
+        176,
+        225,
+        166,
+        218
+      ],
+      "accounts": [
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "admin",
+          "signer": true
+        }
+      ],
+      "args": [
+        {
+          "name": "paused",
+          "type": "bool"
         }
       ]
     },
@@ -830,6 +1025,24 @@
                 "kind": "account",
                 "path": "room.room_id",
                 "account": "Room"
+              }
+            ]
+          }
+        },
+        {
+          "name": "config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
               }
             ]
           }
@@ -1196,6 +1409,16 @@
       "code": 6026,
       "name": "LpManagerMismatch",
       "msg": "LP manager account does not match the canonical ProgramConfig.lp_manager"
+    },
+    {
+      "code": 6027,
+      "name": "Paused",
+      "msg": "Program is paused — emergency switch is active"
+    },
+    {
+      "code": 6028,
+      "name": "UnsupportedAccountVersion",
+      "msg": "Account version is not supported by this program build"
     }
   ],
   "types": [
@@ -1204,6 +1427,10 @@
       "type": {
         "kind": "struct",
         "fields": [
+          {
+            "name": "version",
+            "type": "u8"
+          },
           {
             "name": "admin",
             "type": "pubkey"
@@ -1224,6 +1451,15 @@
           {
             "name": "bump",
             "type": "u8"
+          },
+          {
+            "name": "_reserved",
+            "type": {
+              "array": [
+                "u8",
+                64
+              ]
+            }
           }
         ]
       }
@@ -1233,6 +1469,10 @@
       "type": {
         "kind": "struct",
         "fields": [
+          {
+            "name": "version",
+            "type": "u8"
+          },
           {
             "name": "admin",
             "type": "pubkey"
@@ -1246,8 +1486,27 @@
             "type": "pubkey"
           },
           {
+            "name": "paused",
+            "docs": [
+              "Emergency switch. When true, every state-changing room ix returns",
+              "`RoomError::Paused`. Admin-only ix (set_treasury, set_lp_manager,",
+              "set_paused, gateway registry updates) remain callable so the admin",
+              "can recover, rotate keys, and unpause."
+            ],
+            "type": "bool"
+          },
+          {
             "name": "bump",
             "type": "u8"
+          },
+          {
+            "name": "_reserved",
+            "type": {
+              "array": [
+                "u8",
+                128
+              ]
+            }
           }
         ]
       }
@@ -1257,6 +1516,10 @@
       "type": {
         "kind": "struct",
         "fields": [
+          {
+            "name": "version",
+            "type": "u8"
+          },
           {
             "name": "admin",
             "type": "pubkey"
@@ -1348,6 +1611,20 @@
           {
             "name": "vault_bump",
             "type": "u8"
+          },
+          {
+            "name": "_reserved",
+            "docs": [
+              "Reserved for forward-compatible field additions. Zeroed at init.",
+              "Adding a field: shrink _reserved by sizeof(field), bump ROOM_VERSION,",
+              "and gate reads on version."
+            ],
+            "type": {
+              "array": [
+                "u8",
+                64
+              ]
+            }
           }
         ]
       }
@@ -1357,6 +1634,10 @@
       "type": {
         "kind": "struct",
         "fields": [
+          {
+            "name": "version",
+            "type": "u8"
+          },
           {
             "name": "room",
             "type": "pubkey"
@@ -1396,6 +1677,19 @@
           {
             "name": "bump",
             "type": "u8"
+          },
+          {
+            "name": "_reserved",
+            "docs": [
+              "Reserved for forward-compatible field additions. Per-user account, so",
+              "padding is conservative."
+            ],
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
           }
         ]
       }

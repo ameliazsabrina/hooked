@@ -1,5 +1,6 @@
 import { Program, AnchorProvider } from "@coral-xyz/anchor";
-import { Connection, PublicKey } from "@solana/web3.js";
+import { Connection, Keypair, PublicKey } from "@solana/web3.js";
+import type { Transaction, VersionedTransaction } from "@solana/web3.js";
 import type { AnchorWallet } from "@solana/wallet-adapter-react";
 import type { HookedRooms } from "../idl/hooked_rooms_types";
 import roomsIdlJson from "../idl/hooked_rooms.json";
@@ -28,6 +29,47 @@ export function getRoomsProgram(
     commitment: "confirmed",
   });
   return new Program<HookedRooms>(roomsIdlJson as HookedRooms, provider);
+}
+
+/**
+ * Read-only Program client. Used for fetching on-chain state without
+ * needing the user to connect a wallet — e.g. polling `ProgramConfig.paused`
+ * to gate the deposit UI before the user taps "Connect Wallet".
+ *
+ * The dummy wallet is intentional: AnchorProvider requires a wallet, but
+ * read-only calls (`program.account.*.fetch()`) never invoke `signTransaction`.
+ * If anything ever does try to sign through this provider it'll throw —
+ * that's the safety net so we don't accidentally send a tx without the
+ * user's actual wallet.
+ */
+export function getRoomsProgramReadonly(
+  connection: Connection
+): Program<HookedRooms> {
+  const dummy = Keypair.generate();
+  const wallet: AnchorWallet = {
+    publicKey: dummy.publicKey,
+    signTransaction: async <T extends Transaction | VersionedTransaction>(
+      _tx: T
+    ): Promise<T> => {
+      throw new Error("getRoomsProgramReadonly: cannot sign");
+    },
+    signAllTransactions: async <T extends Transaction | VersionedTransaction>(
+      _txs: T[]
+    ): Promise<T[]> => {
+      throw new Error("getRoomsProgramReadonly: cannot sign");
+    },
+  };
+  const provider = new AnchorProvider(connection, wallet, {
+    commitment: "confirmed",
+  });
+  return new Program<HookedRooms>(roomsIdlJson as HookedRooms, provider);
+}
+
+export function getProgramConfigPda(): PublicKey {
+  return PublicKey.findProgramAddressSync(
+    [Buffer.from("config")],
+    HOOKED_ROOMS_PROGRAM_ID
+  )[0];
 }
 
 export function getRoomPda(roomId: bigint | number): PublicKey {

@@ -14,29 +14,23 @@ function formatCountdown(secondsLeft: number): string {
   return `${s}s`;
 }
 
+function formatPrizeSol(sol: number): string {
+  if (!Number.isFinite(sol) || sol <= 0) return "0";
+  if (sol >= 100) return sol.toFixed(0);
+  if (sol >= 10) return sol.toFixed(1).replace(/\.0$/, "");
+  return sol.toFixed(2).replace(/\.?0+$/, "");
+}
+
 interface EventBannerProps {
   status: EventStatus | null;
 }
 
-/**
- * HUD-center banner that announces an active event when it transitions from
- * inactive→active (or when the player connects into an active one). Shows
- * the event name, "LIVE NOW" tag, countdown, and the active apex fish art
- * so players see what's up for grabs.
- *
- * Auto-dismisses after 6s; the persistent thin top-pill `EventAlert`
- * remains visible for the rest of the event. Re-pops on the next
- * inactive→active transition (driven by the `seenIdRef` so a re-render
- * with the same status doesn't replay the entrance).
- */
 export function EventBanner({ status }: EventBannerProps) {
   const [visible, setVisible] = useState(false);
   const [now, setNow] = useState(() => Math.floor(Date.now() / 1000));
   const seenIdRef = useRef<string | null>(null);
   const dismissTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Trigger the entrance whenever the (active, name, endsAt) tuple changes
-  // to a fresh active event. Re-renders that don't change the tuple are no-ops.
   useEffect(() => {
     if (!status?.active) {
       seenIdRef.current = null;
@@ -57,7 +51,6 @@ export function EventBanner({ status }: EventBannerProps) {
     };
   }, [status?.active, status?.name, status?.endsAt]);
 
-  // Tick the countdown only while the banner is on screen.
   useEffect(() => {
     if (!visible) return;
     const id = setInterval(() => setNow(Math.floor(Date.now() / 1000)), 1000);
@@ -69,6 +62,8 @@ export function EventBanner({ status }: EventBannerProps) {
   if (secondsLeft <= 0) return null;
 
   const fishes = status.apexFishes.slice(0, MAX_FISH_THUMBS);
+  const hasPrize = status.prizePoolSol > 0;
+  const prizeText = formatPrizeSol(status.prizePoolSol);
 
   return (
     <div
@@ -87,25 +82,44 @@ export function EventBanner({ status }: EventBannerProps) {
       </button>
       <div className="hud-event-banner-tag">LIVE NOW</div>
       <div className="hud-event-banner-name">{status.name || "Event"}</div>
+      <p className="hud-event-banner-blurb">
+        Apex fish are biting across the seas. Reel one in before the bell to
+        climb the leaderboard and claim a share of the prize pool.
+      </p>
       <div className="hud-event-banner-countdown">
         ends in {formatCountdown(secondsLeft)}
       </div>
+      {hasPrize && (
+        <div
+          className="hud-event-banner-pool"
+          aria-label={`${prizeText} SOL prize pool`}
+        >
+          <span className="hud-event-banner-pool-label">Prize pool</span>
+          <span className="hud-event-banner-pool-amount">
+            {prizeText}
+            <span className="hud-event-banner-pool-unit">SOL</span>
+          </span>
+        </div>
+      )}
       {fishes.length > 0 && (
-        <div className="hud-event-banner-fishes">
-          {fishes.map((f) => (
-            <div key={f.id} className="hud-event-banner-fish" title={f.name}>
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img
-                src={f.assetUrl}
-                alt={f.name}
-                className="hud-event-banner-fish-img"
-                onError={(e) => {
-                  (e.target as HTMLImageElement).style.visibility = "hidden";
-                }}
-              />
-              <div className="hud-event-banner-fish-name">{f.name}</div>
-            </div>
-          ))}
+        <div className="hud-event-banner-prize">
+          <div className="hud-event-banner-prize-label">Hunt them!</div>
+          <div className="hud-event-banner-fishes">
+            {fishes.map((f) => (
+              <div key={f.id} className="hud-event-banner-fish" title={f.name}>
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src={f.assetUrl}
+                  alt={f.name}
+                  className="hud-event-banner-fish-img"
+                  onError={(e) => {
+                    (e.target as HTMLImageElement).style.visibility = "hidden";
+                  }}
+                />
+                <div className="hud-event-banner-fish-name">{f.name}</div>
+              </div>
+            ))}
+          </div>
         </div>
       )}
     </div>

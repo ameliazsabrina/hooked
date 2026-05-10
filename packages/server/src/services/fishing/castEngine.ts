@@ -280,6 +280,10 @@ export async function submitInputSamples(input: SubmitInputSamplesInput): Promis
       rarity: RARITY_LABEL[rarityEnum],
       weightKg: effectiveWeight / 10, // hg → kg
       score,
+      // Sell value mirrors score — same formula the backfill CLI uses
+      // (cli/backfill-sell-values.ts). Without this, the schema default of
+      // 0 makes every catch worthless to sell, breaking the shell economy.
+      sellValue: score,
       zone: ZONE_OPEN_SEA,
       caughtAt: input.now ?? new Date(),
     });

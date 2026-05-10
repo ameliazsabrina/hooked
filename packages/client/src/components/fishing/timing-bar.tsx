@@ -2,14 +2,17 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   BAR_MAX_Y,
   BAR_MIN_Y,
+  INPUT_DELAY_S,
   PHYSICS_FIXED_DT,
   PHYSICS_MAX_STEP_ACCUM,
   initialFishingGameState,
   isFishInGreenBar,
+  lookupActiveInput,
   resolveGreenBarHeight,
-  stepPhysics,
+  stepAll,
   type FishSpecies,
   type FishingGameState,
+  type TimedInput,
   type VerticalProfile,
 } from "@hooked/shared";
 import { vibrate } from "~/utils/haptics";
@@ -43,12 +46,27 @@ interface TimingBarProps {
 // in the existing tick loop.
 const FIXED_DT = PHYSICS_FIXED_DT;
 const MAX_STEP_ACCUM = PHYSICS_MAX_STEP_ACCUM;
-// Exponential rate at which the local-predicted bar position is corrected
-// toward the server's authoritative bar position. High because the bar is
-// player-driven and the player needs the input to feel responsive — the
-// correction is mostly invisible because local prediction matches server
-// prediction closely (same heldRef → same stepPhysics).
-const BAR_CORRECTION_PER_SEC = 18;
+// Bar is NOT lerped — purely local prediction from heldRef. Fish is NOT
+// lerped client-side either — server pushes a SMOOTHED `fishYDisplay`
+// (smoothed by FISH_DISPLAY_SMOOTHING_PER_SEC in @hooked/shared) and we
+// adopt it directly so the in-bar predicate matches between client and
+// server bit-for-bit.
+// Server progress threshold above which the visual is allowed to display
+// 1.0. Must match the server's CLIENT_FINAL_FLOOR so the catch fires when
+// the visual fills.
+const NEAR_WIN_THRESHOLD = 0.65;
+// Threshold at which we consider local progress "visibly full" and fire
+// onResolve. Slightly under 1.0 because the cap pins local at exactly the
+// allowed value (0.99 most of the time, 1.0 when server >= NEAR_WIN); the
+// >= 0.95 trigger covers both cases without waiting on a fractional
+// floating-point rounding.
+const LOCAL_FULL_TRIGGER = 0.95;
+// Retry interval for the client-final signal while local progress is
+// "visibly full". Server may ignore the first attempt if its own progress
+// hasn't reached CLIENT_FINAL_FLOOR yet; subsequent retries will land once
+// server catches up. catch_resolved unmounts this component, so the retry
+// loop stops automatically the moment the server agrees.
+const RESOLVE_RETRY_MS = 250;
 // Mirrors server `SAFETY_TIMEOUT_MS` in ws/gateway.ts — cast is force-resolved
 // as escaped once this elapses.
 const CAST_TIMEOUT_S = 30;
@@ -90,91 +108,125 @@ export function TimingBar({
 
   const heldRef = useRef(false);
   const rafRef = useRef(0);
-  const accumRef = useRef(0);
-  const lastFrameRef = useRef(0);
   const lastHapticSecondRef = useRef<number | null>(null);
   const resolvedRef = useRef(false);
+  // Last RAF-time at which we fired the resolve callback. Used to throttle
+  // the retry loop so we don't spam `final` input_samples at 60Hz when the
+  // server takes time to reach CLIENT_FINAL_FLOOR.
+  const lastResolveSentAtRef = useRef(0);
   const [, force] = useState(0);
 
-  // Snapshot interpolation buffer for fish position + progress. The server
-  // pushes `fishing_state` ~20Hz; we render at 60Hz, interpolating linearly
-  // between the two most recent snapshots with a one-frame display delay.
-  // This is much smoother than chasing a moving target with an exponential
-  // lerp because (a) we never run local stepFishPosition (so there's no
-  // local-vs-server tug-of-war), and (b) the visual fishY/progress are
-  // exact intermediate points between known-good server samples.
-  const prevSnapRef = useRef<{
-    fishY: number;
-    progress: number;
-    recvAt: number;
-  } | null>(null);
-  const lastSnapRef = useRef<{
-    fishY: number;
-    progress: number;
-    recvAt: number;
-  } | null>(null);
-  // Bar (player-controlled): kept locally predicted for input responsiveness.
-  // Lerped toward server snapshots much faster than fish to keep the
-  // catchable area honest without lagging player input.
-  const serverBarTargetRef = useRef<number | null>(null);
+  // Lag-comp state. Origin = wallclock ms when the player FIRST holds; same
+  // anchor the server picks (the WS hook's `t_ms` of the first held=true
+  // input_sample is captured in the same React event handler as our local
+  // setHeld below, so origins coincide within μs). Until origin is set the
+  // RAF loop renders only — physics is paused, mirroring the server.
+  const inputHistoryRef = useRef<TimedInput[]>([]);
+  const clientOriginMsRef = useRef<number | null>(null);
+  const simTimeSRef = useRef(0);
+  const inputCursorRef = useRef(-1);
+
+  // The client now runs the FULL physics tick locally (`stepAll`) using the
+  // shared RNG seed. Because lag-comp aligns the input timeline and the
+  // smoothing constant is precomputed, both sides produce bit-equal fish +
+  // bar + progress trajectories — so we render fishY at 60Hz from local
+  // computation, not from 20Hz server snapshots that aliased into visible
+  // jitter. Server progress is kept as a soft cap (NEAR_WIN_THRESHOLD) and
+  // server fishY is logged when it drifts noticeably so we'd notice any
+  // determinism regression early.
+  const serverProgressRef = useRef<number | null>(null);
   useEffect(() => {
     if (!serverState) return;
-    const recvAt =
-      typeof performance !== "undefined" ? performance.now() : Date.now();
-    prevSnapRef.current = lastSnapRef.current;
-    lastSnapRef.current = {
-      fishY: serverState.fishY,
-      progress: serverState.progress,
-      recvAt,
-    };
-    serverBarTargetRef.current = serverState.barY;
+    serverProgressRef.current = serverState.progress;
+    const drift = Math.abs(stateRef.current.fishY - serverState.fishY);
+    if (drift > 30) {
+      console.warn(
+        `[timing-bar] fishY drift=${drift.toFixed(1)} ` +
+          `local=${stateRef.current.fishY.toFixed(1)} ` +
+          `server=${serverState.fishY.toFixed(1)} — ` +
+          `RNG/step alignment may have regressed`,
+      );
+    }
   }, [serverState]);
 
   useEffect(() => {
     const tick = (now: number) => {
-      if (!lastFrameRef.current) lastFrameRef.current = now;
-      const raw = (now - lastFrameRef.current) / 1000;
-      lastFrameRef.current = now;
-
-      // Bar: local prediction at fixed-dt for input feel. Fish is NOT
-      // stepped locally — pure server interpolation below — so the shared
-      // RNG state on the client never advances and there's no local-vs-
-      // server divergence to fight against.
-      accumRef.current = Math.min(accumRef.current + raw, MAX_STEP_ACCUM);
-      while (accumRef.current >= FIXED_DT) {
-        stepPhysics(stateRef.current, heldRef.current, FIXED_DT);
-        accumRef.current -= FIXED_DT;
-      }
-      // Soft-correct the bar toward server's view — much faster than fish
-      // because the player is actively driving it. This bounds local-bar
-      // drift without lagging the input feel.
-      const barTarget = serverBarTargetRef.current;
-      if (barTarget !== null) {
-        const k = 1 - Math.exp(-BAR_CORRECTION_PER_SEC * raw);
-        stateRef.current.barY += (barTarget - stateRef.current.barY) * k;
-      }
-
-      // Fish + progress: snapshot interpolation. With two snapshots, we
-      // render at `last.recvAt` (one server frame behind real-time) and
-      // linearly interpolate to `this.recvAt` as wall time advances. The
-      // 50ms display delay is invisible against typical RAF jitter and
-      // gives perfectly smooth fish motion regardless of when snapshots
-      // happen to land.
-      const last = lastSnapRef.current;
-      const prev = prevSnapRef.current;
-      if (last && prev) {
-        const interval = Math.max(1, last.recvAt - prev.recvAt);
-        const elapsed = now - last.recvAt;
-        const t = Math.max(0, Math.min(1, elapsed / interval));
-        stateRef.current.fishY = prev.fishY + (last.fishY - prev.fishY) * t;
-        stateRef.current.progress =
-          prev.progress + (last.progress - prev.progress) * t;
-      } else if (last) {
-        stateRef.current.fishY = last.fishY;
-        stateRef.current.progress = last.progress;
+      // Step physics up to (wallNow - origin)/1000 - INPUT_DELAY_S using
+      // the input that was active at each step's simTime. Identical mapping
+      // to the server's advancePhysics — same fixed dt, same input history,
+      // same default-false pre-origin — so the bar trajectory is a pure
+      // function of the input timeline shared by both sides.
+      const originMs = clientOriginMsRef.current;
+      if (originMs !== null) {
+        const wallSinceOriginS = (Date.now() - originMs) / 1000;
+        const targetSimTimeS = wallSinceOriginS - INPUT_DELAY_S;
+        const maxAdvance = simTimeSRef.current + MAX_STEP_ACCUM;
+        const stepUpTo = Math.min(targetSimTimeS, maxAdvance);
+        while (simTimeSRef.current + FIXED_DT <= stepUpTo) {
+          const lookup = lookupActiveInput(
+            inputHistoryRef.current,
+            simTimeSRef.current,
+            inputCursorRef.current,
+            false,
+          );
+          inputCursorRef.current = lookup.cursor;
+          stepAll(
+            stateRef.current,
+            profile,
+            greenBarHeight,
+            lookup.held,
+            FIXED_DT,
+          );
+          simTimeSRef.current += FIXED_DT;
+        }
       }
 
-      // Don't fire local terminal-resolve — the server is the authority.
+      // Asymmetric clamp on local progress:
+      //   - Local can LAG server freely (positive surprise — you catch
+      //     something that looked like a miss).
+      //   - Local can fill all the way to 0.99 regardless of server, so
+      //     the player gets full responsive feedback (visual nearly
+      //     full when their input has done the work).
+      //   - Local can only reach 1.0 once server is at NEAR_WIN_THRESHOLD.
+      //     This prevents the "bar full, no catch fires" case while
+      //     leaving the rest of the bar fully responsive to input.
+      const serverP = serverProgressRef.current;
+      if (serverP !== null) {
+        const cap = serverP >= NEAR_WIN_THRESHOLD ? 1.0 : 0.99;
+        if (stateRef.current.progress > cap) {
+          stateRef.current.progress = cap;
+        }
+      }
+
+      // Local progress is visibly full — fire the resolve callback. The hook
+      // sends a `final` input_samples; server force-catches if its own
+      // progress is past CLIENT_FINAL_FLOOR (0.65), otherwise ignores. We
+      // RETRY every RESOLVE_RETRY_MS while local is full so that if the
+      // first attempt arrives before server has caught up, subsequent
+      // attempts will land once server crosses the floor. catch_resolved
+      // (handled in the WS hook) unmounts this component, so retries stop
+      // automatically the moment the server agrees.
+      if (stateRef.current.progress >= LOCAL_FULL_TRIGGER) {
+        if (now - lastResolveSentAtRef.current >= RESOLVE_RETRY_MS) {
+          lastResolveSentAtRef.current = now;
+          resolvedRef.current = true;
+          // Diagnostic so we can compare local vs server progress at the
+          // moment the resolve fires. Drop after debugging.
+          console.warn(
+            `[timing-bar] FIRE onResolve: localProgress=${stateRef.current.progress.toFixed(3)} ` +
+              `localBarY=${stateRef.current.barY.toFixed(0)} ` +
+              `localFishY=${stateRef.current.fishY.toFixed(0)} ` +
+              `serverProgress=${(serverProgressRef.current ?? -1).toFixed(3)} ` +
+              `held=${heldRef.current}`,
+          );
+          onResolve?.("caught");
+        }
+      } else {
+        // Drained back below threshold — reset the retry clock so the next
+        // re-fill triggers a fresh attempt.
+        lastResolveSentAtRef.current = 0;
+      }
+
       force((n) => (n + 1) % 1_000_000);
       rafRef.current = requestAnimationFrame(tick);
     };
@@ -185,6 +237,17 @@ export function TimingBar({
   const setHeld = (held: boolean) => {
     if (heldRef.current === held) return;
     heldRef.current = held;
+    // Record the input into the local lag-comp history. Origin is set on
+    // the first held=true (mirrors the server) so origins coincide.
+    if (clientOriginMsRef.current === null) {
+      if (!held) {
+        onHoldChange(held);
+        return;
+      }
+      clientOriginMsRef.current = Date.now();
+    }
+    const simTimeS = (Date.now() - clientOriginMsRef.current) / 1000;
+    inputHistoryRef.current.push({ simTimeS, held });
     onHoldChange(held);
   };
 
@@ -199,14 +262,12 @@ export function TimingBar({
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.code !== "Space" || e.repeat) return;
       e.preventDefault();
-      heldRef.current = true;
-      onHoldChange(true);
+      setHeld(true);
     };
     const onKeyUp = (e: KeyboardEvent) => {
       if (e.code !== "Space") return;
       e.preventDefault();
-      heldRef.current = false;
-      onHoldChange(false);
+      setHeld(false);
     };
     window.addEventListener("keydown", onKeyDown);
     window.addEventListener("keyup", onKeyUp);
@@ -214,6 +275,10 @@ export function TimingBar({
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
     };
+  // setHeld is recreated on every render but referentially stable in
+  // behavior (closes over refs). Re-binding is harmless and avoids a stale
+  // closure if the parent ever swaps onHoldChange.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [onHoldChange]);
 
   const st = stateRef.current;

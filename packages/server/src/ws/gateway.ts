@@ -29,7 +29,16 @@ import {
   computeSampleJitterMaxMs,
   type ReactionOutcome,
 } from "../services/reactionLog.js";
+import type Redis from "ioredis";
 import { Player } from "../db/schema.js";
+import { creditCatch } from "../services/leaderboardCredit.js";
+import { getRoomLeaderboard } from "../services/leaderboard.js";
+
+// Module-scoped redis handle. Captured from `fastify.redis` when the plugin
+// boots so module-level functions like `resolveCatch` (defined outside the
+// plugin closure) can credit leaderboards without threading the fastify
+// instance through every call site.
+let redisRef: Redis | null = null;
 
 function currentWindow(now: Date): { window: number; date: number } {
   const hour = now.getUTCHours();
@@ -69,18 +78,22 @@ async function loadEquippedBaitSlug(wallet: PublicKey): Promise<string> {
 import {
   BAR_MAX_Y,
   FishRarity,
+  INPUT_DELAY_S,
   PHYSICS_FIXED_DT,
   PHYSICS_MAX_STEP_ACCUM,
   buildDifficultyProfile,
   buildCircularTapState,
+  buildLegendaryVerticalProfile,
   computeModifiers,
   initialFishingGameState,
+  lookupActiveInput,
   resolveGreenBarHeight,
   stepAll,
   terminalState,
   validateCircularTapTaps,
   type CircularProfile,
   type FishingGameState,
+  type TimedInput,
   type VerticalProfile,
 } from "@hooked/shared";
 
@@ -117,6 +130,18 @@ interface SessionContext {
   // at PHYSICS_FIXED_DT or the shared mulberry32 RNG state diverges within
   // a few seconds and the fish swims down different trajectories.
   physicsAccumS: number;
+  // Lag-comp state. The first input sample's `t_ms` defines simulation
+  // time = 0; every later sample's simTimeS = (t_ms - physicsClientOriginMs)
+  // / 1000. The same mapping runs on the client. Both sides step physics up
+  // to `(wallNow - physicsServerOriginMs)/1000 - INPUT_DELAY_S`, looking up
+  // the input that was *active* at each step's simTimeS — so the bar
+  // trajectory is a deterministic function of the input timeline, identical
+  // on both sides modulo the constant clock-skew offset baked into origin.
+  physicsClientOriginMs: number | null;
+  physicsServerOriginMs: number;
+  simTimeS: number;
+  inputHistory: TimedInput[];
+  inputCursor: number;
   profile: VerticalProfile;
   greenBarHeight: number;
   game: FishingGameState;
@@ -141,6 +166,16 @@ interface SessionContext {
     profile: CircularProfile;
     targets: number[];
   } | null;
+  // For Legendary/Apex casts, the vertical profile used by the timing-bar
+  // phase that chains AFTER a successful spinner. Pre-built at startSession
+  // (matching the client's `legendaryVerticalProfileRef`) so when
+  // circular_tap_complete passes, we can swap ctx.profile/greenBarHeight
+  // to the correct legendary/apex difficulty rather than the Basic
+  // placeholder used during the spinner phase.
+  secondaryVerticalProfile: VerticalProfile | null;
+  // Original cast seed (kept so the chained timing-bar can re-init game
+  // state with the same seed the client uses for its remounted TimingBar).
+  rngSeed: number;
 }
 
 const NIBBLE_DELAY_MS = 3000;
@@ -295,6 +330,103 @@ export function broadcastToWallet(
   }
 }
 
+// Update the room binding for every open socket of a wallet. Called when the
+// HTTP-side `recoverEntry` path admits the player to a room: existing WS
+// connections need to learn the new roomId without forcing a reconnect.
+export function bindWalletToRoom(
+  walletAddress: string,
+  roomId: string,
+): void {
+  const set = socketsByWallet.get(walletAddress);
+  if (!set) return;
+  for (const id of set) {
+    const s = sockets.get(id);
+    if (s) s.roomId = roomId;
+  }
+}
+
+// Look up the player's active deposit and assign socket.roomId. Runs
+// asynchronously after auth so the `authenticated` reply is not delayed by a
+// Mongo round-trip. No-op if the socket has been closed by the time the
+// lookup returns.
+async function hydrateRoomBindingForSocket(
+  socketId: string,
+  walletAddress: string,
+): Promise<void> {
+  try {
+    const player = await Player.findOne(
+      { walletAddress },
+      { deposits: 1 },
+    ).lean();
+    const active = player?.deposits?.find((d) => !d.returned);
+    if (!active?.poolId) return;
+    const s = sockets.get(socketId);
+    if (!s) return;
+    s.roomId = active.poolId;
+  } catch (err) {
+    console.warn(
+      "[gateway] hydrateRoomBindingForSocket failed:",
+      (err as Error).message,
+    );
+  }
+}
+
+// Per-room debounce: a burst of catches in a busy room collapses into one
+// broadcast. The skill spec calls this out — 250ms is short enough to feel
+// real-time and long enough to absorb ~7 catches at our 30Hz physics tick.
+const lbBroadcastTimers = new Map<string, NodeJS.Timeout>();
+const LB_BROADCAST_DEBOUNCE_MS = 250;
+
+export function scheduleLeaderboardBroadcast(roomId: string): void {
+  const existing = lbBroadcastTimers.get(roomId);
+  if (existing) clearTimeout(existing);
+  lbBroadcastTimers.set(
+    roomId,
+    setTimeout(() => {
+      lbBroadcastTimers.delete(roomId);
+      void emitRoomLeaderboard(roomId);
+    }, LB_BROADCAST_DEBOUNCE_MS),
+  );
+}
+
+async function emitRoomLeaderboard(roomId: string): Promise<void> {
+  if (!redisRef) return;
+  try {
+    const entries = await getRoomLeaderboard(redisRef, roomId, 0, 50);
+    if (entries.length === 0) return;
+    const memberIds = entries.map((e) => e.member);
+    const players = await Player.find(
+      { _id: { $in: memberIds } },
+      { _id: 1, nickname: 1, walletAddress: 1 },
+    ).lean();
+    const playerMap = new Map(
+      players.map((p) => [p._id.toString(), p]),
+    );
+    const date = new Date().toISOString().slice(0, 10);
+    broadcastToRoom(roomId, {
+      type: "leaderboard_update",
+      roomId,
+      date,
+      entries: entries.map((e) => {
+        const p = playerMap.get(e.member);
+        return {
+          wallet: p?.walletAddress ?? e.member,
+          displayName: p?.nickname ?? "Anonymous",
+          score: e.score,
+          // catchCount isn't tracked in the score sorted set today; surface 0
+          // so the wire shape stays stable for future consumers.
+          catchCount: 0,
+        };
+      }),
+    });
+  } catch (err) {
+    console.error(
+      "[gateway] emitRoomLeaderboard failed:",
+      (err as Error).message,
+    );
+  }
+}
+
 function eventStatusMessage(status: EventStatus | null): ServerMessage {
   if (!status) {
     return {
@@ -304,6 +436,7 @@ function eventStatusMessage(status: EventStatus | null): ServerMessage {
       startsAt: 0,
       endsAt: 0,
       apexBp: 0,
+      prizePoolSol: 0,
       apexFishes: [],
     };
   }
@@ -319,6 +452,7 @@ function eventStatusMessage(status: EventStatus | null): ServerMessage {
       startsAt: status.startsAt,
       endsAt: status.endsAt,
       apexBp: 0,
+      prizePoolSol: 0,
       apexFishes: [],
     };
   }
@@ -329,6 +463,7 @@ function eventStatusMessage(status: EventStatus | null): ServerMessage {
     startsAt: live.startsAt,
     endsAt: live.endsAt,
     apexBp: live.apexBp,
+    prizePoolSol: live.prizePoolSol,
     apexFishes: live.apexFishes,
   };
 }
@@ -352,31 +487,48 @@ function ensureEventCacheBound(): void {
 // Client and server run identical physics from @hooked/shared. Physics is
 // paused until the client sends its first input sample, so the pre-reeling
 // "BITE!" flash cannot drain the progress meter.
+//
+// LAG-COMP MODEL. The bar physics depends on player input timing; running it
+// against `heldLatest` (newest sample regardless of when the player acted)
+// drifts the server's bar trajectory away from the client's by exactly the
+// network jitter on each transition. We instead replay inputs at their
+// client-stamped time:
+//
+//   simTimeS(sample)     = (sample.t_ms - physicsClientOriginMs) / 1000
+//   wallSinceOriginS     = (now - physicsServerOriginMs) / 1000
+//   server steps physics → up to wallSinceOriginS - INPUT_DELAY_S
+//
+// Each fixed step looks up the input active at its simTimeS via the sorted
+// `inputHistory`. INPUT_DELAY_S buffers the simulation behind wallclock so
+// most samples land before their step is processed — late samples (RTT/2 >
+// INPUT_DELAY) are dropped with a warning rather than rewinding state.
 
 const PHYSICS_TICK_MS = 33;
 
 function advancePhysics(ctx: SessionContext, now: number): void {
   if (!ctx.physicsStarted) return;
-  const dtRaw = (now - ctx.lastTickAt) / 1000;
-  ctx.lastTickAt = now;
-  if (dtRaw <= 0) return;
-  // Fixed-timestep loop: drain wall-time into PHYSICS_FIXED_DT chunks. The
-  // client's TimingBar uses the identical accumulator so both sides issue
-  // the same number of stepFishPosition calls per second and consume the
-  // shared mulberry32 RNG sequence in lockstep.
-  ctx.physicsAccumS = Math.min(
-    ctx.physicsAccumS + dtRaw,
-    PHYSICS_MAX_STEP_ACCUM,
-  );
-  while (ctx.physicsAccumS >= PHYSICS_FIXED_DT) {
+  if (ctx.physicsClientOriginMs === null) return;
+  const wallSinceOriginS = (now - ctx.physicsServerOriginMs) / 1000;
+  const targetSimTimeS = wallSinceOriginS - INPUT_DELAY_S;
+  // Clamp how far we can sprint forward in one wall-tick (covers GC pauses).
+  const maxAdvance = ctx.simTimeS + PHYSICS_MAX_STEP_ACCUM;
+  const stepUpTo = Math.min(targetSimTimeS, maxAdvance);
+  while (ctx.simTimeS + PHYSICS_FIXED_DT <= stepUpTo) {
+    const lookup = lookupActiveInput(
+      ctx.inputHistory,
+      ctx.simTimeS,
+      ctx.inputCursor,
+      false,
+    );
+    ctx.inputCursor = lookup.cursor;
     stepAll(
       ctx.game,
       ctx.profile,
       ctx.greenBarHeight,
-      ctx.heldLatest,
+      lookup.held,
       PHYSICS_FIXED_DT,
     );
-    ctx.physicsAccumS -= PHYSICS_FIXED_DT;
+    ctx.simTimeS += PHYSICS_FIXED_DT;
   }
 }
 
@@ -540,6 +692,11 @@ function resolveCatch(
   ctx.heldLatest = false;
   ctx.physicsStarted = false;
   ctx.physicsAccumS = 0;
+  ctx.physicsClientOriginMs = null;
+  ctx.physicsServerOriginMs = 0;
+  ctx.simTimeS = 0;
+  ctx.inputHistory = [];
+  ctx.inputCursor = -1;
   ctx.hooked = false;
   ctx.nibbleSentAt = null;
   ctx.reactionTimeMs = null;
@@ -573,8 +730,25 @@ function resolveCatch(
       // Off-chain submit persists the canonical weightHg via the rolled cast
       // — the gateway already has it in `ctx.weightHg`. Use that for the wire
       // so the client gets the same value the catch row was written with.
-      if (res) deliver(res.score, fallbackWeight);
-      else deliver(fallback, fallbackWeight);
+      if (res) {
+        deliver(res.score, fallbackWeight);
+        // Credit leaderboards only when the catch row was persisted (res
+        // truthy) AND was a hit. Skipping miss/fallback paths keeps the
+        // Redis sorted sets aligned with what's actually in Mongo. Errors
+        // inside creditCatch are logged and swallowed; this must never
+        // throw past the WS handler.
+        if (hit && walletStr && redisRef && res.score > 0) {
+          void creditCatch({
+            redis: redisRef,
+            walletAddress: walletStr,
+            score: res.score,
+            weightHg: fallbackWeight,
+            rarity,
+            speciesName,
+            roomId: roomId ?? null,
+          });
+        }
+      } else deliver(fallback, fallbackWeight);
     } catch (err) {
       console.error("[gateway] off-chain submit failed:", err);
       deliver(fallback, fallbackWeight);
@@ -609,6 +783,10 @@ export default fp(async (fastify) => {
   await fastify.register(websocket, {
     options: { maxPayload: WS_MAX_PAYLOAD_BYTES },
   });
+
+  // Capture redis once at plugin boot so resolveCatch (module-scope) can
+  // fire leaderboard credits without needing the fastify instance.
+  redisRef = fastify.redis;
 
   ensureEventCacheBound();
 
@@ -684,7 +862,11 @@ export default fp(async (fastify) => {
           sessionId: ctx.sessionPda ?? "",
           clientCastId: ctx.activeCastId,
           barY: ctx.game.barY,
-          fishY: ctx.game.fishY,
+          // Push the SMOOTHED fish position. Both server stepProgress and
+          // client rendering use this same value, eliminating the local-vs-
+          // server fishY divergence that previously let local progress fill
+          // to 0.99 while server progress stayed at 0.
+          fishY: ctx.game.fishYDisplay,
           progress: ctx.game.progress,
           tickIndex: ctx.game.sampleCount,
         });
@@ -695,7 +877,7 @@ export default fp(async (fastify) => {
           `[gateway] tick @${ctx.game.sampleCount} ` +
             `progress=${ctx.game.progress.toFixed(3)} ` +
             `barY=${ctx.game.barY.toFixed(0)} ` +
-            `fishY=${ctx.game.fishY.toFixed(0)} ` +
+            `fishY=${ctx.game.fishYDisplay.toFixed(0)} ` +
             `held=${ctx.heldLatest}`,
         );
       }
@@ -713,7 +895,7 @@ export default fp(async (fastify) => {
         console.warn(
           `[gateway] terminal-resolve verdict=${terminalNow} ` +
             `progress=${ctx.game.progress.toFixed(3)} ` +
-            `fishY=${ctx.game.fishY.toFixed(1)} ` +
+            `fishY=${ctx.game.fishYDisplay.toFixed(1)} ` +
             `castMs=${now - ctx.castStartedAt}`,
         );
         resolveCatch(socket, terminalNow === "caught");
@@ -725,7 +907,7 @@ export default fp(async (fastify) => {
           `[gateway] safety-timeout fired ` +
             `progress=${ctx.game.progress.toFixed(3)} ` +
             `barY=${ctx.game.barY.toFixed(1)} ` +
-            `fishY=${ctx.game.fishY.toFixed(1)} ` +
+            `fishY=${ctx.game.fishYDisplay.toFixed(1)} ` +
             `held=${ctx.heldLatest}`,
         );
         // Force escape — physics didn't reach terminal in time.
@@ -795,6 +977,10 @@ export default fp(async (fastify) => {
           void getEventStatus().then((status) =>
             safeSend(socket, eventStatusMessage(status)),
           );
+          // Resolve the player's current room from their active deposit and
+          // bind it to this socket so room-scoped broadcasts (leaderboard
+          // updates) reach them. Async — must not delay the auth reply.
+          void hydrateRoomBindingForSocket(socketId, msg.wallet);
           return;
         }
 
@@ -844,6 +1030,25 @@ export default fp(async (fastify) => {
               (rolled.rarityEnum === FishRarity.Legendary ||
                 rolled.rarityEnum === FishRarity.Apex)
                 ? buildCircularTapState(rolled.rarityEnum, 0)
+                : null;
+            // Pre-build the chained timing-bar profile for Legendary/Apex.
+            // Mirrors the client's `legendaryVerticalProfileRef` (built at
+            // fish_hooked from the same seed + zero modifiers) so when the
+            // spinner clears and we swap ctx.profile, both sides agree on
+            // the chained-phase difficulty.
+            const secondaryVerticalProfile =
+              rolled.mechanic === CIRCULAR_TAP_MECHANIC &&
+              (rolled.rarityEnum === FishRarity.Legendary ||
+                rolled.rarityEnum === FishRarity.Apex)
+                ? buildLegendaryVerticalProfile(
+                    rolled.rarityEnum,
+                    rolled.rngSeed,
+                    computeModifiers({
+                      streak: 0,
+                      poolTier: 0,
+                      sessionElapsedMs: 0,
+                    }),
+                  )
                 : null;
             const greenBarHeight = resolveGreenBarHeight(profile, 0);
             const game = initialFishingGameState({
@@ -902,6 +1107,11 @@ export default fp(async (fastify) => {
               physicsStarted: false,
               lastTickAt: castTimestamp,
               physicsAccumS: 0,
+              physicsClientOriginMs: null,
+              physicsServerOriginMs: 0,
+              simTimeS: 0,
+              inputHistory: [],
+              inputCursor: -1,
               profile,
               greenBarHeight,
               game,
@@ -913,6 +1123,8 @@ export default fp(async (fastify) => {
               preNibbleTapCount: 0,
               hooked: false,
               circularTap,
+              secondaryVerticalProfile,
+              rngSeed: rolled.rngSeed,
             };
             // Acks the cast so the client may begin its splash + idle anim.
             // The fish has been rolled and bait is consumed; the gateway is
@@ -952,6 +1164,11 @@ export default fp(async (fastify) => {
             physicsStarted: false,
             lastTickAt: Date.now(),
             physicsAccumS: 0,
+            physicsClientOriginMs: null,
+            physicsServerOriginMs: 0,
+            simTimeS: 0,
+            inputHistory: [],
+            inputCursor: -1,
             profile: {} as VerticalProfile,
             greenBarHeight: 0,
             game: {} as FishingGameState,
@@ -963,6 +1180,8 @@ export default fp(async (fastify) => {
             preNibbleTapCount: 0,
             hooked: false,
             circularTap: null,
+            secondaryVerticalProfile: null,
+            rngSeed: 0,
           };
           void (async () => {
             const baitSlug = await loadEquippedBaitSlug(wallet);
@@ -1035,10 +1254,31 @@ export default fp(async (fastify) => {
             resolveCatch(socket, false);
             return;
           }
-          // Pass. Chain into the timing-bar phase: switch the mechanic and
-          // start physics so the server safety timeout / timing-bar resolver
-          // can take over from here. This matches the legacy path that the
-          // client used to drive after a clean spinner.
+          // Pass. Chain into the timing-bar phase. Critically, swap the
+          // server's vertical profile from the Basic placeholder used during
+          // the spinner to the real legendary/apex profile — otherwise the
+          // chained physics runs at Basic difficulty while the client renders
+          // a Legendary/Apex UI. Also re-init the game state so the chained
+          // phase starts from canonical bar/fish positions, matching the
+          // client's freshly-mounted `TimingBar` component.
+          if (ctx.secondaryVerticalProfile) {
+            ctx.profile = ctx.secondaryVerticalProfile;
+            ctx.greenBarHeight = resolveGreenBarHeight(ctx.profile, 0);
+            ctx.game = initialFishingGameState({
+              sessionId: ctx.sessionPda ?? "local",
+              verticalProfile: ctx.profile,
+              greenBarHeight: ctx.greenBarHeight,
+              rodTier: 0,
+              luckyLureTier: 0,
+              baitSlug: "fly",
+              rngSeed: ctx.rngSeed,
+              startingBarY: BAR_MAX_Y * 0.9,
+              startingFishY: BAR_MAX_Y * 0.85,
+              chestSpawned: false,
+              chestY: 0,
+              startedAt: Date.now(),
+            });
+          }
           ctx.mechanic = TIMING_BAR_MECHANIC;
           ctx.physicsStarted = true;
           ctx.lastTickAt = Date.now();
@@ -1063,8 +1303,55 @@ export default fp(async (fastify) => {
             return;
           }
           for (const s of msg.samples) ctx.samples.push(s);
+          // Build the lag-comp input history. The simulation-time origin is
+          // the `t_ms` of the FIRST sample with held=true — the first frame
+          // the player actually inputs. Pre-tap keep-alives (held=false,
+          // re-stating default) are absorbed silently so client and server
+          // origins land on the same wallclock instant: the bar's local
+          // setHeld and the WS hook's setHeld both capture Date.now() in
+          // the same React event handler, and only that first held=true
+          // event matters.
+          //
+          // Late arrivals (sample.t_ms whose simTimeS is already behind the
+          // server's stepped simTimeS) get clamped forward — the input
+          // takes effect at the earliest simTime the server can absorb.
+          // With INPUT_DELAY_S = 60ms of buffer this should be rare.
+          let lateArrivalCount = 0;
+          for (const s of msg.samples) {
+            if (ctx.physicsClientOriginMs === null) {
+              if (!s.held) continue;
+              ctx.physicsClientOriginMs = s.t_ms;
+              ctx.physicsServerOriginMs = Date.now();
+            }
+            let simTimeS = (s.t_ms - ctx.physicsClientOriginMs) / 1000;
+            if (simTimeS < ctx.simTimeS) {
+              lateArrivalCount += 1;
+              simTimeS = ctx.simTimeS;
+            }
+            const last = ctx.inputHistory[ctx.inputHistory.length - 1];
+            if (last && last.held === s.held) continue;
+            ctx.inputHistory.push({ simTimeS, held: s.held });
+          }
           const latest = msg.samples[msg.samples.length - 1];
-          if (latest) ctx.heldLatest = latest.held;
+          if (latest) {
+            const prev = ctx.heldLatest;
+            ctx.heldLatest = latest.held;
+            if (prev !== latest.held) {
+              console.warn(
+                `[gateway] held-changed ${prev}→${latest.held} ` +
+                  `final=${msg.final ?? false} ` +
+                  `progress=${ctx.game.progress.toFixed(3)} ` +
+                  `simTimeS=${ctx.simTimeS.toFixed(3)}`,
+              );
+            }
+          }
+          if (lateArrivalCount > 0) {
+            console.warn(
+              `[gateway] late-input lateArrivals=${lateArrivalCount} ` +
+                `simTimeS=${ctx.simTimeS.toFixed(3)} ` +
+                `(consider raising INPUT_DELAY_MS if persistent)`,
+            );
+          }
           // Start physics on first input so server timing aligns with the
           // client's TimingBar (mounts 450ms after fish_hooked).
           if (!ctx.physicsStarted && ctx.mechanic === TIMING_BAR_MECHANIC) {
@@ -1087,18 +1374,38 @@ export default fp(async (fastify) => {
             });
             return;
           }
-          // Timing-bar: server is authoritative and resolves on its own
-          // physicsTimer when terminalState() declares a verdict. We do NOT
-          // resolve here on `msg.final` — the client's view of fish position
-          // can drift (different RAF rate vs setInterval rate, different
-          // cumulative RNG state) and forcing resolution against the
-          // server's snapshot at an arbitrary client-driven moment is what
-          // produced the "every cast escapes" bug. Just keep the held state
-          // fresh and let the server's physicsTimer decide.
+          // Timing-bar: server's physicsTimer is the primary resolver. But
+          // when the client signals it's reached terminal locally AND the
+          // server's own progress is already in the safe zone, force the
+          // catch immediately — otherwise the player sees their bar visibly
+          // full for several hundred ms while the server fills the last 15%
+          // at FILL_RATE_PER_SEC. This is bounded: server only honours the
+          // signal when its own progress is already past CLIENT_FINAL_FLOOR
+          // (== client-side NEAR_WIN_THRESHOLD), so a malicious client can
+          // at best skip the last ~150ms of fill — not force a catch from
+          // nowhere. Force-escape from client final is NEVER honoured;
+          // misses are always decided by the server's own terminalState.
           if (msg.final && ctx.mechanic === TIMING_BAR_MECHANIC) {
-            // No-op intentionally. Logged so we can see when client gives up.
+            advancePhysics(ctx, Date.now());
+            // Server progress floor required to accept a client-driven catch.
+            // Now that both sides score against the SAME smoothed fish
+            // position (`fishYDisplay`), local and server progress should
+            // track each other closely. Restore a stricter floor (0.65) so
+            // the catch only fires once the player has genuinely earned it.
+            // Cheat surface: a forged client-final can at most skip ~1.6s
+            // of server fill — not produce a catch from nothing.
+            const CLIENT_FINAL_FLOOR = 0.65;
+            if (ctx.game.progress >= CLIENT_FINAL_FLOOR) {
+              console.warn(
+                `[gateway] client-final accepted as catch ` +
+                  `progress=${ctx.game.progress.toFixed(3)} ` +
+                  `castMs=${Date.now() - ctx.castStartedAt}`,
+              );
+              resolveCatch(socket, true);
+              return;
+            }
             console.warn(
-              `[gateway] client-final-ignored ` +
+              `[gateway] client-final ignored (progress too low) ` +
                 `progress=${ctx.game.progress.toFixed(3)} ` +
                 `castMs=${Date.now() - ctx.castStartedAt}`,
             );

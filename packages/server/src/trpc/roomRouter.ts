@@ -25,6 +25,7 @@ import {
 import { createRoomOnChainAndDb } from "../services/roomFactory.js";
 import { settleRoom } from "../services/roomKeeper.js";
 import * as lb from "../services/leaderboard.js";
+import { bindWalletToRoom } from "../ws/gateway.js";
 import type RedisType from "ioredis";
 
 /**
@@ -190,6 +191,21 @@ export const roomRouter = router({
         throw new TRPCError({ code: "NOT_FOUND", message: "Room not found" });
       }
 
+      // Show the player on the room leaderboard the moment they join, with
+      // score 0 until their first catch. NX-flagged so a re-recovery never
+      // resets an already-credited score. Doing this for both branches below
+      // (alreadyRecorded and new-deposit) ensures historical depositors who
+      // joined before this code shipped also self-heal onto the LB.
+      const playerIdStr = player._id.toString();
+      await lb
+        .seedRoomMember(ctx.redis, roomDoc.roomId, playerIdStr)
+        .catch((err) =>
+          console.error(
+            "[lb] seedRoomMember failed:",
+            (err as Error).message,
+          ),
+        );
+
       // Active = SOL still on-chain (keeper hasn't run `return_principal`).
       // Window expiry is tracked separately via `expiresAt` and must NOT
       // short-circuit this lookup.
@@ -200,6 +216,10 @@ export const roomRouter = router({
           ctx.redis,
           active.amount,
         );
+        // Bind any open WS sockets for this wallet to the room so room-
+        // scoped broadcasts (leaderboard updates) reach them without a
+        // reconnect. Safe no-op if no sockets are open.
+        bindWalletToRoom(ctx.walletAddress, roomDoc.roomId);
         return {
           depositAmount: active.amount,
           roomId: roomDoc.roomId,
@@ -300,6 +320,12 @@ export const roomRouter = router({
 
       await bootstrapFishingSession(authorityKey, ctx.redis, depositSol);
 
+      // Bind any open WS sockets for this wallet to the new room. The auth-
+      // time hydration only runs once per connection; players who deposit
+      // mid-session need this to start receiving room broadcasts without a
+      // reconnect.
+      bindWalletToRoom(ctx.walletAddress, roomDoc.roomId);
+
       try {
         await maybeTriggerCapacityOverflow(roomDoc.roomId);
       } catch (err) {
@@ -390,6 +416,36 @@ export const roomRouter = router({
       }),
     )
     .query(async ({ ctx, input }) => {
+      // Self-heal: reflect every depositor in `room.players[]` into the
+      // Redis sorted set with score 0 (NX-flagged so existing scores are
+      // preserved). Covers depositors who joined before per-join seeding
+      // shipped and any case where a Redis hiccup dropped the seed write.
+      const roomDoc = await Room.findOne(
+        { roomId: input.roomId },
+        { players: 1 },
+      ).lean();
+      if (roomDoc?.players?.length) {
+        const wallets = roomDoc.players.map((p) => p.walletAddress);
+        const players = await Player.find(
+          { walletAddress: { $in: wallets } },
+          { _id: 1 },
+        ).lean();
+        if (players.length > 0) {
+          await lb
+            .seedRoomMembers(
+              ctx.redis,
+              input.roomId,
+              players.map((p) => p._id.toString()),
+            )
+            .catch((err) =>
+              console.error(
+                "[lb] seedRoomMembers failed:",
+                (err as Error).message,
+              ),
+            );
+        }
+      }
+
       const entries = await lb.getRoomLeaderboard(
         ctx.redis,
         input.roomId,

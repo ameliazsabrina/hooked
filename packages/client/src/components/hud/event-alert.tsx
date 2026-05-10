@@ -5,22 +5,16 @@ export interface EventStatusApexFish {
   name: string;
   weightMinKg: number;
   weightMaxKg: number;
-  /** Public asset URL (admin-uploaded image, served by the API). */
   assetUrl: string;
 }
 
 export interface EventStatus {
   active: boolean;
-  /** Admin-set display name (e.g. "Colosseum"). Empty when inactive. */
   name: string;
   startsAt: number;
   endsAt: number;
   apexBp: number;
-  /**
-   * Apex fish the cast roll picks from when Apex rolls during this event.
-   * Carries id + name + weight range + assetUrl so HUDs and announcement
-   * modals can render thumbnails without a second round-trip.
-   */
+  prizePoolSol: number;
   apexFishes: EventStatusApexFish[];
 }
 
@@ -51,8 +45,6 @@ export function EventAlert({ status }: EventAlertProps) {
   const secondsLeft = status.endsAt - now;
   if (secondsLeft <= 0) return null;
 
-  // Fall back to a generic label if the admin somehow saved an empty name —
-  // schema enforces minlength: 1 so this is defensive.
   const name = status.name || "Event";
 
   return (

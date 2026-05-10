@@ -5,6 +5,11 @@ import { useSessionAuth } from "~/providers/session-auth-provider";
 import { FishIndex } from "~/components/collections/fish-index";
 import { BountyList } from "./bounty-list";
 import type { EventStatus } from "~/components/hud/event-alert";
+import type { RoomLeaderboardSnapshot } from "~/hooks/use-fishing-ws";
+
+// Live updates older than this fall back to the tRPC poll (covers the case
+// where the WS dropped a frame or the player just connected).
+const LIVE_LEADERBOARD_MAX_AGE_MS = 60_000;
 
 interface CatchEntry {
   id: string;
@@ -16,14 +21,24 @@ interface CatchEntry {
   shellValue: number;
 }
 
+interface ApexFishEntry {
+  id: string;
+  name: string;
+  weightMinKg: number;
+  weightMaxKg: number;
+  assetUrl: string;
+}
+
 interface SidebarPopupProps {
   panel: "bounties" | "leaderboard" | "collections" | null;
   onClose: () => void;
   catches?: CatchEntry[];
   discoveredSpecies?: Set<string>;
+  discoveredApexFish?: ApexFishEntry[];
   onSellFish?: (catchId: string, shellValue: number) => Promise<any>;
   onSellFishBulk?: (catchIds: string[]) => Promise<any>;
   eventStatus?: EventStatus | null;
+  roomLeaderboard?: RoomLeaderboardSnapshot | null;
 }
 
 export function SidebarPopup({
@@ -31,9 +46,11 @@ export function SidebarPopup({
   onClose,
   catches,
   discoveredSpecies,
+  discoveredApexFish,
   onSellFish,
   onSellFishBulk,
   eventStatus,
+  roomLeaderboard,
 }: SidebarPopupProps) {
   if (!panel) return null;
 
@@ -42,6 +59,7 @@ export function SidebarPopup({
       <FishIndex
         catches={catches}
         discoveredSpecies={discoveredSpecies}
+        discoveredApexFish={discoveredApexFish}
         onSellFish={onSellFish}
         onSellFishBulk={onSellFishBulk}
         onClose={onClose}
@@ -61,7 +79,9 @@ export function SidebarPopup({
         </button>
         <div className="sidebar-popup-content">
           {panel === "bounties" && <BountiesPanel />}
-          {panel === "leaderboard" && <LeaderboardPanel />}
+          {panel === "leaderboard" && (
+            <LeaderboardPanel roomLeaderboard={roomLeaderboard ?? null} />
+          )}
         </div>
       </div>
     </div>
@@ -77,8 +97,12 @@ function BountiesPanel() {
   );
 }
 
-function LeaderboardPanel() {
-  const { connected } = useWallet();
+interface LeaderboardPanelProps {
+  roomLeaderboard: RoomLeaderboardSnapshot | null;
+}
+
+function LeaderboardPanel({ roomLeaderboard }: LeaderboardPanelProps) {
+  const { connected, publicKey } = useWallet();
   const { ready: authReady } = useSessionAuth();
   const playerQuery = trpc.player.me.useQuery(undefined, {
     enabled: connected && authReady,
@@ -89,11 +113,36 @@ function LeaderboardPanel() {
     { roomId: roomId ?? "" },
     {
       enabled: connected && !!roomId,
-      refetchInterval: 15000,
+      // WS broadcasts drive freshness; this is the fallback for first paint
+      // and missed frames. 60s keeps it cheap.
+      refetchInterval: 60000,
     },
   );
-  const entries = leaderboardQuery.data?.entries ?? [];
-  const playerRank = leaderboardQuery.data?.playerRank ?? null;
+
+  const walletStr = publicKey?.toBase58() ?? null;
+  const liveFresh =
+    roomLeaderboard &&
+    roomLeaderboard.roomId === roomId &&
+    Date.now() - roomLeaderboard.updatedAt < LIVE_LEADERBOARD_MAX_AGE_MS;
+
+  const entries = liveFresh
+    ? roomLeaderboard.entries.map((e, i) => ({
+        rank: i + 1,
+        displayName: e.displayName ?? "Anonymous",
+        dailyScore: e.score,
+      }))
+    : leaderboardQuery.data?.entries ?? [];
+
+  // Derive "you" rank from live entries when fresh; fall back to the tRPC
+  // value (which queries the full sorted set, so it's correct even when the
+  // player is outside top-50).
+  let playerRank: number | null = leaderboardQuery.data?.playerRank ?? null;
+  if (liveFresh && walletStr) {
+    const idx = roomLeaderboard.entries.findIndex(
+      (e) => e.wallet === walletStr,
+    );
+    if (idx >= 0) playerRank = idx + 1;
+  }
 
   return (
     <div className="popup-panel">

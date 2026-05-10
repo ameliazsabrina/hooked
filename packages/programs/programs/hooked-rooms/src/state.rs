@@ -22,8 +22,16 @@ impl TryFrom<u8> for RoomStatus {
     }
 }
 
+/// Account schema versions. Bump when shipping a breaking layout change so
+/// new code can branch on `account.version` and migrate old accounts safely.
+pub const ROOM_VERSION: u8 = 1;
+pub const ROOM_ENTRY_VERSION: u8 = 1;
+pub const PROGRAM_CONFIG_VERSION: u8 = 1;
+pub const GATEWAY_REGISTRY_VERSION: u8 = 1;
+
 #[account]
 pub struct Room {
+    pub version: u8,
     pub admin: Pubkey,
     pub room_id: u64,
     pub created_at: i64,
@@ -47,10 +55,15 @@ pub struct Room {
     pub third_place_score: u64,
     pub bump: u8,
     pub vault_bump: u8,
+    /// Reserved for forward-compatible field additions. Zeroed at init.
+    /// Adding a field: shrink _reserved by sizeof(field), bump ROOM_VERSION,
+    /// and gate reads on version.
+    pub _reserved: [u8; 64],
 }
 
 impl Room {
     pub const SIZE: usize = 8   // discriminator
+        + 1                      // version
         + 32                     // admin
         + 8                      // room_id
         + 8                      // created_at
@@ -73,11 +86,13 @@ impl Room {
         + 8                      // second_place_score
         + 8                      // third_place_score
         + 1                      // bump
-        + 1;                     // vault_bump
+        + 1                      // vault_bump
+        + 64;                    // _reserved
 }
 
 #[account]
 pub struct RoomEntry {
+    pub version: u8,
     pub room: Pubkey,
     pub authority: Pubkey,
     pub deposit_lamports: u64,
@@ -88,46 +103,73 @@ pub struct RoomEntry {
     pub returned: bool,
     pub returned_at: i64,
     pub bump: u8,
+    /// Reserved for forward-compatible field additions. Per-user account, so
+    /// padding is conservative.
+    pub _reserved: [u8; 32],
 }
 
 impl RoomEntry {
     pub const SIZE: usize = 8
-        + 32
-        + 32
-        + 8
-        + 8
-        + 2
-        + 8
-        + 8
-        + 1
-        + 8
-        + 1;
+        + 1                      // version
+        + 32                     // room
+        + 32                     // authority
+        + 8                      // deposit_lamports
+        + 8                      // final_score
+        + 2                      // final_rank
+        + 8                      // yield_awarded_lamports
+        + 8                      // joined_at
+        + 1                      // returned
+        + 8                      // returned_at
+        + 1                      // bump
+        + 32;                    // _reserved
 }
 
 #[account]
 pub struct ProgramConfig {
+    pub version: u8,
     pub admin: Pubkey,
     pub treasury: Pubkey,
     pub lp_manager: Pubkey,
+    /// Emergency switch. When true, every state-changing room ix returns
+    /// `RoomError::Paused`. Admin-only ix (set_treasury, set_lp_manager,
+    /// set_paused, gateway registry updates) remain callable so the admin
+    /// can recover, rotate keys, and unpause.
+    pub paused: bool,
     pub bump: u8,
+    pub _reserved: [u8; 128],
 }
 
 impl ProgramConfig {
-    pub const SIZE: usize = 8 + 32 + 32 + 32 + 1;
+    pub const SIZE: usize = 8
+        + 1                      // version
+        + 32                     // admin
+        + 32                     // treasury
+        + 32                     // lp_manager
+        + 1                      // paused
+        + 1                      // bump
+        + 128;                   // _reserved
 }
 
 pub const MAX_GATEWAY_KEYS: usize = 8;
 
 #[account]
 pub struct GatewayRegistry {
+    pub version: u8,
     pub admin: Pubkey,
     pub key_count: u8,
     pub keys: [Pubkey; MAX_GATEWAY_KEYS],
     pub bump: u8,
+    pub _reserved: [u8; 64],
 }
 
 impl GatewayRegistry {
-    pub const SIZE: usize = 8 + 32 + 1 + 32 * MAX_GATEWAY_KEYS + 1;
+    pub const SIZE: usize = 8
+        + 1                      // version
+        + 32                     // admin
+        + 1                      // key_count
+        + 32 * MAX_GATEWAY_KEYS  // keys
+        + 1                      // bump
+        + 64;                    // _reserved
 
     pub fn contains(&self, key: &Pubkey) -> bool {
         let count = self.key_count as usize;

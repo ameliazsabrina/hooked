@@ -82,4 +82,10 @@ pub enum RoomError {
 
     #[msg("LP manager account does not match the canonical ProgramConfig.lp_manager")]
     LpManagerMismatch,
+
+    #[msg("Program is paused — emergency switch is active")]
+    Paused,
+
+    #[msg("Account version is not supported by this program build")]
+    UnsupportedAccountVersion,
 }

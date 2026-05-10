@@ -18,7 +18,60 @@ import {
   getRoomEntryPda,
 } from "~/utils/anchor";
 import { trpc } from "~/utils/trpc";
+import { useProgramPaused } from "~/hooks/use-program-paused";
 import "./onboarding.css";
+
+function collectErrorText(raw: unknown): string {
+  // Wallet adapters (WalletError), Anchor, and web3.js all wrap the real
+  // Solana error inside nested fields. Walk the common ones so the classifier
+  // sees the underlying message even when `.message` is a generic wrapper
+  // like "Unexpected error".
+  const parts: string[] = [];
+  const seen = new Set<unknown>();
+  const visit = (node: unknown, depth: number) => {
+    if (node == null || depth > 4 || seen.has(node)) return;
+    if (typeof node === "string") {
+      parts.push(node);
+      return;
+    }
+    if (typeof node !== "object") return;
+    seen.add(node);
+    const obj = node as Record<string, unknown>;
+    if (typeof obj.message === "string") parts.push(obj.message);
+    if (Array.isArray(obj.logs))
+      parts.push(obj.logs.filter((l) => typeof l === "string").join(" "));
+    visit(obj.error, depth + 1);
+    visit(obj.cause, depth + 1);
+    visit((obj as { InstructionError?: unknown }).InstructionError, depth + 1);
+  };
+  visit(raw, 0);
+  try {
+    parts.push(JSON.stringify(raw));
+  } catch {
+    // ignore circular structures
+  }
+  return parts.join(" \n ");
+}
+
+function classifyDepositError(raw: unknown): string {
+  const text = collectErrorText(raw);
+  if (/user rejected/i.test(text)) return "Transaction rejected.";
+  if (
+    /Attempt to debit an account but found no record of a prior credit/i.test(text) ||
+    /insufficient lamports/i.test(text) ||
+    /insufficient funds for rent/i.test(text)
+  )
+    return "Your wallet doesn't have enough SOL to cover this deposit and network fees. Add SOL to your wallet and try again.";
+  if (/insufficient/i.test(text)) return "Insufficient SOL balance for this deposit.";
+  if (/Paused/.test(text)) return "Deposits are temporarily paused. Please try again shortly.";
+  if (/RoomFull/.test(text)) return "This room is full.";
+  if (/RoomCapacityExceeded/.test(text)) return "This deposit would exceed the room cap.";
+  if (/RoomEntryWindowClosed/.test(text)) return "Entry window for this room has closed.";
+  if (/InvalidDepositAmount|DepositBelowMinimum|DepositAboveMaximum/.test(text))
+    return "Invalid deposit amount.";
+  const top = raw instanceof Error ? raw.message : String(raw);
+  return `Deposit failed: ${top}`;
+}
 
 export function DepositScreen() {
   const { publicKey } = useWallet();
@@ -33,17 +86,22 @@ export function DepositScreen() {
   });
   const trpcUtils = trpc.useUtils();
   const recoverEntry = trpc.room.recoverEntry.useMutation();
+  const programPaused = useProgramPaused();
 
   const openRoom =
     activeRoom.data?.status === "open" ? activeRoom.data.room : null;
   const openRoomId = openRoom?.onChainRoomId ?? null;
 
+  // programPaused === null means we haven't loaded the config yet — don't
+  // block the user during initial render; the on-chain check is the source
+  // of truth if we're wrong.
   const canSubmit =
     isValidDepositAmount(amount) &&
     !loading &&
     !!publicKey &&
     !!anchorWallet &&
-    !!openRoomId;
+    !!openRoomId &&
+    programPaused !== true;
 
   async function handleDeposit() {
     if (!canSubmit || !publicKey || !anchorWallet) return;
@@ -99,14 +157,8 @@ export function DepositScreen() {
 
       window.location.reload();
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      setError(
-        /user rejected/i.test(message)
-          ? "Transaction rejected."
-          : /insufficient/i.test(message)
-            ? "Insufficient SOL balance for this deposit."
-            : `Deposit failed: ${message}`,
-      );
+      console.error("[DepositScreen] deposit failed", err);
+      setError(classifyDepositError(err));
     } finally {
       setLoading(false);
     }
@@ -137,11 +189,13 @@ export function DepositScreen() {
 
   const statusMsg = !publicKey
     ? "Connect your wallet to deposit."
-    : activeRoom.isLoading
-      ? "Loading active room…"
-      : nextOpensAt
-        ? `No room open for entry right now. Next opens in ${formatCountdown(nextOpensAt, now)}.`
-        : null;
+    : programPaused === true
+      ? "Deposits are temporarily paused for maintenance. Please try again shortly."
+      : activeRoom.isLoading
+        ? "Loading active room…"
+        : nextOpensAt
+          ? `No room open for entry right now. Next opens in ${formatCountdown(nextOpensAt, now)}.`
+          : null;
 
   return (
     <div className="onboarding-overlay">

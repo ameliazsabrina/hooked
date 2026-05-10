@@ -1,9 +1,10 @@
 use anchor_lang::prelude::*;
+use anchor_lang::system_program::{self, Transfer};
 
-use hooked_common::{ROOM_ENTRY_SEED, ROOM_SEED, ROOM_VAULT_SEED};
+use hooked_common::{CONFIG_SEED, ROOM_ENTRY_SEED, ROOM_SEED, ROOM_VAULT_SEED};
 
 use crate::errors::RoomError;
-use crate::state::{Room, RoomEntry, RoomStatus};
+use crate::state::{ProgramConfig, Room, RoomEntry, RoomStatus};
 
 #[derive(Accounts)]
 pub struct ReturnPrincipal<'info> {
@@ -16,7 +17,16 @@ pub struct ReturnPrincipal<'info> {
     )]
     pub room: Account<'info, Room>,
 
+    #[account(
+        seeds = [CONFIG_SEED],
+        bump = config.bump,
+    )]
+    pub config: Account<'info, ProgramConfig>,
+
     /// CHECK: Room-owned SOL vault PDA, validated by seeds + room.vault_bump.
+    /// Owned by System Program (created by depositors via system::transfer),
+    /// so lamport withdrawals must go through a system_program::transfer
+    /// CPI with the vault's PDA seeds for invoke_signed.
     #[account(
         mut,
         seeds = [ROOM_VAULT_SEED, room.key().as_ref()],
@@ -38,9 +48,13 @@ pub struct ReturnPrincipal<'info> {
     pub recipient: UncheckedAccount<'info>,
 
     pub admin: Signer<'info>,
+
+    pub system_program: Program<'info, System>,
 }
 
 pub fn handler(ctx: Context<ReturnPrincipal>, yield_share_lamports: u64) -> Result<()> {
+    require!(!ctx.accounts.config.paused, RoomError::Paused);
+
     let entry = &ctx.accounts.entry;
 
     let total = entry
@@ -48,22 +62,27 @@ pub fn handler(ctx: Context<ReturnPrincipal>, yield_share_lamports: u64) -> Resu
         .checked_add(yield_share_lamports)
         .ok_or(RoomError::Overflow)?;
 
-    let vault_info = ctx.accounts.room_vault.to_account_info();
-    let recipient_info = ctx.accounts.recipient.to_account_info();
-
     require!(
-        vault_info.lamports() >= total,
+        ctx.accounts.room_vault.lamports() >= total,
         RoomError::VaultInsufficientFunds
     );
 
-    **vault_info.try_borrow_mut_lamports()? = vault_info
-        .lamports()
-        .checked_sub(total)
-        .ok_or(RoomError::Overflow)?;
-    **recipient_info.try_borrow_mut_lamports()? = recipient_info
-        .lamports()
-        .checked_add(total)
-        .ok_or(RoomError::Overflow)?;
+    let room_key = ctx.accounts.room.key();
+    let vault_bump = ctx.accounts.room.vault_bump;
+    let vault_seeds: &[&[u8]] = &[ROOM_VAULT_SEED, room_key.as_ref(), &[vault_bump]];
+    let signer_seeds: &[&[&[u8]]] = &[vault_seeds];
+
+    system_program::transfer(
+        CpiContext::new_with_signer(
+            ctx.accounts.system_program.to_account_info(),
+            Transfer {
+                from: ctx.accounts.room_vault.to_account_info(),
+                to: ctx.accounts.recipient.to_account_info(),
+            },
+            signer_seeds,
+        ),
+        total,
+    )?;
 
     let now = Clock::get()?.unix_timestamp;
     let entry = &mut ctx.accounts.entry;

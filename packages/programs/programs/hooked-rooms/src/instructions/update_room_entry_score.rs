@@ -1,9 +1,9 @@
 use anchor_lang::prelude::*;
 
-use hooked_common::{GATEWAY_REGISTRY_SEED, ROOM_ENTRY_SEED, ROOM_SEED};
+use hooked_common::{CONFIG_SEED, GATEWAY_REGISTRY_SEED, ROOM_ENTRY_SEED, ROOM_SEED};
 
 use crate::errors::RoomError;
-use crate::state::{GatewayRegistry, Room, RoomEntry};
+use crate::state::{GatewayRegistry, ProgramConfig, Room, RoomEntry};
 
 #[derive(Accounts)]
 pub struct UpdateRoomEntryScore<'info> {
@@ -13,6 +13,12 @@ pub struct UpdateRoomEntryScore<'info> {
         bump = room.bump,
     )]
     pub room: Account<'info, Room>,
+
+    #[account(
+        seeds = [CONFIG_SEED],
+        bump = config.bump,
+    )]
+    pub config: Account<'info, ProgramConfig>,
 
     #[account(
         mut,
@@ -33,6 +39,8 @@ pub struct UpdateRoomEntryScore<'info> {
 }
 
 pub fn handler(ctx: Context<UpdateRoomEntryScore>, score_delta: u64) -> Result<()> {
+    require!(!ctx.accounts.config.paused, RoomError::Paused);
+
     let entry = &mut ctx.accounts.entry;
     let new_score = entry
         .final_score

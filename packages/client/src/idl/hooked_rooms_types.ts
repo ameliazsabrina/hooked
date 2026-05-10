@@ -5,7 +5,7 @@
  * IDL can be found at `target/idl/hooked_rooms.json`.
  */
 export type HookedRooms = {
-  "address": "4iF8DPptdoSYt4BX549pzieaoeCg6x7BwbMEwWF5M2hd",
+  "address": "4ERUTWVN3aJP5tghEcZNd555NGcK3Jr8B21mnBB8JSMg",
   "metadata": {
     "name": "hookedRooms",
     "version": "0.1.0",
@@ -122,6 +122,11 @@ export type HookedRooms = {
         },
         {
           "name": "roomVault",
+          "docs": [
+            "Owned by System Program (created by depositors via system::transfer),",
+            "so lamport withdrawals must go through a system_program::transfer",
+            "CPI with the vault's PDA seeds for invoke_signed."
+          ],
           "writable": true,
           "pda": {
             "seeds": [
@@ -154,6 +159,10 @@ export type HookedRooms = {
         {
           "name": "admin",
           "signer": true
+        },
+        {
+          "name": "systemProgram",
+          "address": "11111111111111111111111111111111"
         }
       ],
       "args": [
@@ -193,6 +202,24 @@ export type HookedRooms = {
               {
                 "kind": "arg",
                 "path": "roomId"
+              }
+            ]
+          }
+        },
+        {
+          "name": "config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
               }
             ]
           }
@@ -277,6 +304,24 @@ export type HookedRooms = {
           }
         },
         {
+          "name": "config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
           "name": "roomVault",
           "writable": true,
           "pda": {
@@ -352,6 +397,76 @@ export type HookedRooms = {
       ]
     },
     {
+      "name": "devForceCloseAt",
+      "docs": [
+        "DEV ONLY — overwrite a room's `closes_at` so the settlement flow",
+        "can be tested without waiting the full 7-day window. Admin-gated;",
+        "remove or feature-flag before mainnet."
+      ],
+      "discriminator": [
+        238,
+        149,
+        222,
+        205,
+        94,
+        91,
+        181,
+        244
+      ],
+      "accounts": [
+        {
+          "name": "room",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  111,
+                  111,
+                  109
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "room.room_id",
+                "account": "room"
+              }
+            ]
+          }
+        },
+        {
+          "name": "config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "admin",
+          "signer": true
+        }
+      ],
+      "args": [
+        {
+          "name": "newClosesAt",
+          "type": "i64"
+        }
+      ]
+    },
+    {
       "name": "finalizeRoom",
       "discriminator": [
         138,
@@ -406,6 +521,11 @@ export type HookedRooms = {
         },
         {
           "name": "roomVault",
+          "docs": [
+            "Owned by System Program (created by depositors via system::transfer),",
+            "so lamport withdrawals must go through a system_program::transfer",
+            "CPI with the vault's PDA seeds for invoke_signed."
+          ],
           "writable": true,
           "pda": {
             "seeds": [
@@ -438,6 +558,10 @@ export type HookedRooms = {
         {
           "name": "admin",
           "signer": true
+        },
+        {
+          "name": "systemProgram",
+          "address": "11111111111111111111111111111111"
         }
       ],
       "args": []
@@ -644,7 +768,30 @@ export type HookedRooms = {
           }
         },
         {
+          "name": "config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
           "name": "roomVault",
+          "docs": [
+            "Owned by System Program (created by depositors via system::transfer),",
+            "so lamport withdrawals must go through a system_program::transfer",
+            "CPI with the vault's PDA seeds for invoke_signed."
+          ],
           "writable": true,
           "pda": {
             "seeds": [
@@ -708,6 +855,10 @@ export type HookedRooms = {
         {
           "name": "admin",
           "signer": true
+        },
+        {
+          "name": "systemProgram",
+          "address": "11111111111111111111111111111111"
         }
       ],
       "args": [
@@ -758,6 +909,50 @@ export type HookedRooms = {
         {
           "name": "newLpManager",
           "type": "pubkey"
+        }
+      ]
+    },
+    {
+      "name": "setPaused",
+      "discriminator": [
+        91,
+        60,
+        125,
+        192,
+        176,
+        225,
+        166,
+        218
+      ],
+      "accounts": [
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "admin",
+          "signer": true
+        }
+      ],
+      "args": [
+        {
+          "name": "paused",
+          "type": "bool"
         }
       ]
     },
@@ -836,6 +1031,24 @@ export type HookedRooms = {
                 "kind": "account",
                 "path": "room.room_id",
                 "account": "room"
+              }
+            ]
+          }
+        },
+        {
+          "name": "config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
               }
             ]
           }
@@ -1202,6 +1415,16 @@ export type HookedRooms = {
       "code": 6026,
       "name": "lpManagerMismatch",
       "msg": "LP manager account does not match the canonical ProgramConfig.lp_manager"
+    },
+    {
+      "code": 6027,
+      "name": "paused",
+      "msg": "Program is paused — emergency switch is active"
+    },
+    {
+      "code": 6028,
+      "name": "unsupportedAccountVersion",
+      "msg": "Account version is not supported by this program build"
     }
   ],
   "types": [
@@ -1210,6 +1433,10 @@ export type HookedRooms = {
       "type": {
         "kind": "struct",
         "fields": [
+          {
+            "name": "version",
+            "type": "u8"
+          },
           {
             "name": "admin",
             "type": "pubkey"
@@ -1230,6 +1457,15 @@ export type HookedRooms = {
           {
             "name": "bump",
             "type": "u8"
+          },
+          {
+            "name": "reserved",
+            "type": {
+              "array": [
+                "u8",
+                64
+              ]
+            }
           }
         ]
       }
@@ -1239,6 +1475,10 @@ export type HookedRooms = {
       "type": {
         "kind": "struct",
         "fields": [
+          {
+            "name": "version",
+            "type": "u8"
+          },
           {
             "name": "admin",
             "type": "pubkey"
@@ -1252,8 +1492,27 @@ export type HookedRooms = {
             "type": "pubkey"
           },
           {
+            "name": "paused",
+            "docs": [
+              "Emergency switch. When true, every state-changing room ix returns",
+              "`RoomError::Paused`. Admin-only ix (set_treasury, set_lp_manager,",
+              "set_paused, gateway registry updates) remain callable so the admin",
+              "can recover, rotate keys, and unpause."
+            ],
+            "type": "bool"
+          },
+          {
             "name": "bump",
             "type": "u8"
+          },
+          {
+            "name": "reserved",
+            "type": {
+              "array": [
+                "u8",
+                128
+              ]
+            }
           }
         ]
       }
@@ -1263,6 +1522,10 @@ export type HookedRooms = {
       "type": {
         "kind": "struct",
         "fields": [
+          {
+            "name": "version",
+            "type": "u8"
+          },
           {
             "name": "admin",
             "type": "pubkey"
@@ -1354,6 +1617,20 @@ export type HookedRooms = {
           {
             "name": "vaultBump",
             "type": "u8"
+          },
+          {
+            "name": "reserved",
+            "docs": [
+              "Reserved for forward-compatible field additions. Zeroed at init.",
+              "Adding a field: shrink _reserved by sizeof(field), bump ROOM_VERSION,",
+              "and gate reads on version."
+            ],
+            "type": {
+              "array": [
+                "u8",
+                64
+              ]
+            }
           }
         ]
       }
@@ -1363,6 +1640,10 @@ export type HookedRooms = {
       "type": {
         "kind": "struct",
         "fields": [
+          {
+            "name": "version",
+            "type": "u8"
+          },
           {
             "name": "room",
             "type": "pubkey"
@@ -1402,6 +1683,19 @@ export type HookedRooms = {
           {
             "name": "bump",
             "type": "u8"
+          },
+          {
+            "name": "reserved",
+            "docs": [
+              "Reserved for forward-compatible field additions. Per-user account, so",
+              "padding is conservative."
+            ],
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
           }
         ]
       }

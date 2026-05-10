@@ -24,6 +24,50 @@ export const PHYSICS_FIXED_DT = 1 / 60;
 // frame. Mirrors the client's local cap.
 export const PHYSICS_MAX_STEP_ACCUM = 0.1;
 export const INPUT_SAMPLE_HZ = 20;
+// Lag-comp buffer: simulation time trails wall time by this much on BOTH
+// sides. Inputs carry a wallclock `t_ms`; both client and server convert
+// `t_ms` → `simTimeS` against the *same* origin (the first input's `t_ms`),
+// then step physics up to `wallSinceOriginS - INPUT_DELAY_S`. Because the
+// input timeline is the only non-deterministic axis (fish RNG is seeded),
+// aligning the timeline aligns both simulations bit-for-bit.
+//
+// Sized to absorb regional one-way latency + a tick boundary. Smaller =
+// snappier visual response but more samples land "late" (after their step
+// has already been processed) and get clamped forward, reintroducing drift.
+// Larger = wider safety margin but more perceived input lag.
+export const INPUT_DELAY_MS = 60;
+export const INPUT_DELAY_S = INPUT_DELAY_MS / 1000;
+
+export interface TimedInput {
+  /** Seconds since the per-cast simulation origin (first input's `t_ms`). */
+  simTimeS: number;
+  held: boolean;
+}
+
+/**
+ * Look up the input that was active at `simTimeS` from a history sorted by
+ * ascending `simTimeS`. Returns the `held` value of the most recent input
+ * with `simTimeS <= queriedSimTimeS`, or `defaultHeld` if none.
+ *
+ * Uses a moving cursor that the caller advances monotonically to keep
+ * lookups O(1) amortized when stepping forward through simulation time.
+ * The cursor points at the index of the input whose `simTimeS <= queried`
+ * with the largest such simTime — i.e. the active one. Returns the new
+ * cursor so the caller can thread it forward across steps.
+ */
+export function lookupActiveInput(
+  history: ReadonlyArray<TimedInput>,
+  queriedSimTimeS: number,
+  cursor: number,
+  defaultHeld: boolean,
+): { held: boolean; cursor: number } {
+  let i = cursor < 0 ? -1 : Math.min(cursor, history.length - 1);
+  while (i + 1 < history.length && history[i + 1]!.simTimeS <= queriedSimTimeS) {
+    i += 1;
+  }
+  if (i < 0) return { held: defaultHeld, cursor: -1 };
+  return { held: history[i]!.held, cursor: i };
+}
 export const CHEST_BASE_SPAWN_CHANCE = 0.15;
 export const CHEST_HOLD_SECONDS_REQUIRED = 2;
 export const GREEN_BAR_HEIGHT_BASE = 60;
@@ -34,7 +78,18 @@ export const FISH_HIT_RADIUS = 38;
 export interface FishingGameState {
   barY: number;
   barVelocity: number;
+  /** Raw fish position (physics-driven, with oscillation noise). */
   fishY: number;
+  /**
+   * Smoothed fish position used by progress and terminal-state checks AND
+   * pushed to the client for display. Server and client both score against
+   * THIS value, not the raw `fishY`, so the in-bar predicate can never
+   * disagree across the wire (the previous design had the client lerping
+   * `fishY` toward server and computing local progress against the lerped
+   * value, while the server scored against raw `fishY` — that ~135ms gap
+   * caused local progress to fill while server progress stayed at 0).
+   */
+  fishYDisplay: number;
   fishVelocity: number;
   fishTargetY: number;
   fishLastDirChangeAt: number;
@@ -50,6 +105,26 @@ export interface FishingGameState {
   // 1 - bait.progressDrainReduction. Set at session init from baitSlug.
   drainMultiplier: number;
 }
+
+/**
+ * Exponential-smoothing rate (1/sec) applied to `fishY → fishYDisplay`.
+ * Filters per-tick oscillation jitter so both sides see a stable "playable"
+ * fish trajectory. Lag-to-95% ≈ 3 / rate seconds.
+ */
+export const FISH_DISPLAY_SMOOTHING_PER_SEC = 22;
+
+/**
+ * Precomputed smoothing factor for the hot path (`dt === PHYSICS_FIXED_DT`).
+ * `Math.exp` is NOT correctly-rounded by IEEE 754 so its result can differ
+ * by ~1 ULP between V8 (Node, Chrome) and other engines (JavaScriptCore,
+ * SpiderMonkey). Calling it per step means that ULP error accumulates into
+ * client/server fishYDisplay drift. By computing it once at module init we
+ * fold any cross-engine difference into a single constant — the per-step
+ * arithmetic is then pure IEEE multiply/add, which IS deterministic, so
+ * fishYDisplay stays bit-equal across the wire over a 30s session.
+ */
+export const FISH_DISPLAY_SMOOTHING_K_FIXED =
+  1 - Math.exp(-FISH_DISPLAY_SMOOTHING_PER_SEC * PHYSICS_FIXED_DT);
 
 export interface ChestState {
   spawned: boolean;
@@ -257,7 +332,14 @@ export function stepProgress(
   greenBarHeight: number,
   dt: number,
 ): void {
-  const inBar = isFishInGreenBar(state.barY, state.fishY, greenBarHeight);
+  // Score against the SMOOTHED fish position (`fishYDisplay`), not the raw
+  // `fishY`. Both client and server render `fishYDisplay` and use it here,
+  // which means the in-bar predicate can never disagree across the wire.
+  const inBar = isFishInGreenBar(
+    state.barY,
+    state.fishYDisplay,
+    greenBarHeight,
+  );
   if (inBar) {
     state.progress = clamp(state.progress + FILL_RATE_PER_SEC * dt, 0, 1);
     state.timeInBar += dt;
@@ -296,6 +378,17 @@ export function stepAll(
 ): void {
   stepPhysics(state, isHolding, dt);
   stepFishPosition(state, profile, dt);
+  // Smooth the displayed fish position toward the raw physics value. The
+  // smoothed value is what stepProgress and terminalState read, and what the
+  // gateway pushes over the wire — keeping client visuals and server scoring
+  // bit-aligned on a single fish trajectory. For the hot path we use the
+  // precomputed K to keep cross-engine arithmetic deterministic; arbitrary
+  // dt callers fall back to per-call exp (off the wire path).
+  const smoothK =
+    dt === PHYSICS_FIXED_DT
+      ? FISH_DISPLAY_SMOOTHING_K_FIXED
+      : 1 - Math.exp(-FISH_DISPLAY_SMOOTHING_PER_SEC * dt);
+  state.fishYDisplay += (state.fishY - state.fishYDisplay) * smoothK;
   stepProgress(state, greenBarHeight, dt);
   stepChest(state, greenBarHeight, dt);
 }
@@ -312,7 +405,9 @@ export function terminalState(
   _greenBarHeight: number,
 ): FishingGameTerminal {
   if (state.progress >= 1) return "caught";
-  if (state.fishY <= BAR_MIN_Y + 1 && state.progress < NEAR_WIN_GRACE) {
+  // Use the smoothed fish position so a one-frame oscillation noise spike
+  // can't falsely trigger the "escape" verdict.
+  if (state.fishYDisplay <= BAR_MIN_Y + 1 && state.progress < NEAR_WIN_GRACE) {
     return "escaped";
   }
   return null;
@@ -346,6 +441,7 @@ export function initialFishingGameState(params: FishingGameSessionParams): Fishi
     barY: params.startingBarY,
     barVelocity: 0,
     fishY: params.startingFishY,
+    fishYDisplay: params.startingFishY,
     fishVelocity: 0,
     fishTargetY: params.startingFishY,
     fishLastDirChangeAt: 0,

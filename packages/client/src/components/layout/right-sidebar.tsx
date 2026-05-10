@@ -7,6 +7,11 @@ import { trpc } from "~/utils/trpc";
 import { useSessionAuth } from "~/providers/session-auth-provider";
 import { playSfx } from "~/utils/audio";
 import { SettingsButton } from "~/components/settings/settings-button";
+import type { RoomLeaderboardSnapshot } from "~/hooks/use-fishing-ws";
+
+// Live updates older than this fall back to the tRPC poll (covers the case
+// where the WS dropped a frame or the player just connected).
+const LIVE_LEADERBOARD_MAX_AGE_MS = 60_000;
 
 interface CatchEntry {
   id: string;
@@ -22,6 +27,7 @@ interface RightSidebarProps {
   catches?: CatchEntry[];
   onSellFish?: (catchId: string, shellValue: number) => Promise<any>;
   onOpenSettings?: () => void;
+  roomLeaderboard?: RoomLeaderboardSnapshot | null;
 }
 
 const PAGE_SIZE = 9;
@@ -60,8 +66,9 @@ export function RightSidebar({
   catches = [],
   onSellFish,
   onOpenSettings,
+  roomLeaderboard,
 }: RightSidebarProps) {
-  const { connected } = useWallet();
+  const { connected, publicKey } = useWallet();
   const { ready: authReady } = useSessionAuth();
   const [page, setPage] = useState(0);
   const [card, setCard] = useState<CardState | null>(null);
@@ -82,11 +89,33 @@ export function RightSidebar({
     { roomId: roomId ?? "" },
     {
       enabled: connected && !!roomId,
-      refetchInterval: 15000,
+      // WS broadcasts drive freshness; this is the fallback for first paint
+      // and missed frames.
+      refetchInterval: 60000,
     },
   );
-  const leaderboardEntries = leaderboardQuery.data?.entries ?? [];
-  const playerRank = leaderboardQuery.data?.playerRank ?? null;
+
+  const walletStr = publicKey?.toBase58() ?? null;
+  const liveFresh =
+    !!roomLeaderboard &&
+    roomLeaderboard.roomId === roomId &&
+    Date.now() - roomLeaderboard.updatedAt < LIVE_LEADERBOARD_MAX_AGE_MS;
+
+  const leaderboardEntries = liveFresh
+    ? roomLeaderboard!.entries.map((e, i) => ({
+        rank: i + 1,
+        displayName: e.displayName ?? "Anonymous",
+        dailyScore: e.score,
+      }))
+    : leaderboardQuery.data?.entries ?? [];
+
+  let playerRank: number | null = leaderboardQuery.data?.playerRank ?? null;
+  if (liveFresh && walletStr) {
+    const idx = roomLeaderboard!.entries.findIndex(
+      (e) => e.wallet === walletStr,
+    );
+    if (idx >= 0) playerRank = idx + 1;
+  }
   const ordered = [...catches].reverse();
   const totalPages = Math.max(1, Math.ceil(ordered.length / PAGE_SIZE));
   const safePage = Math.min(page, totalPages - 1);

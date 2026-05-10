@@ -20,25 +20,34 @@ export async function runRoomLifecycleTick(
   );
   if (toActive.modifiedCount > 0) {
     log(`${toActive.modifiedCount} room(s) entry → active`);
+  }
 
-    // Continuous-availability guarantee: if no entry-phase room remains,
-    // spin up a successor. The factory enforces the 2-rooms-per-UTC-day
-    // cap, so this is a no-op once the daily budget is exhausted.
-    const stillEntry = await Room.countDocuments({ phase: "entry" });
-    if (stillEntry === 0) {
-      try {
-        const result = await createRoomOnChainAndDb({
-          createdBy: "system:rotation",
-          trigger: "system:rotation",
-        });
-        if (result.ok) {
-          log(`rotation: created ${result.roomId} (${result.txSignature})`);
-        } else {
-          log(`rotation: skipped (${result.reason})`);
-        }
-      } catch (err) {
-        log(`rotation: error ${(err as Error).message}`);
+  // Continuous-availability watchdog: if no joinable room exists right now,
+  // spin one up. Mirrors the `room.active` query so a room that's full or
+  // missing on-chain backing also triggers creation. The factory enforces
+  // MAX_ROOMS_PER_UTC_DAY (2) and the pause/treasury guards, so this is a
+  // no-op once the budget is spent or the program is paused. Runs every
+  // tick so a missed cron, server-restart gap, or filled-up room all
+  // self-heal within the lifecycle interval.
+  const joinable = await Room.countDocuments({
+    phase: "entry",
+    onChainPoolId: { $ne: null },
+    entryClosesAt: { $gt: now },
+    $expr: { $lt: ["$realPlayerCount", "$maxPlayers"] },
+  });
+  if (joinable === 0) {
+    try {
+      const result = await createRoomOnChainAndDb({
+        createdBy: "system:rotation",
+        trigger: "system:rotation",
+      });
+      if (result.ok) {
+        log(`watchdog: created ${result.roomId} (${result.txSignature})`);
+      } else {
+        log(`watchdog: skipped (${result.reason})`);
       }
+    } catch (err) {
+      log(`watchdog: error ${(err as Error).message}`);
     }
   }
 

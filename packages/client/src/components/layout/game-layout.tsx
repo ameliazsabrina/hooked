@@ -189,7 +189,7 @@ export function GameLayout({ nickname, ready }: GameLayoutProps) {
               score={fishing.score}
             />
             <EventAlert status={fishing.eventStatus} />
-            <EventBanner status={fishing.eventStatus} />
+            {ready && <EventBanner status={fishing.eventStatus} />}
             <BaitTimer />
             <EquippedGear />
 
@@ -299,6 +299,7 @@ export function GameLayout({ nickname, ready }: GameLayoutProps) {
           catches={fishing.catches}
           onSellFish={fishing.sellFish}
           onOpenSettings={() => setSettingsOpen(true)}
+          roomLeaderboard={fishing.roomLeaderboard}
         />
       </div>
 
@@ -313,9 +314,11 @@ export function GameLayout({ nickname, ready }: GameLayoutProps) {
         onClose={() => setPopupOpen(null)}
         catches={fishing.catches}
         discoveredSpecies={fishing.discoveredSpecies}
+        discoveredApexFish={fishing.discoveredApexFish}
         onSellFish={fishing.sellFish}
         onSellFishBulk={fishing.sellFishBulk}
         eventStatus={fishing.eventStatus}
+        roomLeaderboard={fishing.roomLeaderboard}
       />
 
       {shopOpen && (

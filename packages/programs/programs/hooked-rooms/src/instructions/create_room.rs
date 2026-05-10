@@ -1,12 +1,12 @@
 use anchor_lang::prelude::*;
 
 use hooked_common::{
-    MAX_ROOM_PLAYERS, ROOM_CAPACITY_LAMPORTS, ROOM_DURATION_SECS, ROOM_ENTRY_WINDOW_SECS,
-    ROOM_SEED, ROOM_VAULT_SEED,
+    CONFIG_SEED, MAX_ROOM_PLAYERS, ROOM_CAPACITY_LAMPORTS, ROOM_DURATION_SECS,
+    ROOM_ENTRY_WINDOW_SECS, ROOM_SEED, ROOM_VAULT_SEED,
 };
 
 use crate::errors::RoomError;
-use crate::state::{Room, RoomStatus};
+use crate::state::{ProgramConfig, Room, RoomStatus, ROOM_VERSION};
 
 #[derive(Accounts)]
 #[instruction(room_id: u64)]
@@ -19,6 +19,12 @@ pub struct CreateRoom<'info> {
         bump,
     )]
     pub room: Account<'info, Room>,
+
+    #[account(
+        seeds = [CONFIG_SEED],
+        bump = config.bump,
+    )]
+    pub config: Account<'info, ProgramConfig>,
 
     /// CHECK: Room-owned SOL vault PDA, created lazily via system-program transfers from depositors.
     #[account(
@@ -35,9 +41,12 @@ pub struct CreateRoom<'info> {
 }
 
 pub fn handler(ctx: Context<CreateRoom>, room_id: u64) -> Result<()> {
+    require!(!ctx.accounts.config.paused, RoomError::Paused);
+
     let now = Clock::get()?.unix_timestamp;
     let room = &mut ctx.accounts.room;
 
+    room.version = ROOM_VERSION;
     room.admin = ctx.accounts.admin.key();
     room.room_id = room_id;
     room.created_at = now;
@@ -65,6 +74,7 @@ pub fn handler(ctx: Context<CreateRoom>, room_id: u64) -> Result<()> {
     room.third_place_score = 0;
     room.bump = ctx.bumps.room;
     room.vault_bump = ctx.bumps.room_vault;
+    room._reserved = [0u8; 64];
 
     Ok(())
 }

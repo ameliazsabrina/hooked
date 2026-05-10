@@ -60,6 +60,19 @@ export interface CaughtFish {
   caughtAt: string;
 }
 
+export interface RoomLeaderboardEntry {
+  wallet: string;
+  displayName?: string;
+  score: number;
+  catchCount: number;
+}
+
+export interface RoomLeaderboardSnapshot {
+  roomId: string | null;
+  entries: RoomLeaderboardEntry[];
+  updatedAt: number;
+}
+
 const DEFAULT_GATEWAY_HTTP = "http://localhost:3001";
 const RECONNECT_DELAY_MS = 1500;
 
@@ -132,7 +145,17 @@ type ServerMessage =
       score: number;
       roomId?: string;
     }
-  | { type: "leaderboard_update"; roomId?: string; date: string; entries: unknown[] }
+  | {
+      type: "leaderboard_update";
+      roomId?: string;
+      date: string;
+      entries: Array<{
+        wallet: string;
+        displayName?: string;
+        score: number;
+        catchCount: number;
+      }>;
+    }
   | { type: "bait_refilled"; bait: number; window: number; date: number }
   | {
       type: "event_status";
@@ -141,6 +164,7 @@ type ServerMessage =
       startsAt: number;
       endsAt: number;
       apexBp: number;
+      prizePoolSol: number;
       apexFishes: Array<{
         id: string;
         name: string;
@@ -178,6 +202,19 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
   const [discoveredSpecies, setDiscoveredSpecies] = useState<Set<string>>(
     () => new Set(),
   );
+  // Apex fish the player has caught at any point. Driven by the server's
+  // `discoveredApexFish` (joined against the admin-managed ApexFish catalog),
+  // so the Fish Index's apex tier can render slots for fish that aren't in
+  // the currently-active event pool.
+  const [discoveredApexFish, setDiscoveredApexFish] = useState<
+    Array<{
+      id: string;
+      name: string;
+      weightMinKg: number;
+      weightMaxKg: number;
+      assetUrl: string;
+    }>
+  >([]);
   const hydratedRef = useRef(false);
   const baitHydratedForWalletRef = useRef<string | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
@@ -198,6 +235,7 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
     startsAt: number;
     endsAt: number;
     apexBp: number;
+    prizePoolSol: number;
     apexFishes: Array<{
       id: string;
       name: string;
@@ -212,6 +250,11 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
     progress: number;
     tickIndex: number;
   } | null>(null);
+  // Live leaderboard pushed by the server after every credited catch in the
+  // player's room. Replaces the 15s tRPC poll as the freshness source; the
+  // tRPC query stays as a fallback for first paint and missed frames.
+  const [roomLeaderboard, setRoomLeaderboard] =
+    useState<RoomLeaderboardSnapshot | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
   const activeCastIdRef = useRef<string | null>(null);
@@ -287,6 +330,7 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
         ),
       ),
     );
+    setDiscoveredApexFish(data.discoveredApexFish ?? []);
   }, [sessionStateQuery.data]);
 
   // Reset catch/score hydration gate on wallet change. Bait uses its own
@@ -294,6 +338,7 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
   useEffect(() => {
     hydratedRef.current = false;
     setDiscoveredSpecies(new Set());
+    setDiscoveredApexFish([]);
   }, [walletStr]);
 
   const connect = useCallback(async () => {
@@ -589,6 +634,23 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
         return;
       }
       case "leaderboard_update": {
+        setRoomLeaderboard({
+          roomId: msg.roomId ?? null,
+          entries: msg.entries,
+          updatedAt: Date.now(),
+        });
+        // The HUD score is authoritative iff it matches what Redis has for
+        // this player. The optimistic +N on catch_resolved gives instant
+        // feedback, but a subsequent sessionState refetch can clobber it
+        // with a stale Mongo aggregate (catch row not yet visible). The
+        // leaderboard broadcast carries the post-credit Redis value, so
+        // sync from there whenever our wallet is present — eventually
+        // consistent with the authoritative source within ~250ms.
+        const myWallet = walletStrRef.current;
+        if (myWallet) {
+          const mine = msg.entries.find((e) => e.wallet === myWallet);
+          if (mine) setScore(mine.score);
+        }
         return;
       }
       case "event_status": {
@@ -598,6 +660,7 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
           startsAt: msg.startsAt,
           endsAt: msg.endsAt,
           apexBp: msg.apexBp,
+          prizePoolSol: msg.prizePoolSol,
           apexFishes: msg.apexFishes,
         });
         return;
@@ -934,6 +997,7 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
     lastCatch,
     catches,
     discoveredSpecies,
+    discoveredApexFish,
     mechanic,
     circularTapConfig,
     fishRarity,
@@ -944,6 +1008,7 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
     sessionId,
     authed,
     eventStatus,
+    roomLeaderboard,
     cast,
     setHeld,
     onCircularTapResult,

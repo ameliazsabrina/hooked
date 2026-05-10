@@ -71,7 +71,19 @@ export function registerJobs(redisUrl: string) {
   // rotations. Off-chain v2 creates session rows lazily on first cast via
   // `executeInitiateCastOffchain`, so no scheduled keeper run is needed.
 
-  roomCreateQueue = new Queue("room-create", { connection });
+  roomCreateQueue = new Queue("room-create", {
+    connection,
+    // Transient RPC failures (devnet hiccups, leader rotation) shouldn't
+    // burn the 02:00 / 14:00 UTC slot — retry a few times so we keep the
+    // window-aligned room. The lifecycle watchdog is the safety net for
+    // anything still missing after these run out.
+    defaultJobOptions: {
+      attempts: 3,
+      backoff: { type: "exponential", delay: 30_000 },
+      removeOnComplete: 100,
+      removeOnFail: 200,
+    },
+  });
   // Phase-aligned with bait refills (02:00 / 14:00 UTC) so "new bait" and
   // "new room" arrive together — see services/fishing/window.ts.
   roomCreateQueue.upsertJobScheduler(

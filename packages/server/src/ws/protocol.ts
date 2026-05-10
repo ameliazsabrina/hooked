@@ -242,6 +242,7 @@ export interface EventStatusMessage {
   startsAt: number;
   endsAt: number;
   apexBp: number;
+  prizePoolSol: number;
   apexFishes: EventStatusApexFish[];
 }
 

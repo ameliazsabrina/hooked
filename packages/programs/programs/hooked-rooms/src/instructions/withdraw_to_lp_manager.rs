@@ -43,6 +43,8 @@ pub struct WithdrawToLpManager<'info> {
 }
 
 pub fn handler(ctx: Context<WithdrawToLpManager>, amount: u64) -> Result<()> {
+    require!(!ctx.accounts.config.paused, RoomError::Paused);
+
     let now = Clock::get()?.unix_timestamp;
     let room = &ctx.accounts.room;
 

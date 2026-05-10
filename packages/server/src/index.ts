@@ -17,6 +17,7 @@ import redisPlugin from "./plugins/redis.js";
 import gatewayPlugin from "./ws/gateway.js";
 import { env, isAllowedOrigin } from "./config/env.js";
 import { registerJobs } from "./jobs/queue.js";
+import { runRoomLifecycleTick } from "./jobs/roomLifecycle.js";
 
 const REQUEST_TIMEOUT_MS = 30_000;
 const CONNECTION_TIMEOUT_MS = 60_000;
@@ -109,6 +110,18 @@ async function buildServer() {
   });
 
   registerJobs(env.REDIS_URL);
+
+  // BullMQ's `every` schedulers and the `0 2,14 * * *` cron only fire at
+  // their next future boundary — they don't backfill missed runs. So a
+  // server restart that crosses 02:00 or 14:00 UTC, or a fresh deploy,
+  // would otherwise leave players staring at "no room for entry" until
+  // the next boundary. Run the watchdog once on boot so it self-heals
+  // immediately if no joinable room exists.
+  runRoomLifecycleTick((msg) => server.log.info(`[boot watchdog] ${msg}`)).catch(
+    (err) => {
+      server.log.error({ err }, "boot room lifecycle tick failed");
+    },
+  );
 
   return server;
 }
