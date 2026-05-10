@@ -34,6 +34,7 @@ async function buildServer() {
       (req.headers["x-request-id"] as string | undefined) ?? randomUUID(),
     requestTimeout: REQUEST_TIMEOUT_MS,
     connectionTimeout: CONNECTION_TIMEOUT_MS,
+    pluginTimeout: 30_000,
     disableRequestLogging: false,
   });
 

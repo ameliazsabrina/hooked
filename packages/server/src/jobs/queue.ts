@@ -25,7 +25,13 @@ export function getQueues() {
 }
 
 export function registerJobs(redisUrl: string) {
-  const connection = { url: redisUrl };
+  // Heroku Redis (rediss://) uses a self-signed cert chain; ioredis (and
+  // therefore BullMQ) rejects it unless we explicitly relax verification.
+  const useTls = redisUrl.startsWith("rediss://");
+  const connection = {
+    url: redisUrl,
+    ...(useTls ? { tls: { rejectUnauthorized: false } } : {}),
+  };
 
   dailyResetQueue = new Queue("daily-reset", { connection });
   payoutQueue = new Queue("payout", { connection });

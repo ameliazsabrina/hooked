@@ -9,7 +9,13 @@ declare module "fastify" {
 }
 
 export default fp(async (fastify) => {
-  const redis = new Redis(env.REDIS_URL);
+  // Heroku Redis (rediss://) terminates TLS with a self-signed cert chain;
+  // ioredis rejects it by default. Disable cert verification only on TLS URLs.
+  const useTls = env.REDIS_URL.startsWith("rediss://");
+  const redis = new Redis(env.REDIS_URL, {
+    ...(useTls ? { tls: { rejectUnauthorized: false } } : {}),
+    maxRetriesPerRequest: null,
+  });
 
   fastify.decorate("redis", redis);
 
