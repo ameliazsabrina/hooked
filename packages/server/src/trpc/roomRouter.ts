@@ -161,12 +161,29 @@ export const roomRouter = router({
     })
       .sort({ closesAt: 1 })
       .lean();
-    if (!room) {
+    if (!room || !room.onChainPoolId) {
       return {
         status: "closed" as const,
         nextOpensAt: nextRoomOpensAt(now).toISOString(),
       };
     }
+
+    // After a program-ID rotation, pre-rotation Room docs still satisfy
+    // the Mongo filter above, but their PDA derives to a fresh,
+    // uninitialized address under the new program. Returning such a room
+    // would cause AnchorError 3012 (AccountNotInitialized) on deposit.
+    const loaded = getRoomsProgram();
+    if (loaded) {
+      const pda = getRoomPda(BigInt(room.onChainPoolId));
+      const onChain = await loaded.program.account.room.fetchNullable(pda);
+      if (!onChain) {
+        return {
+          status: "closed" as const,
+          nextOpensAt: nextRoomOpensAt(now).toISOString(),
+        };
+      }
+    }
+
     return {
       status: "open" as const,
       room: {
