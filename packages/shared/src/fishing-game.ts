@@ -62,7 +62,10 @@ export function lookupActiveInput(
   defaultHeld: boolean,
 ): { held: boolean; cursor: number } {
   let i = cursor < 0 ? -1 : Math.min(cursor, history.length - 1);
-  while (i + 1 < history.length && history[i + 1]!.simTimeS <= queriedSimTimeS) {
+  while (
+    i + 1 < history.length &&
+    history[i + 1]!.simTimeS <= queriedSimTimeS
+  ) {
     i += 1;
   }
   if (i < 0) return { held: defaultHeld, cursor: -1 };
@@ -418,7 +421,8 @@ export function computeMetrics(
   profile: VerticalProfile,
 ): FishingGameMetrics {
   const durationMs = state.totalTime * 1000;
-  const timeInBarPct = state.totalTime > 0 ? state.timeInBar / state.totalTime : 0;
+  const timeInBarPct =
+    state.totalTime > 0 ? state.timeInBar / state.totalTime : 0;
   const avgDistanceFromCenter =
     state.sampleCount > 0 ? state.distanceFromCenterSum / state.sampleCount : 1;
   const optimalMs = profile.durationMs;
@@ -435,7 +439,9 @@ export function computeMetrics(
   };
 }
 
-export function initialFishingGameState(params: FishingGameSessionParams): FishingGameState {
+export function initialFishingGameState(
+  params: FishingGameSessionParams,
+): FishingGameState {
   const bait = getBait(params.baitSlug);
   return {
     barY: params.startingBarY,
@@ -462,7 +468,10 @@ export function initialFishingGameState(params: FishingGameSessionParams): Fishi
   };
 }
 
-export function rollChestSpawn(seed: number, chestBonus: number): { spawned: boolean; y: number; next: number } {
+export function rollChestSpawn(
+  seed: number,
+  chestBonus: number,
+): { spawned: boolean; y: number; next: number } {
   const r1 = mulberry32Next(seed);
   const r2 = mulberry32Next(r1.next);
   return {

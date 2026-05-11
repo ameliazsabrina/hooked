@@ -23,17 +23,22 @@ export async function runRoomLifecycleTick(
   }
 
   // Continuous-availability watchdog: if no joinable room exists right now,
-  // spin one up. Mirrors the `room.active` query so a room that's full or
-  // missing on-chain backing also triggers creation. The factory enforces
-  // MAX_ROOMS_PER_UTC_DAY (2) and the pause/treasury guards, so this is a
-  // no-op once the budget is spent or the program is paused. Runs every
-  // tick so a missed cron, server-restart gap, or filled-up room all
-  // self-heal within the lifecycle interval.
+  // spin one up. Mirrors the `room.active` query and `isRoomJoinable` so a
+  // room that's full (by SOL or by player count) or missing on-chain backing
+  // also triggers creation. The factory's pause/treasury guards still apply,
+  // so this is a no-op when the program is paused or the treasury keypair is
+  // missing. Runs every tick so a missed cron, server-restart gap, or
+  // filled-up room all self-heal within the lifecycle interval.
   const joinable = await Room.countDocuments({
     phase: "entry",
     onChainPoolId: { $ne: null },
     entryClosesAt: { $gt: now },
-    $expr: { $lt: ["$realPlayerCount", "$maxPlayers"] },
+    $expr: {
+      $and: [
+        { $lt: ["$realPlayerCount", "$maxPlayers"] },
+        { $lt: ["$depositedSol", "$capacitySol"] },
+      ],
+    },
   });
   if (joinable === 0) {
     try {
@@ -104,7 +109,10 @@ export async function runRoomLifecycleTick(
 }
 
 async function processRoomLifecycle(job: Job) {
-  await runRoomLifecycleTick((msg) => job.log(msg));
+  await runRoomLifecycleTick((msg) => {
+    job.log(msg);
+    console.log(`[room-lifecycle] ${msg}`);
+  });
 }
 
 export function createRoomLifecycleWorker(connection: ConnectionOptions) {

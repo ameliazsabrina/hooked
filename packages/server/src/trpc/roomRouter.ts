@@ -67,8 +67,13 @@ async function maybeTriggerCapacityOverflow(roomId: string): Promise<void> {
     {
       roomId,
       phase: "entry",
-      depositedSol: { $gte: ROOM_CAPACITY_SOL },
       overflowTriggered: { $ne: true },
+      $expr: {
+        $or: [
+          { $gte: ["$depositedSol", "$capacitySol"] },
+          { $gte: ["$realPlayerCount", "$maxPlayers"] },
+        ],
+      },
     },
     { $set: { overflowTriggered: true } },
     { new: true }
@@ -157,7 +162,12 @@ export const roomRouter = router({
       phase: "entry",
       onChainPoolId: { $ne: null },
       entryClosesAt: { $gt: now },
-      $expr: { $lt: ["$realPlayerCount", "$maxPlayers"] },
+      $expr: {
+        $and: [
+          { $lt: ["$realPlayerCount", "$maxPlayers"] },
+          { $lt: ["$depositedSol", "$capacitySol"] },
+        ],
+      },
     })
       .sort({ closesAt: 1 })
       .lean();

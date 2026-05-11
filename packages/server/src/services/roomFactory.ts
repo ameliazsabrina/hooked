@@ -16,8 +16,6 @@ import {
 } from "../solana/roomsProgram.js";
 import { isProgramPaused } from "../solana/configCache.js";
 
-const MAX_ROOMS_PER_UTC_DAY = 2;
-
 function newRoomId(now: Date): string {
   const ymd = now.toISOString().slice(0, 10).replace(/-/g, "");
   const suffix = randomBytes(3).toString("hex");
@@ -45,7 +43,7 @@ export type CreateRoomResult =
   | {
       ok: false;
       skipped: true;
-      reason: "daily-cap" | "treasury-missing" | "cron-already-created" | "paused";
+      reason: "treasury-missing" | "cron-already-created" | "paused";
     };
 
 export async function createRoomOnChainAndDb(opts: {
@@ -67,18 +65,6 @@ export async function createRoomOnChainAndDb(opts: {
   }
 
   const now = new Date();
-
-  // Hard ceiling regardless of trigger.
-  const utcDayStart = new Date(
-    Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()),
-  );
-  const utcDayEnd = new Date(utcDayStart.getTime() + 24 * 60 * 60 * 1000);
-  const existingToday = await Room.countDocuments({
-    createdAt: { $gte: utcDayStart, $lt: utcDayEnd },
-  });
-  if (existingToday >= MAX_ROOMS_PER_UTC_DAY) {
-    return { ok: false, skipped: true, reason: "daily-cap" };
-  }
 
   // Cron fires once per bait window (02:00 / 14:00 UTC). Skip if a room was
   // already created in the active window — covers retries and the rare case
