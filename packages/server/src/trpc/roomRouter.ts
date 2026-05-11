@@ -376,7 +376,7 @@ export const roomRouter = router({
         targetWallet: z.string().regex(/^[1-9A-HJ-NP-Za-km-z]{32,44}$/),
       }),
     )
-    .mutation(async ({ ctx, input }) => {
+    .mutation(async ({ input }) => {
       const target = input.targetWallet;
       const player = await Player.findOne({ walletAddress: target }).lean();
       if (!player) {

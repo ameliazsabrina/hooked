@@ -5,7 +5,8 @@ import { PublicKey } from "@solana/web3.js";
 import nacl from "tweetnacl";
 import bs58 from "bs58";
 import { randomUUID } from "node:crypto";
-import { env, isAllowedOrigin } from "../config/env.js";
+import "../plugins/redis.js";
+import { isAllowedOrigin } from "../config/env.js";
 import {
   executeCancelOnDisconnectOffchain,
   executeInitiateCastOffchain,
@@ -40,24 +41,6 @@ import { getRoomLeaderboard } from "../services/leaderboard.js";
 // instance through every call site.
 let redisRef: Redis | null = null;
 
-function currentWindow(now: Date): { window: number; date: number } {
-  const hour = now.getUTCHours();
-  const dt = new Date(now);
-  let window: number;
-  if (hour < 2) {
-    window = 1;
-    dt.setUTCDate(dt.getUTCDate() - 1);
-  } else if (hour < 14) {
-    window = 0;
-  } else {
-    window = 1;
-  }
-  const epoch = Math.floor(
-    Date.UTC(dt.getUTCFullYear(), dt.getUTCMonth(), dt.getUTCDate()) /
-      (24 * 60 * 60 * 1000),
-  );
-  return { window, date: epoch % 65_536 };
-}
 
 
 async function loadEquippedBaitSlug(wallet: PublicKey): Promise<string> {
@@ -1002,7 +985,6 @@ export default fp(async (fastify) => {
             return;
           }
           const wallet = socket.wallet;
-          const identityTag = socket.wallet.toBase58();
           const clientCastId = msg.clientCastId;
           const startSession = (
             rolled: RolledCast,
