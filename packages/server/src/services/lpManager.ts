@@ -14,7 +14,10 @@ import {
 // resolution at module load time. We load it lazily inside the functions
 // that actually need it so dry-run mode and tests never touch the SDK.
 import { env } from "../config/env.js";
-import { loadLpManagerKeypair, getRoomsConnection } from "../solana/roomsProgram.js";
+import {
+  loadLpManagerKeypair,
+  getRoomsConnection,
+} from "../solana/roomsProgram.js";
 import {
   swapSolToUsdc,
   swapUsdcToSol,
@@ -85,7 +88,8 @@ function isPlaceholderPool(): boolean {
 export function checkLpReady(_opts: {
   requiredBufferLamports: bigint;
 }): { ok: true; signer: Keypair } | { ok: false; reason: string } {
-  if (!env.FEATURES_LP_ENABLED) return { ok: false, reason: "feature flag off" };
+  if (!env.FEATURES_LP_ENABLED)
+    return { ok: false, reason: "feature flag off" };
   if (env.LP_KILL_SWITCH) return { ok: false, reason: "kill switch on" };
   const signer = loadLpManagerKeypair();
   if (!signer) return { ok: false, reason: "LP_MANAGER_KEYPAIR missing" };
@@ -130,18 +134,19 @@ async function deployToDlmm(opts: {
   const activeBin = await dlmmPool.getActiveBin();
   const positionKeypair = Keypair.generate();
 
-  const tx: Transaction = await dlmmPool.initializePositionAndAddLiquidityByStrategy({
-    positionPubKey: positionKeypair.publicKey,
-    totalXAmount: new BN((opts.totalSolLamports - half).toString()),
-    totalYAmount: new BN(swap.outLamports.toString()),
-    strategy: {
-      minBinId: activeBin.binId - 10,
-      maxBinId: activeBin.binId + 10,
-      strategyType: StrategyType.Spot,
-    },
-    user: opts.signer.publicKey,
-    slippage: 1,
-  });
+  const tx: Transaction =
+    await dlmmPool.initializePositionAndAddLiquidityByStrategy({
+      positionPubKey: positionKeypair.publicKey,
+      totalXAmount: new BN((opts.totalSolLamports - half).toString()),
+      totalYAmount: new BN(swap.outLamports.toString()),
+      strategy: {
+        minBinId: activeBin.binId - 10,
+        maxBinId: activeBin.binId + 10,
+        strategyType: StrategyType.Spot,
+      },
+      user: opts.signer.publicKey,
+      slippage: 1,
+    });
   tx.feePayer = opts.signer.publicKey;
   const { blockhash } = await opts.connection.getLatestBlockhash("confirmed");
   tx.recentBlockhash = blockhash;
@@ -251,16 +256,19 @@ async function exitFromDlmm(opts: {
     await opts.connection.getBalance(opts.signer.publicKey),
   );
 
-  const exitedLamports = balanceAfterSol > balanceBeforeSol
-    ? balanceAfterSol - balanceBeforeSol
-    : 0n;
+  const exitedLamports =
+    balanceAfterSol > balanceBeforeSol
+      ? balanceAfterSol - balanceBeforeSol
+      : 0n;
 
-  const realizedYield = exitedLamports > opts.deployedLamports
-    ? exitedLamports - opts.deployedLamports
-    : 0n;
-  const bufferTopUp = exitedLamports < opts.deployedLamports
-    ? opts.deployedLamports - exitedLamports
-    : 0n;
+  const realizedYield =
+    exitedLamports > opts.deployedLamports
+      ? exitedLamports - opts.deployedLamports
+      : 0n;
+  const bufferTopUp =
+    exitedLamports < opts.deployedLamports
+      ? opts.deployedLamports - exitedLamports
+      : 0n;
 
   // The SOL leg returned by removeLiquidity is approximated as
   // (balanceAfter - balanceBefore) - swapBackOut, since the swap-back happens
@@ -298,7 +306,9 @@ export async function deployRoomLiquidity(opts: {
   roomPdaStr: string;
   lamports: bigint;
 }): Promise<DeployResult> {
-  const ready = checkLpReady({ requiredBufferLamports: BigInt(env.IL_BUFFER_LAMPORTS_MIN) });
+  const ready = checkLpReady({
+    requiredBufferLamports: BigInt(env.IL_BUFFER_LAMPORTS_MIN),
+  });
   if (!ready.ok) throw new Error(`[lpManager] not ready: ${ready.reason}`);
   const connection = getRoomsConnection();
 
@@ -337,7 +347,9 @@ export async function exitRoomLiquidity(opts: {
   /** room_vault PDA — destination for `deployed + max(yield, 0)`. */
   roomVault: PublicKey;
 }): Promise<ExitResult> {
-  const ready = checkLpReady({ requiredBufferLamports: BigInt(env.IL_BUFFER_LAMPORTS_MIN) });
+  const ready = checkLpReady({
+    requiredBufferLamports: BigInt(env.IL_BUFFER_LAMPORTS_MIN),
+  });
   if (!ready.ok) throw new Error(`[lpManager] not ready: ${ready.reason}`);
   const connection = getRoomsConnection();
 

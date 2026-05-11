@@ -15,6 +15,14 @@ export interface Context {
   ipAddress: string | null;
   adminHeaders: AdminHeaders;
   redis: Redis;
+  /**
+   * Public origin (scheme + host) the current request came in on, derived
+   * from `x-forwarded-proto` + `host` headers. Used to build absolute URLs
+   * (e.g. apex fish `assetUrl`) that point back at the same server the
+   * client is already talking to — survives a missing SERVER_PUBLIC_URL
+   * env var and works across Heroku/Railway/local without per-env config.
+   */
+  requestOrigin: string;
 }
 
 function extractBearer(authorization: string | undefined): string | null {
@@ -57,6 +65,18 @@ export async function createContext({
     signature: (req.headers["x-admin-signature"] as string | undefined) ?? null,
   };
 
+  // Heroku/Railway both forward the original scheme via x-forwarded-proto;
+  // fall back to Fastify's parsed protocol when running behind no proxy.
+  const proto =
+    (req.headers["x-forwarded-proto"] as string | undefined)?.split(",")[0]?.trim() ??
+    req.protocol ??
+    "http";
+  const host =
+    (req.headers["x-forwarded-host"] as string | undefined) ??
+    (req.headers.host as string | undefined) ??
+    "localhost:3001";
+  const requestOrigin = `${proto}://${host}`;
+
   return {
     walletAddress,
     sessionToken,
@@ -64,5 +84,6 @@ export async function createContext({
     ipAddress,
     adminHeaders,
     redis,
+    requestOrigin,
   };
 }

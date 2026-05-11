@@ -235,8 +235,8 @@ export const adminEventRouter = router({
    */
   apexCatalog: adminSessionProcedure
     .input(z.object({ force: z.boolean().default(false) }).optional())
-    .query(async ({ input }) => {
-      return readApexCatalog(input?.force ?? false);
+    .query(async ({ ctx, input }) => {
+      return readApexCatalog(ctx.requestOrigin, input?.force ?? false);
     }),
 
   /** Create a new (inactive) event. Lifecycle worker promotes to active when startsAt arrives. */

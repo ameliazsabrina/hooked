@@ -8,7 +8,6 @@ import {
 } from "../../db/schema.js";
 import { invalidateApexCatalog } from "../../services/fishing/apexCatalog.js";
 import { adminSessionProcedure, router } from "../trpc.js";
-import { env } from "../../config/env.js";
 
 const ObjectIdString = z
   .string()
@@ -62,16 +61,19 @@ export interface SerializedApexFish {
   updatedAt: string;
 }
 
-function serialize(doc: {
-  _id: unknown;
-  name: string;
-  weightMinKg: number;
-  weightMaxKg: number;
-  imageMimeType: string;
-  createdBy: string;
-  createdAt: Date;
-  updatedAt: Date;
-}): SerializedApexFish {
+function serialize(
+  doc: {
+    _id: unknown;
+    name: string;
+    weightMinKg: number;
+    weightMaxKg: number;
+    imageMimeType: string;
+    createdBy: string;
+    createdAt: Date;
+    updatedAt: Date;
+  },
+  baseUrl: string,
+): SerializedApexFish {
   const id = String(doc._id);
   return {
     id,
@@ -79,7 +81,7 @@ function serialize(doc: {
     weightMinKg: doc.weightMinKg,
     weightMaxKg: doc.weightMaxKg,
     imageMimeType: doc.imageMimeType,
-    assetUrl: `${env.SERVER_PUBLIC_URL}/admin/apex-fish/${id}/image`,
+    assetUrl: `${baseUrl}/admin/apex-fish/${id}/image`,
     createdBy: doc.createdBy,
     createdAt: doc.createdAt.toISOString(),
     updatedAt: doc.updatedAt.toISOString(),
@@ -109,24 +111,24 @@ const updateInput = z.object({
  * Fastify route.
  */
 export const adminApexFishRouter = router({
-  list: adminSessionProcedure.query(async () => {
+  list: adminSessionProcedure.query(async ({ ctx }) => {
     const docs = await ApexFish.find(
       {},
       { imageData: 0 },
     )
       .sort({ createdAt: -1 })
       .lean();
-    return docs.map(serialize);
+    return docs.map((d) => serialize(d, ctx.requestOrigin));
   }),
 
   get: adminSessionProcedure
     .input(z.object({ id: ObjectIdString }))
-    .query(async ({ input }) => {
+    .query(async ({ ctx, input }) => {
       const doc = await ApexFish.findById(input.id, { imageData: 0 }).lean();
       if (!doc) {
         throw new TRPCError({ code: "NOT_FOUND", message: "Apex fish not found" });
       }
-      return serialize(doc);
+      return serialize(doc, ctx.requestOrigin);
     }),
 
   create: adminSessionProcedure
@@ -149,7 +151,7 @@ export const adminApexFishRouter = router({
           createdBy: ctx.adminWallet,
         });
         invalidateApexCatalog();
-        return serialize(doc.toObject());
+        return serialize(doc.toObject(), ctx.requestOrigin);
       } catch (err) {
         if ((err as { code?: number }).code === 11000) {
           throw new TRPCError({
@@ -163,7 +165,7 @@ export const adminApexFishRouter = router({
 
   update: adminSessionProcedure
     .input(updateInput)
-    .mutation(async ({ input }) => {
+    .mutation(async ({ ctx, input }) => {
       const existing = await ApexFish.findById(input.id);
       if (!existing) {
         throw new TRPCError({
@@ -206,7 +208,7 @@ export const adminApexFishRouter = router({
         throw err;
       }
       invalidateApexCatalog();
-      return serialize(existing.toObject());
+      return serialize(existing.toObject(), ctx.requestOrigin);
     }),
 
   delete: adminSessionProcedure

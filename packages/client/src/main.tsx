@@ -21,7 +21,13 @@ import App from "./app.tsx";
 
 function Root() {
   const endpoint = useMemo(() => {
-    const cluster = (import.meta.env.VITE_SOLANA_CLUSTER ?? "devnet") as Cluster;
+    const rawCluster = import.meta.env.VITE_SOLANA_CLUSTER ?? "devnet";
+    const cluster = (rawCluster === "mainnet" ? "mainnet-beta" : rawCluster) as Cluster;
+    const heliusKey = import.meta.env.VITE_HELIUS_API_KEY;
+    if (heliusKey) {
+      const host = cluster === "mainnet-beta" ? "mainnet" : "devnet";
+      return `https://${host}.helius-rpc.com/?api-key=${heliusKey}`;
+    }
     return clusterApiUrl(cluster);
   }, []);
   const wallets = useMemo(
