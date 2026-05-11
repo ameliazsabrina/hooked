@@ -1720,8 +1720,8 @@
 .equipped-slot {
   width: 44px;
   height: 44px;
-  background: #d9a23b9f;
-  border: 1px solid #8a5a00a8;
+  background: #ffffffa4;
+  border: 1.5px solid #ffffffb3;
   border-radius: 6px;
   display: flex;
   align-items: center;
