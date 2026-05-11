@@ -81,6 +81,24 @@ export function loadAdminKeypair(): Keypair | null {
   return kp;
 }
 
+let cachedKeeper: Keypair | null | undefined;
+
+export function loadKeeperKeypair(): Keypair | null {
+  if (cachedKeeper !== undefined) return cachedKeeper;
+  if (!env.KEEPER_KEYPAIR) {
+    cachedKeeper = null;
+    return null;
+  }
+  const kp = parseKeypair(env.KEEPER_KEYPAIR);
+  if (!kp) {
+    console.error(
+      "[rooms] Invalid KEEPER_KEYPAIR — expected JSON byte array or base58 64-byte secret key",
+    );
+  }
+  cachedKeeper = kp;
+  return kp;
+}
+
 export function getRoomsConnection(): Connection {
   return new Connection(env.SOLANA_RPC_URL, "confirmed");
 }
