@@ -8,7 +8,11 @@ import "./onboarding.css";
 
 export function OnboardingGate() {
   const { connected } = useWallet();
-  const { ready: authReady } = useSessionAuth();
+  const {
+    ready: authReady,
+    state: authState,
+    error: authError,
+  } = useSessionAuth();
 
   const playerQuery = trpc.player.me.useQuery(undefined, {
     enabled: connected && authReady,
@@ -23,9 +27,50 @@ export function OnboardingGate() {
   const needsDeposit = data?.exists && !data.depositAmount;
   const ready = connected && authReady && data?.exists && !!data.depositAmount;
 
+  const showLoader = connected && (!authReady || playerQuery.isLoading);
+
+  if (import.meta.env.DEV) {
+    console.log("[onboarding-gate]", {
+      connected,
+      authState,
+      authReady,
+      authError,
+      playerLoading: playerQuery.isLoading,
+      playerFetching: playerQuery.isFetching,
+      playerError: playerQuery.error?.message,
+      playerExists: data?.exists,
+      showLoader,
+      needsNickname,
+      needsDeposit,
+      ready,
+    });
+  }
+  const loaderMessage =
+    authState === "signing"
+      ? "Hold on, Captain! Signing your papers"
+      : authState === "verifying"
+        ? "Your ship is being verified"
+        : "Your ship is arriving";
+
   return (
     <>
       <GameLayout nickname={nickname} ready={ready} />
+      {showLoader && (
+        <div className="onboarding-loading">
+          <span className="onboarding-loading__ship" aria-hidden>
+            <img src="/assets/Ship/Ship1.png" alt="" />
+            <img src="/assets/Ship/Ship2.png" alt="" />
+          </span>
+          <span className="onboarding-loading__text">{loaderMessage}</span>
+          <span className="onboarding-loading__wave" aria-hidden>
+            <span>
+              ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~
+              ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~
+              ~ ~ ~ ~&nbsp;
+            </span>
+          </span>
+        </div>
+      )}
       {needsNickname && <NicknameScreen />}
       {needsDeposit && <DepositScreen />}
     </>
