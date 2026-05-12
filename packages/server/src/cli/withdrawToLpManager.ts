@@ -132,17 +132,39 @@ async function main() {
   }
 
   const connection = program.provider.connection;
-  const vaultBalance = await connection.getBalance(roomVaultPda);
+  const vaultBalance = BigInt(await connection.getBalance(roomVaultPda));
   const deposited = BigInt(room.depositedLamports.toString());
-  const amount = deposited < BigInt(vaultBalance) ? deposited : BigInt(vaultBalance);
+
+  // Rent-exempt minimum for a 0-byte system-owned account. After the
+  // withdraw, room_vault must either be fully drained (0 lamports →
+  // reaped by runtime) or hold ≥ this amount, otherwise the runtime
+  // rejects with "insufficient funds for rent".
+  const rentMin = BigInt(
+    await connection.getMinimumBalanceForRentExemption(0),
+  );
+
+  // First-pass: withdraw min(deposited, vaultBalance) — capped by the
+  // program's `amount <= room.deposited_lamports` constraint.
+  let amount = deposited < vaultBalance ? deposited : vaultBalance;
+  let remainder = vaultBalance - amount;
+
+  // If the remainder would be a non-zero amount below rent minimum,
+  // shrink the withdraw so what's left is exactly rent-exempt. The
+  // stray ~rent-min lamports get reclaimed at close_room time.
+  if (remainder > 0n && remainder < rentMin) {
+    amount = vaultBalance - rentMin;
+    remainder = rentMin;
+  }
 
   console.log("─── plan ─────────────────────────────────────");
   console.log(`room                ${roomPda.toBase58()}`);
   console.log(`room_vault          ${roomVaultPda.toBase58()}`);
-  console.log(`vault balance       ${vaultBalance} lamports (${vaultBalance / 1e9} SOL)`);
+  console.log(`vault balance       ${vaultBalance} lamports (${Number(vaultBalance) / 1e9} SOL)`);
   console.log(`room.deposited      ${deposited} lamports (${Number(deposited) / 1e9} SOL)`);
+  console.log(`rent-exempt min     ${rentMin} lamports`);
   console.log(`lp_manager (dst)    ${lpManager.publicKey.toBase58()}`);
   console.log(`amount to withdraw  ${amount} lamports (${Number(amount) / 1e9} SOL)`);
+  console.log(`vault remainder     ${remainder} lamports (${Number(remainder) / 1e9} SOL)`);
   console.log("──────────────────────────────────────────────");
 
   if (amount === 0n) {
