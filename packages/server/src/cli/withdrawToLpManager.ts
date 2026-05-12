@@ -152,7 +152,7 @@ async function main() {
 
   if (process.env.CONFIRM !== "yes") {
     console.log('\nDry run. Re-run with CONFIRM=yes to actually send the tx:');
-    console.log(`  CONFIRM=yes pnpm tsx src/cli/withdrawToLpManager.ts ${roomIdArg}`);
+    console.log(`  CONFIRM=yes pnpm tsx src/cli/withdrawToLpManager.ts ${idArg}`);
     return;
   }
 
