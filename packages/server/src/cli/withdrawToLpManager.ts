@@ -1,4 +1,7 @@
 import BN from "bn.js";
+import mongoose from "mongoose";
+import { env } from "../config/env.js";
+import { Room } from "../db/schema.js";
 import {
   getProgramConfigPda,
   getRoomPda,
@@ -15,19 +18,50 @@ import {
  * tool is safe to use when LP is disabled and you just want the SOL out of
  * the program-controlled room_vault PDA.
  *
- *   pnpm tsx src/cli/withdrawToLpManager.ts <roomId>
+ *   pnpm tsx src/cli/withdrawToLpManager.ts <roomId|onChainPoolId>
+ *
+ * Accepts either the DB roomId (e.g. "R-20260511-09be80") or the on-chain
+ * numeric pool ID. With a DB roomId, looks up onChainPoolId from MongoDB.
  *
  * The amount withdrawn is `min(room.deposited_lamports, vault_balance)` so
  * mismatches between DB-tracked deposits and on-chain state don't matter.
  * The program will refuse if amount > deposited_lamports.
  */
 async function main() {
-  const roomIdArg = process.argv[2];
-  if (!roomIdArg || Number.isNaN(Number(roomIdArg))) {
-    console.error("usage: pnpm tsx src/cli/withdrawToLpManager.ts <roomId>");
+  const idArg = process.argv[2];
+  if (!idArg) {
+    console.error(
+      "usage: pnpm tsx src/cli/withdrawToLpManager.ts <roomId|onChainPoolId>",
+    );
     process.exit(1);
   }
-  const roomId = BigInt(roomIdArg);
+
+  // If arg parses cleanly as a number, treat as on-chain pool ID. Otherwise
+  // treat as a DB roomId string and look up the on-chain ID from MongoDB.
+  let roomId: bigint;
+  const numericArg = /^[0-9]+$/.test(idArg);
+  if (numericArg) {
+    roomId = BigInt(idArg);
+  } else {
+    await mongoose.connect(env.MONGODB_URI);
+    const dbRoom = await Room.findOne(
+      { roomId: idArg },
+      { onChainPoolId: 1 },
+    ).lean();
+    await mongoose.disconnect();
+    if (!dbRoom) {
+      console.error(`Room "${idArg}" not found in DB.`);
+      process.exit(1);
+    }
+    if (!dbRoom.onChainPoolId) {
+      console.error(
+        `Room "${idArg}" has no onChainPoolId — was it actually created on-chain?`,
+      );
+      process.exit(1);
+    }
+    roomId = BigInt(dbRoom.onChainPoolId);
+    console.log(`Resolved DB roomId="${idArg}" → onChainPoolId=${roomId}`);
+  }
 
   const treasury = loadTreasuryKeypair();
   if (!treasury) {
