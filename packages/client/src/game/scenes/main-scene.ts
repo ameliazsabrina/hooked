@@ -108,11 +108,13 @@ export class MainScene extends Phaser.Scene {
     // of an animated GIF.
     const makeGifOverlay = (src: string) => {
       const img = document.createElement("img");
+      img.decoding = "sync";
       img.src = src;
       img.style.imageRendering = "pixelated";
       img.style.width = "92px";
       img.style.height = "92px";
       img.style.pointerEvents = "none";
+      void img.decode().catch(() => {});
       const dom = this.add.dom(0, 0, img);
       dom.setOrigin(0.5, 0.5);
       dom.setVisible(false);
@@ -196,10 +198,6 @@ export class MainScene extends Phaser.Scene {
       this.castTimer.remove(false);
       this.castTimer = null;
     }
-
-    // Reassign src to restart the GIF from frame 1 even if it played before.
-    const img = this.fishingDom.node as HTMLImageElement;
-    img.src = `assets/character/fishing.gif?t=${Date.now()}`;
 
     this.fishingDom.setVisible(true);
     this.waitingDom.setVisible(false);
