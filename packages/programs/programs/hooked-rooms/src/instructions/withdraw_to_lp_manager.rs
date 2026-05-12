@@ -1,4 +1,5 @@
 use anchor_lang::prelude::*;
+use anchor_lang::system_program::{self, Transfer};
 
 use hooked_common::{CONFIG_SEED, ROOM_SEED, ROOM_VAULT_SEED};
 
@@ -31,8 +32,6 @@ pub struct WithdrawToLpManager<'info> {
     pub room_vault: UncheckedAccount<'info>,
 
     /// CHECK: Off-chain LP manager wallet that will hold principal during the
-    /// LP cycle. Pinned to `config.lp_manager`; recorded on `room.lp_manager`
-    /// for per-room auditability.
     #[account(
         mut,
         constraint = lp_manager.key() == config.lp_manager @ RoomError::LpManagerMismatch,
@@ -40,6 +39,8 @@ pub struct WithdrawToLpManager<'info> {
     pub lp_manager: UncheckedAccount<'info>,
 
     pub admin: Signer<'info>,
+
+    pub system_program: Program<'info, System>,
 }
 
 pub fn handler(ctx: Context<WithdrawToLpManager>, amount: u64) -> Result<()> {
@@ -62,22 +63,27 @@ pub fn handler(ctx: Context<WithdrawToLpManager>, amount: u64) -> Result<()> {
         RoomError::LpAmountExceedsDeposited
     );
 
-    let vault_info = ctx.accounts.room_vault.to_account_info();
-    let manager_info = ctx.accounts.lp_manager.to_account_info();
-
     require!(
-        vault_info.lamports() >= amount,
+        ctx.accounts.room_vault.lamports() >= amount,
         RoomError::VaultInsufficientFunds
     );
 
-    **vault_info.try_borrow_mut_lamports()? = vault_info
-        .lamports()
-        .checked_sub(amount)
-        .ok_or(RoomError::Overflow)?;
-    **manager_info.try_borrow_mut_lamports()? = manager_info
-        .lamports()
-        .checked_add(amount)
-        .ok_or(RoomError::Overflow)?;
+    let room_key = ctx.accounts.room.key();
+    let vault_bump = ctx.accounts.room.vault_bump;
+    let vault_seeds: &[&[u8]] = &[ROOM_VAULT_SEED, room_key.as_ref(), &[vault_bump]];
+    let signer_seeds: &[&[&[u8]]] = &[vault_seeds];
+
+    system_program::transfer(
+        CpiContext::new_with_signer(
+            ctx.accounts.system_program.to_account_info(),
+            Transfer {
+                from: ctx.accounts.room_vault.to_account_info(),
+                to: ctx.accounts.lp_manager.to_account_info(),
+            },
+            signer_seeds,
+        ),
+        amount,
+    )?;
 
     let room = &mut ctx.accounts.room;
     room.lp_deployed_lamports = amount;

@@ -1104,6 +1104,11 @@
         },
         {
           "name": "room_vault",
+          "docs": [
+            "Owned by System Program (funded by depositors via system::transfer),",
+            "so lamport withdrawals must go through a system_program::transfer",
+            "CPI with the vault's PDA seeds for invoke_signed."
+          ],
           "writable": true,
           "pda": {
             "seeds": [
@@ -1140,6 +1145,10 @@
         {
           "name": "admin",
           "signer": true
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
         }
       ],
       "args": [

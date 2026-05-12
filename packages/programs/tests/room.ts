@@ -37,28 +37,28 @@ describe("room lifecycle", () => {
   function roomPda(roomId: BN): PublicKey {
     return PublicKey.findProgramAddressSync(
       [Buffer.from("room"), roomId.toArrayLike(Buffer, "le", 8)],
-      program.programId
+      program.programId,
     )[0];
   }
 
   function roomVaultPda(room: PublicKey): PublicKey {
     return PublicKey.findProgramAddressSync(
       [Buffer.from("room_vault"), room.toBuffer()],
-      program.programId
+      program.programId,
     )[0];
   }
 
   function roomEntryPda(room: PublicKey, player: PublicKey): PublicKey {
     return PublicKey.findProgramAddressSync(
       [Buffer.from("room_entry"), room.toBuffer(), player.toBuffer()],
-      program.programId
+      program.programId,
     )[0];
   }
 
   function programConfigPda(): PublicKey {
     return PublicKey.findProgramAddressSync(
       [Buffer.from("config")],
-      program.programId
+      program.programId,
     )[0];
   }
 
@@ -66,15 +66,11 @@ describe("room lifecycle", () => {
     const fund = async (kp: Keypair, sol: number) => {
       const sig = await provider.connection.requestAirdrop(
         kp.publicKey,
-        sol * LAMPORTS_PER_SOL
+        sol * LAMPORTS_PER_SOL,
       );
       await provider.connection.confirmTransaction(sig);
     };
-    await Promise.all([
-      fund(player1, 5),
-      fund(player2, 5),
-      fund(treasury, 1),
-    ]);
+    await Promise.all([fund(player1, 5), fund(player2, 5), fund(treasury, 1)]);
 
     // Bootstrap ProgramConfig. Every state-changing ix (create_room,
     // deposit_room, close_room, …) requires this account to exist and reads
@@ -109,15 +105,19 @@ describe("room lifecycle", () => {
     expect(acc.humanCount).to.equal(0);
     expect(acc.maxHumans).to.equal(40);
     expect(acc.capacityLamports.toString()).to.equal(
-      (20 * LAMPORTS_PER_SOL).toString()
+      (20 * LAMPORTS_PER_SOL).toString(),
     );
     expect(acc.status).to.equal(0); // Entry
 
     // entry_closes_at = created_at + 24h, closes_at = created_at + 7d
     const oneDay = 24 * 60 * 60;
     const sevenDays = 7 * oneDay;
-    expect(acc.entryClosesAt.toNumber() - acc.createdAt.toNumber()).to.equal(oneDay);
-    expect(acc.closesAt.toNumber() - acc.createdAt.toNumber()).to.equal(sevenDays);
+    expect(acc.entryClosesAt.toNumber() - acc.createdAt.toNumber()).to.equal(
+      oneDay,
+    );
+    expect(acc.closesAt.toNumber() - acc.createdAt.toNumber()).to.equal(
+      sevenDays,
+    );
 
     // Vault exists (system-owned PDA, rent-exempt 0 lamports OK — no data).
     const vaultInfo = await provider.connection.getAccountInfo(vault);
@@ -134,7 +134,8 @@ describe("room lifecycle", () => {
     const room = roomPda(ROOM_ID);
     const vault = roomVaultPda(room);
 
-    const vaultBefore = (await provider.connection.getAccountInfo(vault))?.lamports ?? 0;
+    const vaultBefore =
+      (await provider.connection.getAccountInfo(vault))?.lamports ?? 0;
 
     await program.methods
       .depositRoom(ONE_SOL)
@@ -145,7 +146,8 @@ describe("room lifecycle", () => {
       .signers([player1])
       .rpc();
 
-    const vaultAfter = (await provider.connection.getAccountInfo(vault))?.lamports ?? 0;
+    const vaultAfter =
+      (await provider.connection.getAccountInfo(vault))?.lamports ?? 0;
     expect(vaultAfter - vaultBefore).to.equal(ONE_SOL.toNumber());
 
     const acc = await program.account.room.fetch(room);
@@ -153,7 +155,7 @@ describe("room lifecycle", () => {
     expect(acc.humanCount).to.equal(1);
 
     const entry = await program.account.roomEntry.fetch(
-      roomEntryPda(room, player1.publicKey)
+      roomEntryPda(room, player1.publicKey),
     );
     expect(entry.room.toBase58()).to.equal(room.toBase58());
     expect(entry.authority.toBase58()).to.equal(player1.publicKey.toBase58());
@@ -230,7 +232,7 @@ describe("room lifecycle", () => {
 
     const acc = await program.account.room.fetch(room);
     expect(acc.depositedLamports.toNumber()).to.equal(
-      ONE_SOL.toNumber() + TWO_SOL.toNumber()
+      ONE_SOL.toNumber() + TWO_SOL.toNumber(),
     );
     expect(acc.humanCount).to.equal(2);
   });
@@ -294,7 +296,7 @@ describe("room lifecycle", () => {
       expect(
         s.includes("Unauthorized") ||
           s.includes("ConstraintRaw") ||
-          s.includes("2012")
+          s.includes("2012"),
       ).to.equal(true);
     }
   });
@@ -393,7 +395,7 @@ describe("room lifecycle", () => {
       expect(
         s.includes("Unauthorized") ||
           s.includes("ConstraintRaw") ||
-          s.includes("2012")
+          s.includes("2012"),
       ).to.equal(true);
     }
   });
@@ -416,7 +418,7 @@ describe("room lifecycle", () => {
       // when the room is still pre-lp_deploy_at, so we accept either.
       const s = err.toString();
       expect(
-        s.includes("LpAmountZero") || s.includes("LpDeployWindowNotOpen")
+        s.includes("LpAmountZero") || s.includes("LpDeployWindowNotOpen"),
       ).to.equal(true);
     }
   });
@@ -431,14 +433,14 @@ describe("room lifecycle", () => {
   function gatewayRegistryPda(): PublicKey {
     return PublicKey.findProgramAddressSync(
       [Buffer.from("gateway_registry")],
-      program.programId
+      program.programId,
     )[0];
   }
 
   it("initializes the gateway registry with a keeper", async () => {
     const sig = await provider.connection.requestAirdrop(
       keeper.publicKey,
-      2 * LAMPORTS_PER_SOL
+      2 * LAMPORTS_PER_SOL,
     );
     await provider.connection.confirmTransaction(sig);
 
@@ -447,7 +449,8 @@ describe("room lifecycle", () => {
       .accounts({ admin: admin.publicKey } as any)
       .rpc();
 
-    const reg = await program.account.gatewayRegistry.fetch(gatewayRegistryPda());
+    const reg =
+      await program.account.gatewayRegistry.fetch(gatewayRegistryPda());
     expect(reg.admin.toBase58()).to.equal(admin.publicKey.toBase58());
     expect(reg.keyCount).to.equal(1);
     expect(reg.keys[0].toBase58()).to.equal(keeper.publicKey.toBase58());
@@ -458,7 +461,7 @@ describe("room lifecycle", () => {
     const entry = roomEntryPda(room, player1.publicKey);
     const sig = await provider.connection.requestAirdrop(
       rogue.publicKey,
-      LAMPORTS_PER_SOL
+      LAMPORTS_PER_SOL,
     );
     await provider.connection.confirmTransaction(sig);
 
@@ -506,7 +509,9 @@ describe("room lifecycle", () => {
     expect(entryAcc.finalScore.toNumber()).to.equal(800);
 
     const roomAcc = await program.account.room.fetch(room);
-    expect(roomAcc.firstPlace.toBase58()).to.equal(player1.publicKey.toBase58());
+    expect(roomAcc.firstPlace.toBase58()).to.equal(
+      player1.publicKey.toBase58(),
+    );
     expect(roomAcc.firstPlaceScore.toNumber()).to.equal(800);
   });
 
@@ -526,9 +531,13 @@ describe("room lifecycle", () => {
       .rpc();
 
     let roomAcc = await program.account.room.fetch(room);
-    expect(roomAcc.firstPlace.toBase58()).to.equal(player1.publicKey.toBase58());
+    expect(roomAcc.firstPlace.toBase58()).to.equal(
+      player1.publicKey.toBase58(),
+    );
     expect(roomAcc.firstPlaceScore.toNumber()).to.equal(800);
-    expect(roomAcc.secondPlace.toBase58()).to.equal(player2.publicKey.toBase58());
+    expect(roomAcc.secondPlace.toBase58()).to.equal(
+      player2.publicKey.toBase58(),
+    );
     expect(roomAcc.secondPlaceScore.toNumber()).to.equal(400);
 
     // player2 adds 1000 — total 1400, displaces player1
@@ -543,9 +552,13 @@ describe("room lifecycle", () => {
       .rpc();
 
     roomAcc = await program.account.room.fetch(room);
-    expect(roomAcc.firstPlace.toBase58()).to.equal(player2.publicKey.toBase58());
+    expect(roomAcc.firstPlace.toBase58()).to.equal(
+      player2.publicKey.toBase58(),
+    );
     expect(roomAcc.firstPlaceScore.toNumber()).to.equal(1400);
-    expect(roomAcc.secondPlace.toBase58()).to.equal(player1.publicKey.toBase58());
+    expect(roomAcc.secondPlace.toBase58()).to.equal(
+      player1.publicKey.toBase58(),
+    );
     expect(roomAcc.secondPlaceScore.toNumber()).to.equal(800);
   });
 
@@ -561,7 +574,7 @@ describe("room lifecycle", () => {
     let reg = await program.account.gatewayRegistry.fetch(registry);
     expect(reg.keyCount).to.equal(2);
     expect(reg.keys.slice(0, 2).map((k) => k.toBase58())).to.include(
-      second.publicKey.toBase58()
+      second.publicKey.toBase58(),
     );
 
     // Duplicate add rejected
@@ -614,7 +627,7 @@ describe("room lifecycle", () => {
     before(async () => {
       const sig = await provider.connection.requestAirdrop(
         pausePlayer.publicKey,
-        3 * LAMPORTS_PER_SOL
+        3 * LAMPORTS_PER_SOL,
       );
       await provider.connection.confirmTransaction(sig);
 
@@ -669,7 +682,7 @@ describe("room lifecycle", () => {
         expect(
           s.includes("Unauthorized") ||
             s.includes("ConstraintRaw") ||
-            s.includes("2012")
+            s.includes("2012"),
         ).to.equal(true);
       }
     });
@@ -729,7 +742,7 @@ describe("room lifecycle", () => {
 
     const sig = await provider.connection.requestAirdrop(
       otherPlayer.publicKey,
-      2 * LAMPORTS_PER_SOL
+      2 * LAMPORTS_PER_SOL,
     );
     await provider.connection.confirmTransaction(sig);
 
@@ -767,8 +780,124 @@ describe("room lifecycle", () => {
       expect(
         s.includes("EntryRoomMismatch") ||
           s.includes("ConstraintSeeds") ||
-          s.includes("2006")
+          s.includes("2006"),
       ).to.equal(true);
     }
+  });
+
+  // =====================================================================
+  // withdraw_to_lp_manager — happy path (requires surfpool clock warp).
+  // =====================================================================
+
+  it("withdraws principal to lp_manager after lp_deploy_at (CPI happy path)", async function () {
+    // this test only meaningful under surfpool.
+    const rpcUrl = (provider.connection as any)._rpcEndpoint as string;
+    const probeRes = await fetch(rpcUrl, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "surfnet_getSurfnetInfo",
+        params: [],
+      }),
+    }).catch(() => null);
+    if (!probeRes || !probeRes.ok) {
+      this.skip();
+    }
+    const probeJson = await probeRes!.json().catch(() => null);
+    if (!probeJson || probeJson.error) {
+      this.skip();
+    }
+
+    const LP_ROOM_ID = new BN(2_001);
+    const room = roomPda(LP_ROOM_ID);
+    const vault = roomVaultPda(room);
+    const lpPlayer = Keypair.generate();
+
+    const sig = await provider.connection.requestAirdrop(
+      lpPlayer.publicKey,
+      3 * LAMPORTS_PER_SOL,
+    );
+    await provider.connection.confirmTransaction(sig);
+
+    // Fresh room so we know created_at and can warp predictably.
+    await program.methods
+      .createRoom(LP_ROOM_ID)
+      .accounts({ admin: admin.publicKey } as any)
+      .rpc();
+
+    const roomAccBefore = await program.account.room.fetch(room);
+    const createdAt = roomAccBefore.createdAt.toNumber();
+    const lpDeployAt = roomAccBefore.lpDeployAt.toNumber();
+    const closesAt = roomAccBefore.closesAt.toNumber();
+
+    // Deposit while still inside the entry window (no warp yet).
+    await program.methods
+      .depositRoom(ONE_SOL)
+      .accounts({ room, authority: lpPlayer.publicKey } as any)
+      .signers([lpPlayer])
+      .rpc();
+
+    const vaultBefore = (await provider.connection.getAccountInfo(vault))!
+      .lamports;
+    const managerBefore =
+      (await provider.connection.getAccountInfo(lpManager.publicKey))
+        ?.lamports ?? 0;
+
+    // Jump the network clock to lp_deploy_at + 60s. Inside the LP window
+    // (which closes at closes_at = created_at + 7d), so the require!(now >=
+    // lp_deploy_at && now < closes_at) gate passes.
+    // surfnet_timeTravel takes absoluteTimestamp in MILLISECONDS, even though
+    // the on-chain Clock::unix_timestamp the program reads is seconds.
+    const warpToSec = lpDeployAt + 60;
+    expect(warpToSec).to.be.lessThan(closesAt);
+    const warpRes = await fetch(rpcUrl, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "surfnet_timeTravel",
+        params: [{ absoluteTimestamp: warpToSec * 1000 }],
+      }),
+    });
+    const warpJson = await warpRes.json();
+    expect(
+      warpJson.error,
+      `timeTravel failed: ${JSON.stringify(warpJson)}`,
+    ).to.equal(undefined);
+
+    // Now call the previously-broken instruction. With the fix it should
+    // succeed; with the old direct-lamport-mutation code it would fail with
+    // "instruction spent from the balance of an account it does not own".
+    await program.methods
+      .withdrawToLpManager(ONE_SOL)
+      .accounts({
+        room,
+        lpManager: lpManager.publicKey,
+        admin: admin.publicKey,
+      } as any)
+      .rpc();
+
+    // Vault is system-owned with no data. After draining to 0 lamports the
+    // runtime garbage-collects it, so getAccountInfo returns null. Treat
+    // null as 0 lamports for the delta check.
+    const vaultAfter =
+      (await provider.connection.getAccountInfo(vault))?.lamports ?? 0;
+    const managerAfter = (await provider.connection.getAccountInfo(
+      lpManager.publicKey,
+    ))!.lamports;
+
+    expect(vaultBefore - vaultAfter).to.equal(ONE_SOL.toNumber());
+    expect(managerAfter - managerBefore).to.equal(ONE_SOL.toNumber());
+
+    const roomAccAfter = await program.account.room.fetch(room);
+    expect(roomAccAfter.lpDeployedLamports.toString()).to.equal(
+      ONE_SOL.toString(),
+    );
+    expect(roomAccAfter.lpManager.toBase58()).to.equal(
+      lpManager.publicKey.toBase58(),
+    );
   });
 });

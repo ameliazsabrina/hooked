@@ -1110,6 +1110,11 @@ export type HookedRooms = {
         },
         {
           "name": "roomVault",
+          "docs": [
+            "Owned by System Program (funded by depositors via system::transfer),",
+            "so lamport withdrawals must go through a system_program::transfer",
+            "CPI with the vault's PDA seeds for invoke_signed."
+          ],
           "writable": true,
           "pda": {
             "seeds": [
@@ -1146,6 +1151,10 @@ export type HookedRooms = {
         {
           "name": "admin",
           "signer": true
+        },
+        {
+          "name": "systemProgram",
+          "address": "11111111111111111111111111111111"
         }
       ],
       "args": [
