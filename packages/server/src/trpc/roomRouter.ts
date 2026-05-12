@@ -3,7 +3,6 @@ import { TRPCError } from "@trpc/server";
 import BN from "bn.js";
 import { LAMPORTS_PER_SOL, PublicKey } from "@solana/web3.js";
 import {
-  ROOM_CAPACITY_SOL,
   VALID_DEPOSIT_AMOUNTS,
   derivePhase,
   isRoomJoinable,
@@ -76,7 +75,7 @@ async function maybeTriggerCapacityOverflow(roomId: string): Promise<void> {
       },
     },
     { $set: { overflowTriggered: true } },
-    { new: true }
+    { new: true },
   ).lean();
   if (!claim) return;
 
@@ -86,11 +85,11 @@ async function maybeTriggerCapacityOverflow(roomId: string): Promise<void> {
   });
   if (result.ok) {
     console.log(
-      `[capacity-overflow] ${roomId} filled — spawned ${result.roomId}`
+      `[capacity-overflow] ${roomId} filled — spawned ${result.roomId}`,
     );
   } else {
     console.log(
-      `[capacity-overflow] ${roomId} filled — skipped new room (${result.reason})`
+      `[capacity-overflow] ${roomId} filled — skipped new room (${result.reason})`,
     );
   }
 }
@@ -244,10 +243,7 @@ export const roomRouter = router({
       await lb
         .seedRoomMember(ctx.redis, roomDoc.roomId, playerIdStr)
         .catch((err) =>
-          console.error(
-            "[lb] seedRoomMember failed:",
-            (err as Error).message,
-          ),
+          console.error("[lb] seedRoomMember failed:", (err as Error).message),
         );
 
       // Active = SOL still on-chain (keeper hasn't run `return_principal`).
@@ -578,7 +574,11 @@ export const roomRouter = router({
 
       const results: Array<{
         poolId: string;
-        action: "reconciled" | "on-chain-not-returned" | "on-chain-missing" | "room-missing";
+        action:
+          | "reconciled"
+          | "on-chain-not-returned"
+          | "on-chain-missing"
+          | "room-missing";
       }> = [];
 
       const wallet = new PublicKey(input.walletAddress);
