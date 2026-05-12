@@ -496,7 +496,7 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
         // the prompt doesn't linger past the window.
         nibbleWindowTimerRef.current = setTimeout(() => {
           nibbleWindowTimerRef.current = null;
-          setState((prev) => (prev === "nibble_window" ? prev : prev));
+          setState((prev) => (prev === "nibble_window" ? "idle_waiting" : prev));
         }, NIBBLE_WINDOW_MS + 250);
         return;
       }
@@ -509,6 +509,7 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
         setLastCatch(null);
         setState("missed");
         playSfx("fishGotAway");
+        heldRef.current = false;
         // Bait was consumed at cast_initiate (on-chain) so reflect that
         // optimistically here. catch_resolved no longer fires for escape.
         setBait((b) => Math.max(0, b - 1));
@@ -591,6 +592,11 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
       }
       case "catch_resolved": {
         activeCastIdRef.current = null;
+        heldRef.current = false;
+        if (biteTimerRef.current) {
+          clearTimeout(biteTimerRef.current);
+          biteTimerRef.current = null;
+        }
         if (msg.hit) {
           const rarity = mapRarity(msg.rarity);
           const isApex = !!msg.apexFishId && !!msg.apexAssetUrl;

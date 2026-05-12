@@ -890,7 +890,7 @@
   padding: 32px 48px;
   min-width: 440px;
   max-width: min(92%, 640px);
-  background: rgba(8, 12, 24, 0.94);
+  background: rgba(0, 1, 5, 1);
   border: 3px solid #e0564d;
   border-radius: 18px;
   color: #ffe9e6;
