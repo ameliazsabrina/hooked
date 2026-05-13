@@ -15,6 +15,27 @@ import { Mechanic, RARITY_LABEL, Rarity, ZONE_OPEN_SEA, Window } from "./types.j
  */
 export const CANCEL_CAST_GRACE_SECS = 8;
 
+/**
+ * Abandon-cast grace window. Used by the WS disconnect handler to refund
+ * bait when a player loses connection mid-cast (including after fish_hooked).
+ *
+ * The shorter `CANCEL_CAST_GRACE_SECS` (8s) is retained for the legacy
+ * cancelCast path — it's intentionally short because cancelling pre-nibble
+ * is the only scenario in which the player has invested nothing and a refund
+ * has zero cheat surface.
+ *
+ * Abandon is broader: a player whose WS drops while reeling shouldn't lose
+ * a bait to a network blip. The cheat surface (force-disconnect post-rarity-
+ * reveal to re-roll) is bounded by:
+ *   1. The 30s window — past that, the stale-cast sweep in ensureActiveSession
+ *      clears pendingCast WITHOUT refund.
+ *   2. Disconnect telemetry via recordReactionLog — repeat offenders are
+ *      visible in the audit trail.
+ *   3. The reroll itself isn't free in expected value (mean rarity is fixed
+ *      by the roll RNG; only the specific cast is re-drawn).
+ */
+export const ABANDON_CAST_GRACE_SECS = 30;
+
 export interface InitiateCastInput {
   /** Mongo ObjectId or string id of the FishingSession. */
   sessionId: string | Types.ObjectId;
@@ -184,6 +205,76 @@ export async function cancelCast(input: CancelCastInput): Promise<CancelCastResu
   );
   if (!updated) throw new CastEngineError("CAST_RACE", "Pending cast changed, retry");
   return { baitRemaining: updated.baitRemaining };
+}
+
+export interface AbandonCastInput {
+  sessionId: string | Types.ObjectId;
+  now?: Date;
+}
+
+export interface AbandonCastResult {
+  baitRemaining: number;
+  refunded: boolean;
+}
+
+/**
+ * Abandon an in-flight cast on WS disconnect — broader than cancelCast in
+ * two respects:
+ *
+ *   1. No `ctx.hooked` precondition: refunds even after the player has
+ *      tapped the nibble and entered the reel/spinner phase. The earlier
+ *      design only refunded pre-nibble disconnects, which burned a bait for
+ *      any network blip mid-reel — felt unfair to honest players.
+ *
+ *   2. Wider grace window (ABANDON_CAST_GRACE_SECS, 30s) instead of the 8s
+ *      pre-nibble cancel window. Past 30s the stale-cast sweep in
+ *      `ensureActiveSession` will clear `pendingCast` without refund, so
+ *      this is the gate that decides "blip" vs "abandoned cast."
+ *
+ * Idempotent: if `pendingCast` is already null (resolved or cleared by the
+ * stale sweep), returns `{ refunded: false }` without throwing — the caller
+ * is the disconnect handler, which is best-effort by design.
+ */
+export async function abandonCast(
+  input: AbandonCastInput,
+): Promise<AbandonCastResult> {
+  const now = input.now ?? new Date();
+  const session = await FishingSession.findById(input.sessionId);
+  if (!session) throw new CastEngineError("SESSION_NOT_FOUND", "Session not found");
+  // Don't throw on non-active sessions or missing pendingCast — disconnect
+  // handlers race with normal resolution, and the player has nothing to gain
+  // from spurious errors here.
+  if (session.status !== "active" || !session.pendingCast) {
+    return { baitRemaining: session.baitRemaining, refunded: false };
+  }
+
+  const elapsedMs = now.getTime() - session.pendingCast.castAt.getTime();
+  if (elapsedMs > ABANDON_CAST_GRACE_SECS * 1000) {
+    // Past the abandon window: leave pendingCast in place for the stale-cast
+    // sweep to clean up on the next initiate. No refund — at this point the
+    // bait counts as spent.
+    return { baitRemaining: session.baitRemaining, refunded: false };
+  }
+
+  const pendingCastIndex = session.pendingCast.castIndex;
+  const updated = await FishingSession.findOneAndUpdate(
+    {
+      _id: session._id,
+      status: "active",
+      "pendingCast.castIndex": pendingCastIndex,
+    },
+    {
+      $inc: { baitRemaining: 1 },
+      $set: { pendingCast: null },
+    },
+    { new: true },
+  );
+  // No CAST_RACE throw — if the cast resolved concurrently, that's fine,
+  // the player already got their outcome via catch_resolved.
+  if (!updated) {
+    return { baitRemaining: session.baitRemaining, refunded: false };
+  }
+  return { baitRemaining: updated.baitRemaining, refunded: true };
 }
 
 export interface SubmitInputSamplesInput {

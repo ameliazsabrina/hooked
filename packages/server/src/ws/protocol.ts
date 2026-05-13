@@ -3,6 +3,7 @@ export type ClientMessage =
   | CastInitiateMessage
   | NibbleResponseMessage
   | InputSamplesMessage
+  | CastFinalizeMessage
   | CircularTapCompleteMessage
   | PingMessage;
 
@@ -111,7 +112,27 @@ export interface InputSamplesMessage {
   sessionId: string;
   clientCastId: string;
   samples: InputSample[];
-  final?: boolean;
+}
+
+/**
+ * Client asks the server to resolve the current timing-bar cast as a catch
+ * if its progress is at/above CLIENT_FINAL_FLOOR. Dedicated message so the
+ * "verdict claim" is separated from the input-timeline (`input_samples`)
+ * channel — earlier these were conflated via a `final: true` flag on
+ * `input_samples` with a `held` bit hijacked to carry the outcome, which
+ * caused input-history asymmetry where retried "final" samples planted
+ * phantom transitions on the server that the client's local physics never
+ * saw. This protocol split makes that class of bug impossible by design.
+ *
+ * Server runs `advancePhysics` once and checks `ctx.game.progress`. No
+ * client-side state is trusted for the verdict itself; the floor check
+ * is purely server-side. If progress is below the floor the request is
+ * silently ignored and the desync-recovery rejection counter increments.
+ */
+export interface CastFinalizeMessage {
+  type: "cast_finalize";
+  sessionId: string;
+  clientCastId: string;
 }
 
 export interface FishHookedMessage {

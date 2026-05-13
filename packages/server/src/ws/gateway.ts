@@ -8,6 +8,7 @@ import { randomUUID } from "node:crypto";
 import "../plugins/redis.js";
 import { isAllowedOrigin } from "../config/env.js";
 import {
+  executeAbandonOnDisconnectOffchain,
   executeCancelOnDisconnectOffchain,
   executeInitiateCastOffchain,
   executeSubmitResolveOffchain,
@@ -185,10 +186,30 @@ interface SessionContext {
   // chained legendary timing-bar phase can re-init the game state with the
   // same tier (and therefore the same greenBarHeight) the client uses.
   rodTier: number;
+  // Desync recovery state. Each `cast_finalize` whose server progress is
+  // below CLIENT_FINAL_FLOOR increments `rejectedFinalCount`; once that
+  // threshold crosses DESYNC_REJECT_THRESHOLD we emit a `desync_correction`
+  // snapshot to the client AND stamp `desyncDetectedAt` so the physicsTimer
+  // can shrink its safety timeout from the normal SAFETY_TIMEOUT_MS to
+  // DESYNC_TIMEOUT_MS. Without this, a client whose local physics has
+  // diverged from server's sits watching a frozen UI for ~25s before
+  // anything resolves.
+  rejectedFinalCount: number;
+  desyncDetectedAt: number | null;
 }
 
 const NIBBLE_DELAY_MS = 3000;
 const REACTION_WINDOW_MS = 2000;
+// Desync recovery: number of consecutive `cast_finalize` requests we'll
+// reject before declaring the cast diverged and emitting a snapshot. With
+// the input-timeline determinism guarantees in place, a legitimate single
+// rejection from normal lag is rare; 2 trades a small false-positive risk
+// for fast recovery (~500ms of disagreement at the client's 250ms retry).
+const DESYNC_REJECT_THRESHOLD = 2;
+// After divergence is declared, give the player this much time (from
+// detection) to either reconcile and finish the cast or accept the miss —
+// rather than letting the 30s SAFETY_TIMEOUT_MS run its full course.
+const DESYNC_TIMEOUT_MS = 5000;
 
 function rollNibbleDelayMs(): number {
   return NIBBLE_DELAY_MS;
@@ -572,6 +593,38 @@ async function cancelCastOnDisconnect(
   }
 }
 
+// Mid-reel disconnect refund. Called when the player has tapped through the
+// nibble and is in the reel/spinner phase but loses connection before the
+// cast resolves. Uses the broader `abandonCast` window (ABANDON_CAST_GRACE_SECS)
+// so a single network blip doesn't permanently burn a bait. The cheat surface
+// (force-disconnect post-rarity-reveal to re-roll) is bounded by the grace
+// window AND surfaced in the reaction log so we can detect abuse.
+async function abandonCastOnDisconnect(
+  socket: Socket,
+  ctx: SessionContext,
+): Promise<void> {
+  if (!ctx.sessionPda) return;
+  const { refunded } = await executeAbandonOnDisconnectOffchain(ctx.sessionPda);
+  if (socket.wallet) {
+    recordReactionLog({
+      wallet: socket.wallet.toBase58(),
+      clientCastId: ctx.activeCastId ?? "",
+      sessionPda: ctx.sessionPda,
+      nibbleDelayMs: ctx.nibbleDelayMs,
+      reactionTimeMs: ctx.reactionTimeMs,
+      preNibbleTapCount: ctx.preNibbleTapCount,
+      sampleJitterMaxMs: computeSampleJitterMaxMs(ctx.samples),
+      // "cancelled" when bait was actually refunded; "escaped_miss" if the
+      // window had expired (bait stays spent, equivalent to a missed cast).
+      // This split is what lets the audit pipeline distinguish "network
+      // blip" from "force-disconnect cheat attempt past the grace window."
+      outcome: refunded ? "cancelled" : "escaped_miss",
+      rarity: ctx.rarity,
+      speciesId: ctx.speciesId,
+    });
+  }
+}
+
 // Fire the server-determined nibble. Idempotent against late cancels (a
 // disconnect that races the timer leaves activeCastId null).
 function fireNibble(socket: Socket, clientCastId: string): void {
@@ -710,6 +763,8 @@ function resolveCatch(
   ctx.nibbleSentAt = null;
   ctx.reactionTimeMs = null;
   ctx.preNibbleTapCount = 0;
+  ctx.rejectedFinalCount = 0;
+  ctx.desyncDetectedAt = null;
 
   const deliver = (score: number, weightHg: number) => {
     const msg: ServerMessage = {
@@ -865,7 +920,12 @@ export default fp(async (fastify) => {
       if (ctx.mechanic !== TIMING_BAR_MECHANIC) return;
       const now = Date.now();
       advancePhysics(ctx, now);
-      if (ctx.game.sampleCount % 3 === 0) {
+      // Only broadcast snapshots once physics has actually started. Before
+      // the first input arrives, `sampleCount` stays at 0 and `0 % 3 === 0`
+      // is true on every 33ms tick — without this guard the server would
+      // spam ~30 redundant "initial state" snapshots/second during the
+      // nibble + biting window.
+      if (ctx.physicsStarted && ctx.game.sampleCount % 3 === 0) {
         safeSend(socket, {
           type: "fishing_state",
           sessionId: ctx.sessionPda ?? "",
@@ -880,45 +940,29 @@ export default fp(async (fastify) => {
           tickIndex: ctx.game.sampleCount,
         });
       }
-      // Diagnostic: state snapshot every ~1s. Drop once verified.
-      if (ctx.game.sampleCount % 60 === 0 && ctx.physicsStarted) {
-        console.warn(
-          `[gateway] tick @${ctx.game.sampleCount} ` +
-            `progress=${ctx.game.progress.toFixed(3)} ` +
-            `barY=${ctx.game.barY.toFixed(0)} ` +
-            `fishY=${ctx.game.fishYDisplay.toFixed(0)} ` +
-            `held=${ctx.heldLatest}`,
-        );
-      }
       // Server-authoritative resolution. The server runs its own copy of
       // the physics every tick; as soon as terminalState() declares a
-      // verdict, we resolve. Previously the server only checked at safety
-      // timeout / on `input_samples final`, which forced resolution against
-      // whatever the server's state happened to be at the moment the client
-      // gave up — even if the server's physics had a different fish position
-      // due to RNG/rate drift. Always resolving on the server's own terminal
+      // verdict, we resolve. Always resolving on the server's own terminal
       // state means the player can never lose a cast the server thinks is
       // still in progress.
       const terminalNow = terminalState(ctx.game, ctx.greenBarHeight);
       if (terminalNow !== null) {
-        console.warn(
-          `[gateway] terminal-resolve verdict=${terminalNow} ` +
-            `progress=${ctx.game.progress.toFixed(3)} ` +
-            `fishY=${ctx.game.fishYDisplay.toFixed(1)} ` +
-            `castMs=${now - ctx.castStartedAt}`,
-        );
         resolveCatch(socket, terminalNow === "caught");
         return;
       }
       const SAFETY_TIMEOUT_MS = 30_000;
+      // Desync-aware early timeout: once we've declared divergence, give
+      // the player DESYNC_TIMEOUT_MS to either reconcile or accept the
+      // miss — rather than letting the 30s wall-clock budget keep running
+      // while the UI shows a frozen "full" bar.
+      if (
+        ctx.desyncDetectedAt !== null &&
+        now - ctx.desyncDetectedAt > DESYNC_TIMEOUT_MS
+      ) {
+        resolveCatch(socket, false);
+        return;
+      }
       if (now - ctx.castStartedAt > SAFETY_TIMEOUT_MS) {
-        console.warn(
-          `[gateway] safety-timeout fired ` +
-            `progress=${ctx.game.progress.toFixed(3)} ` +
-            `barY=${ctx.game.barY.toFixed(1)} ` +
-            `fishY=${ctx.game.fishYDisplay.toFixed(1)} ` +
-            `held=${ctx.heldLatest}`,
-        );
         // Force escape — physics didn't reach terminal in time.
         resolveCatch(socket, false);
       }
@@ -1135,6 +1179,8 @@ export default fp(async (fastify) => {
               secondaryVerticalProfile,
               rngSeed: rolled.rngSeed,
               rodTier,
+              rejectedFinalCount: 0,
+              desyncDetectedAt: null,
             };
             // Acks the cast so the client may begin its splash + idle anim.
             // The fish has been rolled and bait is consumed; the gateway is
@@ -1193,6 +1239,8 @@ export default fp(async (fastify) => {
             secondaryVerticalProfile: null,
             rngSeed: 0,
             rodTier: 0,
+            rejectedFinalCount: 0,
+            desyncDetectedAt: null,
           };
           void (async () => {
             const [baitSlug, rodTier] = await Promise.all([
@@ -1321,16 +1369,16 @@ export default fp(async (fastify) => {
           // the `t_ms` of the FIRST sample with held=true — the first frame
           // the player actually inputs. Pre-tap keep-alives (held=false,
           // re-stating default) are absorbed silently so client and server
-          // origins land on the same wallclock instant: the bar's local
-          // setHeld and the WS hook's setHeld both capture Date.now() in
-          // the same React event handler, and only that first held=true
-          // event matters.
+          // origins land on the same wallclock instant. The renderer
+          // (TimingBar.setHeld) captures a single `tNow = Date.now()` and
+          // threads it through both the local inputHistory push AND the
+          // wire sample's `t_ms`, so client and server simTimeS values are
+          // bit-identical per event.
           //
           // Late arrivals (sample.t_ms whose simTimeS is already behind the
           // server's stepped simTimeS) get clamped forward — the input
           // takes effect at the earliest simTime the server can absorb.
           // With INPUT_DELAY_S = 60ms of buffer this should be rare.
-          let lateArrivalCount = 0;
           for (const s of msg.samples) {
             if (ctx.physicsClientOriginMs === null) {
               if (!s.held) continue;
@@ -1339,7 +1387,6 @@ export default fp(async (fastify) => {
             }
             let simTimeS = (s.t_ms - ctx.physicsClientOriginMs) / 1000;
             if (simTimeS < ctx.simTimeS) {
-              lateArrivalCount += 1;
               simTimeS = ctx.simTimeS;
             }
             const last = ctx.inputHistory[ctx.inputHistory.length - 1];
@@ -1348,23 +1395,7 @@ export default fp(async (fastify) => {
           }
           const latest = msg.samples[msg.samples.length - 1];
           if (latest) {
-            const prev = ctx.heldLatest;
             ctx.heldLatest = latest.held;
-            if (prev !== latest.held) {
-              console.warn(
-                `[gateway] held-changed ${prev}→${latest.held} ` +
-                  `final=${msg.final ?? false} ` +
-                  `progress=${ctx.game.progress.toFixed(3)} ` +
-                  `simTimeS=${ctx.simTimeS.toFixed(3)}`,
-              );
-            }
-          }
-          if (lateArrivalCount > 0) {
-            console.warn(
-              `[gateway] late-input lateArrivals=${lateArrivalCount} ` +
-                `simTimeS=${ctx.simTimeS.toFixed(3)} ` +
-                `(consider raising INPUT_DELAY_MS if persistent)`,
-            );
           }
           // Start physics on first input so server timing aligns with the
           // client's TimingBar (mounts 450ms after fish_hooked).
@@ -1373,13 +1404,29 @@ export default fp(async (fastify) => {
             ctx.lastTickAt = Date.now();
             ctx.physicsAccumS = 0;
           }
-          // Circular-tap is now resolved exclusively via the
-          // `circular_tap_complete` handler, which replays the client's
-          // tap timestamps through server-side spinner physics (C-1 fix).
-          // Reject any attempt to resolve circular casts via input_samples,
-          // including the legacy "final sample + held bit" path that an
-          // attacker could otherwise use to bypass the spinner entirely.
-          if (msg.final && ctx.mechanic === CIRCULAR_TAP_MECHANIC) {
+          return;
+        }
+
+        case "cast_finalize": {
+          const ctx = socket.session;
+          if (!ctx?.activeCastId || ctx.activeCastId !== msg.clientCastId) {
+            safeSend(socket, {
+              type: "error",
+              code: "no_active_cast",
+              message: "no active cast matching clientCastId",
+            });
+            return;
+          }
+          if (!ctx.hooked) {
+            // Finalize before the player has actually been hooked is
+            // meaningless; the timing-bar physics hasn't even started.
+            return;
+          }
+          if (ctx.mechanic !== TIMING_BAR_MECHANIC) {
+            // Circular-tap casts resolve via `circular_tap_complete` only.
+            // The dedicated verdict channel for the spinner phase exists
+            // because hits are validated by replaying client tap timestamps
+            // through server physics — there's no equivalent floor check.
             safeSend(socket, {
               type: "error",
               code: "wrong_resolution_path",
@@ -1388,42 +1435,52 @@ export default fp(async (fastify) => {
             });
             return;
           }
-          // Timing-bar: server's physicsTimer is the primary resolver. But
-          // when the client signals it's reached terminal locally AND the
-          // server's own progress is already in the safe zone, force the
-          // catch immediately — otherwise the player sees their bar visibly
-          // full for several hundred ms while the server fills the last 15%
-          // at FILL_RATE_PER_SEC. This is bounded: server only honours the
-          // signal when its own progress is already past CLIENT_FINAL_FLOOR
-          // (== client-side NEAR_WIN_THRESHOLD), so a malicious client can
-          // at best skip the last ~150ms of fill — not force a catch from
-          // nowhere. Force-escape from client final is NEVER honoured;
-          // misses are always decided by the server's own terminalState.
-          if (msg.final && ctx.mechanic === TIMING_BAR_MECHANIC) {
-            advancePhysics(ctx, Date.now());
-            // Server progress floor required to accept a client-driven catch.
-            // Now that both sides score against the SAME smoothed fish
-            // position (`fishYDisplay`), local and server progress should
-            // track each other closely. Restore a stricter floor (0.65) so
-            // the catch only fires once the player has genuinely earned it.
-            // Cheat surface: a forged client-final can at most skip ~1.6s
-            // of server fill — not produce a catch from nothing.
-            const CLIENT_FINAL_FLOOR = 0.65;
-            if (ctx.game.progress >= CLIENT_FINAL_FLOOR) {
-              console.warn(
-                `[gateway] client-final accepted as catch ` +
-                  `progress=${ctx.game.progress.toFixed(3)} ` +
-                  `castMs=${Date.now() - ctx.castStartedAt}`,
-              );
-              resolveCatch(socket, true);
-              return;
-            }
-            console.warn(
-              `[gateway] client-final ignored (progress too low) ` +
-                `progress=${ctx.game.progress.toFixed(3)} ` +
-                `castMs=${Date.now() - ctx.castStartedAt}`,
-            );
+          // Run one more physics tick so the floor check sees the latest
+          // state before deciding. The server's physicsTimer is still the
+          // primary resolver (it can fire `caught` autonomously via
+          // terminalState the moment progress hits 1.0), but accepting the
+          // client's claim lets the player feel an instant catch instead
+          // of watching the last ~150ms of fill rate drift in.
+          advancePhysics(ctx, Date.now());
+          // Server progress floor required to accept a client-driven catch.
+          // With both sides now running bit-deterministic physics (matched
+          // RNG seed + bit-identical input timeline via unified t_ms),
+          // local and server progress track each other to within rounding.
+          // Cheat surface: a forged finalize can at most skip ~1.6s of
+          // server fill — never produce a catch from nothing. Misses are
+          // ALWAYS decided by the server's own terminalState / safety
+          // timeout / desync timeout.
+          const CLIENT_FINAL_FLOOR = 0.65;
+          if (ctx.game.progress >= CLIENT_FINAL_FLOOR) {
+            // Defensive resets — resolveCatch itself wipes the slot, but
+            // this keeps the counters sane if any future code path skips
+            // that.
+            ctx.rejectedFinalCount = 0;
+            ctx.desyncDetectedAt = null;
+            resolveCatch(socket, true);
             return;
+          }
+          ctx.rejectedFinalCount += 1;
+          // First time we cross the divergence threshold: snapshot server
+          // state to the client and stamp the detection time so the
+          // physicsTimer can shrink the safety timeout. Sent exactly once
+          // per cast — subsequent rejections just count up (the existing
+          // fishing_state cadence keeps the client's serverProgressRef
+          // current).
+          if (
+            ctx.rejectedFinalCount === DESYNC_REJECT_THRESHOLD &&
+            ctx.desyncDetectedAt === null
+          ) {
+            ctx.desyncDetectedAt = Date.now();
+            safeSend(socket, {
+              type: "desync_correction",
+              sessionId: ctx.sessionPda ?? "",
+              clientCastId: ctx.activeCastId ?? "",
+              barY: ctx.game.barY,
+              fishY: ctx.game.fishYDisplay,
+              progress: ctx.game.progress,
+              tickIndex: ctx.game.sampleCount,
+            });
           }
           return;
         }
@@ -1449,10 +1506,16 @@ export default fp(async (fastify) => {
       if (ctx?.activeCastId) {
         clearCastTimers(ctx);
         if (!ctx.hooked) {
-          // Pre-nibble disconnect: the on-chain cast already consumed bait.
-          // Refund via cancel_cast (best effort — the keeper will sweep
-          // stale pending casts on the next session-lifecycle pass too).
+          // Pre-nibble disconnect: bait was consumed at initiate. The 8s
+          // cancel grace handles refund; this is the legacy fast path.
           void cancelCastOnDisconnect(socket, ctx);
+        } else {
+          // Post-nibble disconnect (player was reeling/spinning). Use the
+          // broader abandon path — refund inside the 30s ABANDON grace,
+          // log telemetry past it. Without this branch, every mid-reel
+          // network blip burned a bait, which was the leading cause of
+          // "had bait but can't cast / something feels stuck" reports.
+          void abandonCastOnDisconnect(socket, ctx);
         }
       }
       if (socket.wallet) {

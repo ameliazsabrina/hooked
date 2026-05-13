@@ -21,6 +21,7 @@ import { baitAmountForDeposit } from "../baitAmount.js";
 import { getActiveEvent } from "../eventConfig.js";
 import {
   CANCEL_CAST_GRACE_SECS,
+  abandonCast,
   cancelCast,
   initiateCast,
   submitInputSamples,
@@ -218,6 +219,29 @@ export async function executeCancelOnDisconnectOffchain(
         `[wsExecutor] cancel skipped (${err.code}): ${err.message}`,
       );
       return;
+    }
+    throw err;
+  }
+}
+
+/**
+ * Refund bait for a cast abandoned mid-flight, broader than `cancelCast` —
+ * covers post-nibble disconnects within `ABANDON_CAST_GRACE_SECS`. Returns
+ * whether a refund actually happened so the gateway can record the right
+ * reaction-log outcome (`cancelled` vs leaving the cast to the stale-sweep).
+ */
+export async function executeAbandonOnDisconnectOffchain(
+  sessionId: string,
+): Promise<{ refunded: boolean }> {
+  try {
+    const result = await abandonCast({ sessionId });
+    return { refunded: result.refunded };
+  } catch (err) {
+    if (err instanceof CastEngineError) {
+      console.warn(
+        `[wsExecutor] abandon skipped (${err.code}): ${err.message}`,
+      );
+      return { refunded: false };
     }
     throw err;
   }

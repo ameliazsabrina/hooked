@@ -184,17 +184,21 @@ export function CircularTap({
       // (`validateCircularTapTaps`) needs this to recompute the indicator
       // angle and decide the hit independently — without it, server-side
       // resolution is impossible. -1 marks the auto-miss path so the server
-      // can short-circuit those without trusting the renderer's clock.
+      // short-circuits to `reason: "auto_miss"` rather than potentially
+      // computing the indicator at an exact-revolution boundary and falsely
+      // crediting a hit (the renderer triggers autoMiss precisely when the
+      // indicator has completed AUTO_MISS_REVOLUTIONS full turns, which for
+      // linear patterns wraps back to angle 0 — and target[0] is at 0 too
+      // for castCount=0).
       const msSinceTapStart = autoMiss
         ? -1
         : performance.now() - tapStartTime.current;
-      console.warn(`[tap ${currentTap}/${effective.tapsRequired}] target=${target?.toFixed(2)} indicator=${indicatorAngleRef.current.toFixed(2)} dist=${angularDist.toFixed(2)} arc=${effectiveArcHalf.toFixed(2)} hit=${isHit} auto=${autoMiss} tMs=${msSinceTapStart.toFixed(0)}`);
 
       const tapResult: TapResult = {
         targetAngle: target,
         tapAngle: autoMiss ? -1 : indicatorAngleRef.current,
         hit: isHit,
-        tapTimeMs: msSinceTapStart,
+        msSinceTapStart,
       };
       const newResults = [...results, tapResult];
       setResults(newResults);

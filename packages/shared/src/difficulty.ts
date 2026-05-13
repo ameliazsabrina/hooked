@@ -311,6 +311,13 @@ export interface TapResult {
   targetAngle: number;
   tapAngle: number;
   hit: boolean;
-  // Client-reported tap timestamp (ms since encounter start). Optional for legacy callers.
-  tapTimeMs?: number;
+  /**
+   * Per-tap-local elapsed time (ms since the renderer started rotating this
+   * tap's indicator). Required for server-side replay validation via
+   * `validateCircularTapTaps` — the server feeds this exact value into the
+   * same `angleForPattern` the client used, so a hit on the client replays
+   * to a hit on the server bit-for-bit. Use `performance.now()` deltas
+   * rather than `Date.now()` for sub-ms resolution.
+   */
+  msSinceTapStart: number;
 }

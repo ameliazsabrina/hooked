@@ -24,18 +24,28 @@ interface TimingBarProps {
   baitSlug?: string;
   species?: FishSpecies | null;
   castStartedAtMs?: number | null;
-  onHoldChange: (held: boolean) => void;
+  // Second argument carries the SAME `Date.now()` the bar used to compute
+  // local simTimeS. Wired through to the hook's sample t_ms so client and
+  // server end up with bit-identical simTimeS for each transition (avoids
+  // ms-granularity Date.now() drift between two separate captures).
+  onHoldChange: (held: boolean, tNow?: number) => void;
   // Fires once when client prediction hits terminal state; lets server trust
   // the client-predicted verdict and bridges physics drift.
   onResolve?: (outcome: "caught" | "escaped") => void;
-  // Currently ignored on the visual layer — client owns deterministic
-  // prediction so the bar/fish never snap mid-cast. Kept for future
-  // soft-reconciliation.
+  // Routine high-frequency snapshot. The bar/fish are NOT visually snapped to
+  // this — only `progress` is used as a soft cap (see NEAR_WIN_THRESHOLD).
+  // Snapping every frame would cause visible jitter and undo the bit-equal
+  // local prediction we worked hard to get.
   serverState?: {
     barY: number;
     fishY: number;
     progress: number;
   } | null;
+  // Bumped by the WS hook exactly when the server emits a `desync_correction`
+  // (NOT on routine `fishing_state` ticks). When this changes, the TimingBar
+  // force-overwrites its local stateRef from `serverState` — the divergence
+  // is real and server's view is canonical, so the visual is reset to match.
+  reconcileVersion?: number;
 }
 
 // Physics step rate is shared with the server (`PHYSICS_FIXED_DT` /
@@ -83,6 +93,7 @@ export function TimingBar({
   onHoldChange,
   onResolve,
   serverState,
+  reconcileVersion = 0,
 }: TimingBarProps) {
   const greenBarHeight = useMemo(
     () => resolveGreenBarHeight(profile, rodTier),
@@ -138,16 +149,32 @@ export function TimingBar({
   useEffect(() => {
     if (!serverState) return;
     serverProgressRef.current = serverState.progress;
-    const drift = Math.abs(stateRef.current.fishY - serverState.fishY);
-    if (drift > 30) {
-      console.warn(
-        `[timing-bar] fishY drift=${drift.toFixed(1)} ` +
-          `local=${stateRef.current.fishY.toFixed(1)} ` +
-          `server=${serverState.fishY.toFixed(1)} — ` +
-          `RNG/step alignment may have regressed`,
-      );
-    }
   }, [serverState]);
+
+  // Desync reconcile: when the server escalates a routine drift into a
+  // `desync_correction`, the hook bumps `reconcileVersion`. We then OVERWRITE
+  // local barY/fishY/fishYDisplay/progress from the latest server snapshot
+  // so the visual stops lying — the divergence is real and server's view is
+  // canonical at this point. We don't reset velocity/RNG (recovery from a
+  // truly diverged RNG isn't feasible mid-cast); the goal is to converge
+  // the predicate that decides catch vs escape, not to perfectly resume.
+  useEffect(() => {
+    if (reconcileVersion === 0) return;
+    if (!serverState) return;
+    stateRef.current.barY = serverState.barY;
+    stateRef.current.fishY = serverState.fishY;
+    stateRef.current.fishYDisplay = serverState.fishY;
+    stateRef.current.progress = serverState.progress;
+    // Damp residual velocity so the bar doesn't immediately shoot away from
+    // the just-applied snap on the next physics step.
+    stateRef.current.barVelocity = 0;
+    stateRef.current.fishVelocity = 0;
+    // Reset the resolve-retry clock so a new resolve attempt has to climb
+    // back up after the snap, rather than firing immediately off the stale
+    // pre-snap progress.
+    lastResolveSentAtRef.current = 0;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reconcileVersion]);
 
   useEffect(() => {
     const tick = (now: number) => {
@@ -210,15 +237,6 @@ export function TimingBar({
         if (now - lastResolveSentAtRef.current >= RESOLVE_RETRY_MS) {
           lastResolveSentAtRef.current = now;
           resolvedRef.current = true;
-          // Diagnostic so we can compare local vs server progress at the
-          // moment the resolve fires. Drop after debugging.
-          console.warn(
-            `[timing-bar] FIRE onResolve: localProgress=${stateRef.current.progress.toFixed(3)} ` +
-              `localBarY=${stateRef.current.barY.toFixed(0)} ` +
-              `localFishY=${stateRef.current.fishY.toFixed(0)} ` +
-              `serverProgress=${(serverProgressRef.current ?? -1).toFixed(3)} ` +
-              `held=${heldRef.current}`,
-          );
           onResolve?.("caught");
         }
       } else {
@@ -237,18 +255,27 @@ export function TimingBar({
   const setHeld = (held: boolean) => {
     if (heldRef.current === held) return;
     heldRef.current = held;
+    // Capture ONE timestamp for the whole flow — this becomes the bar's
+    // local simTimeS AND the sample's t_ms over the wire. If the hook
+    // captures its own Date.now() separately, ms-granularity rounding can
+    // drift the two captures apart by up to 1ms per event — at random,
+    // most of those cancel, but occasionally one lands inside a physics
+    // step's window and the lookup returns different `held` values on
+    // each side. Over a 9s cast that compounds into observable barY
+    // divergence with identical RNG and input counts.
+    const tNow = Date.now();
     // Record the input into the local lag-comp history. Origin is set on
     // the first held=true (mirrors the server) so origins coincide.
     if (clientOriginMsRef.current === null) {
       if (!held) {
-        onHoldChange(held);
+        onHoldChange(held, tNow);
         return;
       }
-      clientOriginMsRef.current = Date.now();
+      clientOriginMsRef.current = tNow;
     }
-    const simTimeS = (Date.now() - clientOriginMsRef.current) / 1000;
+    const simTimeS = (tNow - clientOriginMsRef.current) / 1000;
     inputHistoryRef.current.push({ simTimeS, held });
-    onHoldChange(held);
+    onHoldChange(held, tNow);
   };
 
   const handlePointerDown = (e: React.PointerEvent) => {

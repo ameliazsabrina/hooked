@@ -218,6 +218,7 @@ export function GameLayout({ nickname, ready }: GameLayoutProps) {
                   onHoldChange={fishing.setHeld}
                   onResolve={fishing.onTimingBarResolve}
                   serverState={fishing.serverSnapshot}
+                  reconcileVersion={fishing.reconcileVersion}
                 />
               )}
 
