@@ -58,6 +58,28 @@ async function loadEquippedBaitSlug(wallet: PublicKey): Promise<string> {
     return "fly";
   }
 }
+
+// Mirrors loadEquippedBaitSlug — the client's TimingBar reads rodTier from
+// playerQuery and feeds it into resolveGreenBarHeight / initialFishingGameState.
+// The server MUST use the same value or client and server compute different
+// green-bar heights (every tier = 10px), the in-bar predicate disagrees, and
+// progress diverges within a few seconds. Symptom: client bar fills, server
+// resolves as escape.
+async function loadEquippedRodTier(wallet: PublicKey): Promise<number> {
+  try {
+    const player = await Player.findOne(
+      { walletAddress: wallet.toBase58() },
+      { "equipment.rodTier": 1 },
+    ).lean();
+    return player?.equipment?.rodTier ?? 0;
+  } catch (err) {
+    console.warn(
+      "[gateway] failed to load equipped rod, defaulting to tier 0:",
+      (err as Error).message,
+    );
+    return 0;
+  }
+}
 import {
   BAR_MAX_Y,
   FishRarity,
@@ -159,6 +181,10 @@ interface SessionContext {
   // Original cast seed (kept so the chained timing-bar can re-init game
   // state with the same seed the client uses for its remounted TimingBar).
   rngSeed: number;
+  // Player's equipped rod tier at cast start. Cached on the session so the
+  // chained legendary timing-bar phase can re-init the game state with the
+  // same tier (and therefore the same greenBarHeight) the client uses.
+  rodTier: number;
 }
 
 const NIBBLE_DELAY_MS = 3000;
@@ -990,6 +1016,7 @@ export default fp(async (fastify) => {
             rolled: RolledCast,
             sessionPdaStr: string | null,
             baitSlug: string,
+            rodTier: number,
           ) => {
             const castTimestamp = Date.now();
             const rarityForProfile =
@@ -1032,12 +1059,12 @@ export default fp(async (fastify) => {
                     }),
                   )
                 : null;
-            const greenBarHeight = resolveGreenBarHeight(profile, 0);
+            const greenBarHeight = resolveGreenBarHeight(profile, rodTier);
             const game = initialFishingGameState({
               sessionId: sessionPdaStr ?? "local",
               verticalProfile: profile,
               greenBarHeight,
-              rodTier: 0,
+              rodTier,
               luckyLureTier: 0,
               baitSlug,
               rngSeed: rolled.rngSeed,
@@ -1107,6 +1134,7 @@ export default fp(async (fastify) => {
               circularTap,
               secondaryVerticalProfile,
               rngSeed: rolled.rngSeed,
+              rodTier,
             };
             // Acks the cast so the client may begin its splash + idle anim.
             // The fish has been rolled and bait is consumed; the gateway is
@@ -1164,15 +1192,19 @@ export default fp(async (fastify) => {
             circularTap: null,
             secondaryVerticalProfile: null,
             rngSeed: 0,
+            rodTier: 0,
           };
           void (async () => {
-            const baitSlug = await loadEquippedBaitSlug(wallet);
+            const [baitSlug, rodTier] = await Promise.all([
+              loadEquippedBaitSlug(wallet),
+              loadEquippedRodTier(wallet),
+            ]);
             try {
               const { rolled, sessionId } = await executeInitiateCastOffchain(
                 wallet,
                 clientCastId,
               );
-              startSession(rolled, sessionId, baitSlug);
+              startSession(rolled, sessionId, baitSlug, rodTier);
             } catch (err) {
               // Off-chain initiate can fail with NO_BAIT (no active deposit)
               // or transient DB errors. Surface a clean error to the client
@@ -1245,12 +1277,12 @@ export default fp(async (fastify) => {
           // client's freshly-mounted `TimingBar` component.
           if (ctx.secondaryVerticalProfile) {
             ctx.profile = ctx.secondaryVerticalProfile;
-            ctx.greenBarHeight = resolveGreenBarHeight(ctx.profile, 0);
+            ctx.greenBarHeight = resolveGreenBarHeight(ctx.profile, ctx.rodTier);
             ctx.game = initialFishingGameState({
               sessionId: ctx.sessionPda ?? "local",
               verticalProfile: ctx.profile,
               greenBarHeight: ctx.greenBarHeight,
-              rodTier: 0,
+              rodTier: ctx.rodTier,
               luckyLureTier: 0,
               baitSlug: "fly",
               rngSeed: ctx.rngSeed,
