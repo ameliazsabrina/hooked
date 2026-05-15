@@ -19,13 +19,14 @@ export interface EventStatus {
 }
 
 function formatCountdown(secondsLeft: number): string {
-  if (secondsLeft <= 0) return "ending";
-  const h = Math.floor(secondsLeft / 3600);
+  if (secondsLeft <= 0) return "ending soon";
+  const d = Math.floor(secondsLeft / 86400);
+  const h = Math.floor((secondsLeft % 86400) / 3600);
   const m = Math.floor((secondsLeft % 3600) / 60);
-  const s = Math.floor(secondsLeft % 60);
-  if (h > 0) return `${h}h ${m.toString().padStart(2, "0")}m`;
-  if (m > 0) return `${m}m ${s.toString().padStart(2, "0")}s`;
-  return `${s}s`;
+  if (d > 0) return `${d}d ${h}h ${m}m left`;
+  if (h > 0) return `${h}h ${m}m left`;
+  if (m > 0) return `${m}m left`;
+  return "less than 1m left";
 }
 
 interface EventAlertProps {
@@ -49,7 +50,9 @@ export function EventAlert({ status }: EventAlertProps) {
 
   return (
     <div className="hud-event-alert" role="status" aria-live="polite">
-      <span className="hud-event-alert-label">{name} live</span>
+      <span className="hud-event-alert-label">
+        {name} live — catch the apex!
+      </span>
       <span className="hud-event-alert-countdown">
         {formatCountdown(secondsLeft)}
       </span>
