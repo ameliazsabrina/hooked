@@ -14,6 +14,8 @@ import {
   executeSubmitResolveOffchain,
   type RolledCast,
 } from "../services/fishing/wsExecutor.js";
+import { computeCatchScore } from "../services/fishing/scoring.js";
+import type { Rarity } from "../services/fishing/types.js";
 import {
   getActiveEvent,
   getEventStatus,
@@ -562,11 +564,6 @@ function advancePhysics(ctx: SessionContext, now: number): void {
   }
 }
 
-function fallbackScore(ctx: SessionContext, hit: boolean): number {
-  if (!hit) return 0;
-  return Math.floor((ctx.weightHg * (1 + ctx.rarity * 5)) / 10);
-}
-
 // Pre-nibble disconnect refund. The on-chain initiate_cast already consumed
 // bait, so we ask the program to roll it back. Best-effort: if ER is offline
 // or the call fails, the keeper will eventually clean up stale pending
@@ -713,8 +710,12 @@ function resolveCatch(
   const apexAssetUrl = ctx.apexAssetUrl;
   const speciesName = ctx.speciesName;
   const rarity = ctx.rarity;
-  const fallbackWeight = hit ? ctx.weightHg : 0;
-  const fallback = fallbackScore(ctx, hit);
+  const weightHg = hit ? ctx.weightHg : 0;
+  // Canonical score computed on the tick from the same inputs `submitInputSamples`
+  // uses (rarity + rolled weightHg). With this match, the wire score and the
+  // persisted score are bit-identical, so we can deliver `catch_resolved`
+  // immediately and let persistence run in the background.
+  const score = computeCatchScore(rarity as Rarity, weightHg);
   const roomId = socket.roomId;
 
   // Snapshot reaction telemetry before we wipe the cast slot so the async
@@ -766,56 +767,58 @@ function resolveCatch(
   ctx.rejectedFinalCount = 0;
   ctx.desyncDetectedAt = null;
 
-  const deliver = (score: number, weightHg: number) => {
-    const msg: ServerMessage = {
-      type: "catch_resolved",
-      sessionId: sessionIdStr,
-      clientCastId: activeCastId,
-      hit,
-      speciesId,
-      apexFishId,
-      apexAssetUrl,
-      speciesName,
-      rarity,
-      weightHg,
-      score,
-      roomId: roomId ?? undefined,
-    };
-    safeSend(socket, msg);
-  };
+  // Deliver `catch_resolved` ON THE TICK — the verdict was decided by
+  // deterministic physics, the score is computed from `ctx` values we already
+  // hold, and the persisted weight is exactly `ctx.weightHg` (submitInputSamples
+  // re-clamps a client-supplied weight, but the wsExecutor never forwards one,
+  // so `effectiveWeight === pc.weightHg === ctx.weightHg`). Awaiting Mongo
+  // here added ~500–1500ms of dead air between the bar filling and the catch
+  // popup; persistence is bookkeeping and runs below.
+  safeSend(socket, {
+    type: "catch_resolved",
+    sessionId: sessionIdStr,
+    clientCastId: activeCastId,
+    hit,
+    speciesId,
+    apexFishId,
+    apexAssetUrl,
+    speciesName,
+    rarity,
+    weightHg,
+    score,
+    roomId: roomId ?? undefined,
+  });
 
-  if (!ctx.sessionPda) {
-    deliver(fallback, fallbackWeight);
-    return;
-  }
+  if (!ctx.sessionPda) return;
+
+  // Persistence + leaderboard run after the wire send. A failure here means
+  // the player saw the catch but Mongo never recorded it; the reaction log
+  // above is still written (audit trail intact) and the error log is loud
+  // enough to drive an ops alert.
   void (async () => {
     try {
       const res = await executeSubmitResolveOffchain(sessionIdStr, hit);
-      // Off-chain submit persists the canonical weightHg via the rolled cast
-      // — the gateway already has it in `ctx.weightHg`. Use that for the wire
-      // so the client gets the same value the catch row was written with.
-      if (res) {
-        deliver(res.score, fallbackWeight);
-        // Credit leaderboards only when the catch row was persisted (res
-        // truthy) AND was a hit. Skipping miss/fallback paths keeps the
-        // Redis sorted sets aligned with what's actually in Mongo. Errors
-        // inside creditCatch are logged and swallowed; this must never
-        // throw past the WS handler.
-        if (hit && walletStr && redisRef && res.score > 0) {
-          void creditCatch({
-            redis: redisRef,
-            walletAddress: walletStr,
-            score: res.score,
-            weightHg: fallbackWeight,
-            rarity,
-            speciesName,
-            roomId: roomId ?? null,
-          });
-        }
-      } else deliver(fallback, fallbackWeight);
+      // Credit leaderboards only when the catch row was persisted (res truthy)
+      // AND was a hit. Skipping miss/fallback paths keeps the Redis sorted
+      // sets aligned with what's actually in Mongo.
+      if (hit && walletStr && redisRef && res && res.score > 0) {
+        void creditCatch({
+          redis: redisRef,
+          walletAddress: walletStr,
+          score: res.score,
+          weightHg,
+          rarity,
+          speciesName,
+          roomId: roomId ?? null,
+        });
+      }
     } catch (err) {
-      console.error("[gateway] off-chain submit failed:", err);
-      deliver(fallback, fallbackWeight);
+      console.error(
+        `[gateway] persistence failed for delivered catch ` +
+          `wallet=${walletStr} cast=${activeCastId} hit=${hit} ` +
+          `score=${score} weightHg=${weightHg}:`,
+        err,
+      );
     }
   })();
 }

@@ -2,9 +2,10 @@ import { createHash } from "node:crypto";
 import type { Types } from "mongoose";
 
 import { Catch, FishingSession } from "../../db/schema.js";
-import { MAX_CATCHES, SCORE_MULTIPLIERS, SPECIES_TABLE } from "./constants.js";
+import { MAX_CATCHES, SPECIES_TABLE } from "./constants.js";
 import { CastEngineError } from "./errors.js";
 import { rollCast, seedForCast } from "./rng.js";
+import { computeCatchScore } from "./scoring.js";
 import { Mechanic, RARITY_LABEL, Rarity, ZONE_OPEN_SEA, Window } from "./types.js";
 
 /**
@@ -353,10 +354,10 @@ export async function submitInputSamples(input: SubmitInputSamplesInput): Promis
         effectiveWeight = Math.max(minHg, Math.min(maxHg, clientWeight));
       }
     }
-    const multiplier = SCORE_MULTIPLIERS[rarityEnum] ?? 1;
-    // Ceil((multiplier * weight) / 100), matching the on-chain integer math
-    // (a + 99) / 100 — guarantees sub-1kg basics still score 1 point.
-    const score = Math.floor((multiplier * effectiveWeight + 99) / 100);
+    // Canonical scoring is centralised in `./scoring.ts` so the gateway can
+    // compute the same value on the tick and deliver `catch_resolved`
+    // without waiting on this Mongo write.
+    const score = computeCatchScore(rarityEnum, effectiveWeight);
 
     const speciesName = pc.speciesName ?? `species_${pc.speciesId ?? "?"}`;
     const newPity = rarityEnum >= Rarity.Rare ? 0 : session.pityCounter + 1;
