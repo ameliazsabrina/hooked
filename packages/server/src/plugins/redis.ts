@@ -1,6 +1,7 @@
 import fp from "fastify-plugin";
-import Redis from "ioredis";
+import type Redis from "ioredis";
 import { env } from "../config/env.js";
+import { buildRedis } from "./redisFactory.js";
 
 declare module "fastify" {
   interface FastifyInstance {
@@ -9,13 +10,9 @@ declare module "fastify" {
 }
 
 export default fp(async (fastify) => {
-  // Heroku Redis (rediss://) terminates TLS with a self-signed cert chain;
-  // ioredis rejects it by default. Disable cert verification only on TLS URLs.
-  const useTls = env.REDIS_URL.startsWith("rediss://");
-  const redis = new Redis(env.REDIS_URL, {
-    ...(useTls ? { tls: { rejectUnauthorized: false } } : {}),
-    maxRetriesPerRequest: null,
-  });
+  // TLS handling for rediss:// (self-signed cert chain on Heroku Redis)
+  // lives in buildRedis() — see redisFactory.ts for the audit story.
+  const redis = buildRedis(env.REDIS_URL, { maxRetriesPerRequest: null });
 
   fastify.decorate("redis", redis);
 

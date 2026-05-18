@@ -94,6 +94,50 @@ export const playerRouter = router({
 
     const lpEnabled = env.FEATURES_LP_ENABLED;
 
+    // Derive an authoritative `windowState` from the room's actual phase
+    // (post-2026-05-18 incident — B4 of the bug catalog). The previous
+    // client-side "Closed if expiresAt - now <= 0" was pure clock math
+    // and would say "Closed" the millisecond closesAt passed, regardless
+    // of whether the settlement keeper had actually paid the player.
+    // That created a UI/state mismatch where the badge said "Closed" but
+    // casting still worked, which was the most visible symptom of the
+    // incident. Driving the state from `room.phase` + `closesAt` here
+    // means the client can render exactly what's true.
+    //
+    // States:
+    //   "deposit"  — no active deposit at all (client should show DepositScreen).
+    //   "active"   — room.phase in {entry, active} and closesAt in future:
+    //                gameplay live, cast button enabled.
+    //   "closing"  — room.phase active but closesAt <= now: window timed out
+    //                but lifecycle tick hasn't run yet; cast gate blocks via
+    //                WINDOW_CLOSED, UI should reflect "Window closing soon".
+    //   "settling" — room.phase === "settling": close_room may have run, SOL
+    //                being returned; UI should say "Returning SOL…".
+    //   "closed"   — room.phase === "closed" but deposit not yet flipped to
+    //                returned (rare race between phase update and per-player
+    //                return_principal). UI: same as "settling".
+    //   "missing"  — deposit references a room that no longer exists in DB.
+    //                Defensive; treated as effectively closed.
+    let windowState:
+      | "deposit"
+      | "active"
+      | "closing"
+      | "settling"
+      | "closed"
+      | "missing" = "deposit";
+    if (activeDeposit) {
+      const room = await Room.findOne(
+        { roomId: activeDeposit.poolId },
+        { phase: 1, closesAt: 1 },
+      ).lean();
+      const nowMs = Date.now();
+      if (!room) windowState = "missing";
+      else if (room.phase === "closed") windowState = "closed";
+      else if (room.phase === "settling") windowState = "settling";
+      else if (room.closesAt.getTime() <= nowMs) windowState = "closing";
+      else windowState = "active";
+    }
+
     return {
       exists: true as const,
       nickname: player.nickname,
@@ -102,11 +146,11 @@ export const playerRouter = router({
       depositedAt: activeDeposit?.depositedAt?.toISOString() ?? null,
       roomId: activeDeposit?.poolId ?? null,
       activeMonth: lpEnabled ? activeDeposit?.activeMonth ?? null : null,
-      // Emit unconditionally — under the rooms model `expiresAt` is the
-      // room's `closesAt` (Window Timer) and is meaningful regardless of
-      // FEATURES_LP_ENABLED. The flag used to gate monthly LP epoch ends
-      // under the legacy JupSOL design and no longer applies here.
+      // Kept for backwards compatibility with any client still using clock
+      // math — but `windowState` (below) is the new source of truth.
+      // expiresAt is the room's `closesAt` frozen at deposit time.
       expiresAt: activeDeposit?.expiresAt?.toISOString() ?? null,
+      windowState,
       shellBalance: player.shellBalance,
       loginStreak: player.loginStreak,
       totalCatches: player.totalCatches,

@@ -2,9 +2,9 @@ import { Worker, type ConnectionOptions, type Job } from "bullmq";
 import { POOL_TIERS, DEPOSIT_APY_ESTIMATE } from "@hooked/shared";
 import { PoolTier, DailyLeaderboard, Player } from "../db/schema.js";
 import * as lb from "../services/leaderboard.js";
-import Redis from "ioredis";
 import { getOrCreateCurrentPeriod } from "../bounties/period.js";
 import { awardLeaderboardRankBounty } from "../bounties/progress.js";
+import { buildRedis } from "../plugins/redisFactory.js";
 
 function yesterdayUTC(): string {
   const d = new Date();
@@ -21,7 +21,10 @@ async function processDailyReset(job: Job) {
   const month = currentMonth();
 
   const redisUrl = process.env.REDIS_URL ?? "redis://localhost:6379";
-  const redis = new Redis(redisUrl);
+  // Funnel through buildRedis so rediss:// (Heroku Redis self-signed
+  // cert) doesn't surface as an [ioredis] Unhandled error event on
+  // every tick. See plugins/redisFactory.ts for the audit story.
+  const redis = buildRedis(redisUrl);
 
   try {
     for (const tier of POOL_TIERS) {

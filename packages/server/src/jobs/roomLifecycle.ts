@@ -6,6 +6,10 @@ import {
   deployReadyRoomLp,
   exitReadyRoomLp,
 } from "../services/lpRoomLifecycle.js";
+import { recordKeeperTick } from "../services/keeperHeartbeat.js";
+import { formatSolanaError } from "../solana/formatError.js";
+import { buildRedis } from "../plugins/redisFactory.js";
+import { env } from "../config/env.js";
 
 type LifecycleLogger = (msg: string) => void;
 
@@ -52,7 +56,13 @@ export async function runRoomLifecycleTick(
         log(`watchdog: skipped (${result.reason})`);
       }
     } catch (err) {
-      log(`watchdog: error ${(err as Error).message}`);
+      // B8 (post-2026-05-18 incident): surface program logs / anchor
+      // breakdown / cause chain instead of just `err.message`. The
+      // original watchdog logged "Simulation failed." on every tick
+      // for hours with no further context — formatSolanaError walks
+      // the known fields so the next operator sees which instruction
+      // reverted and why.
+      log(`watchdog: error ${formatSolanaError(err)}`);
     }
   }
 
@@ -89,11 +99,28 @@ export async function runRoomLifecycleTick(
     log(`${toSettling.modifiedCount} room(s) active → settling`);
   }
 
+  // Build a Redis client for the duration of this tick. Used by the
+  // settlement keeper's B10 leaderboard-finalize step to read the room's
+  // top-3 before close_room locks the on-chain cache. One client per
+  // tick is fine — settleAllReadyRooms is sequential and short-lived.
+  // Best-effort: if Redis is down the keeper still runs, just without
+  // the score-bridge gap-recovery (settlement falls back to whatever
+  // top-3 is already on chain).
+  let tickRedis: ReturnType<typeof buildRedis> | null = null;
   try {
-    const results = await settleAllReadyRooms({
-      info: (msg) => log(msg),
-      error: (msg) => log(`ERROR ${msg}`),
-    });
+    tickRedis = buildRedis(env.REDIS_URL);
+  } catch (err) {
+    log(`tickRedis init failed: ${(err as Error).message}`);
+  }
+
+  try {
+    const results = await settleAllReadyRooms(
+      {
+        info: (msg) => log(msg),
+        error: (msg) => log(`ERROR ${msg}`),
+      },
+      { redis: tickRedis },
+    );
     for (const r of results) {
       const stats =
         r.returned !== undefined
@@ -105,14 +132,33 @@ export async function runRoomLifecycleTick(
     }
   } catch (err) {
     log(`roomKeeper error: ${(err as Error).message}`);
+  } finally {
+    if (tickRedis) {
+      // Best-effort close; ignore errors (we're done with it either way).
+      tickRedis.quit().catch(() => {});
+    }
   }
 }
 
 async function processRoomLifecycle(job: Job) {
-  await runRoomLifecycleTick((msg) => {
-    job.log(msg);
-    console.log(`[room-lifecycle] ${msg}`);
-  });
+  try {
+    await runRoomLifecycleTick((msg) => {
+      job.log(msg);
+      console.log(`[room-lifecycle] ${msg}`);
+    });
+    await recordKeeperTick("room-lifecycle", "ok");
+  } catch (err) {
+    // Record the failure heartbeat first, then re-throw so BullMQ marks
+    // the job failed and emits the existing failure log. Without this,
+    // /healthz/keeper would only see "stale" once enough ticks were
+    // missed, not "running but every tick errors."
+    await recordKeeperTick(
+      "room-lifecycle",
+      "error",
+      (err as Error).message,
+    );
+    throw err;
+  }
 }
 
 export function createRoomLifecycleWorker(connection: ConnectionOptions) {

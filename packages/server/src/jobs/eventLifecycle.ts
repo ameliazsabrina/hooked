@@ -3,6 +3,7 @@ import { Worker, type ConnectionOptions, type Job } from "bullmq";
 import { FishingEvent } from "../db/schema.js";
 import { getEventStatus } from "../services/eventConfig.js";
 import { computeEventWinners } from "../services/eventWinners.js";
+import { recordKeeperTick } from "../services/keeperHeartbeat.js";
 
 export const EVENT_LIFECYCLE_QUEUE_NAME = "event-lifecycle";
 
@@ -116,17 +117,36 @@ export function createEventLifecycleWorker(connection: ConnectionOptions): Worke
     EVENT_LIFECYCLE_QUEUE_NAME,
     async (job: Job) => {
       job.log("event lifecycle tick");
-      const outcome = await processEventLifecycleTick();
-      if (outcome.promoted.length || outcome.demoted.length) {
-        job.log(
-          `promoted=${outcome.promoted.length} demoted=${outcome.demoted.length} winners=${outcome.computedWinnersFor.length}`,
+      try {
+        const outcome = await processEventLifecycleTick();
+        if (outcome.promoted.length || outcome.demoted.length) {
+          job.log(
+            `promoted=${outcome.promoted.length} demoted=${outcome.demoted.length} winners=${outcome.computedWinnersFor.length}`,
+          );
+        }
+        const errCount = Object.keys(outcome.errors).length;
+        if (errCount > 0) {
+          job.log(`errors: ${JSON.stringify(outcome.errors)}`);
+          // Per-event errors don't fail the tick (the transitions are
+          // independent), but they're worth surfacing as a degraded
+          // heartbeat so /healthz/keeper can flag persistent issues.
+          await recordKeeperTick(
+            "event-lifecycle",
+            "error",
+            `per-event errors: ${JSON.stringify(outcome.errors).slice(0, 400)}`,
+          );
+        } else {
+          await recordKeeperTick("event-lifecycle", "ok");
+        }
+        return outcome;
+      } catch (err) {
+        await recordKeeperTick(
+          "event-lifecycle",
+          "error",
+          (err as Error).message,
         );
+        throw err;
       }
-      const errCount = Object.keys(outcome.errors).length;
-      if (errCount > 0) {
-        job.log(`errors: ${JSON.stringify(outcome.errors)}`);
-      }
-      return outcome;
     },
     { connection, concurrency: 1 },
   );

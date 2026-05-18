@@ -21,10 +21,54 @@ import {
 import {
   swapSolToUsdc,
   swapUsdcToSol,
+  JupiterSwapError,
   type SwapResult,
 } from "./lpJupiterSwap.js";
 
 const PLACEHOLDER_POOL = "ARwi1S4DaiTG5DX7S4M4ZsrXqpMD1MrTmbu9ue2tpmEq";
+
+/**
+ * Wrap a Jupiter swap call so a `send_failed` outcome (no signature was
+ * ever issued — RPC rejected the submission, blockhash expired, sim
+ * failed) triggers a bounded retry. `confirm_failed` is NOT retried here
+ * because that path means a signature DID get returned and may have
+ * landed; the caller would need to verify on-chain status before re-doing
+ * the swap, which is out of scope.
+ *
+ * The inner `lpJupiterSwap.executeSwap` already retries HTTP-level
+ * failures (quote / build); this layer adds the missing piece for the
+ * single-attempt on-chain send step. Each outer attempt re-runs quote +
+ * build + sign + send from scratch, so each attempt gets a fresh
+ * blockhash and a fresh quote — exactly what's needed when a blockhash-
+ * expired error caused the previous send to fail.
+ */
+async function swapWithSendRetry(
+  call: () => Promise<SwapResult>,
+  label: string,
+  logger?: { info: (msg: string) => void },
+): Promise<SwapResult> {
+  const maxAttempts = Math.max(1, env.LP_SWAP_SEND_RETRY_ATTEMPTS);
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await call();
+    } catch (err) {
+      lastErr = err;
+      if (
+        !(err instanceof JupiterSwapError) ||
+        err.kind !== "send_failed" ||
+        attempt === maxAttempts
+      ) {
+        throw err;
+      }
+      logger?.info(
+        `[lpManager] ${label} send_failed on attempt ${attempt}/${maxAttempts}, ` +
+          `retrying with fresh quote+blockhash: ${(err as Error).message}`,
+      );
+    }
+  }
+  throw lastErr;
+}
 
 export type DeployResult = {
   /** Pubkey of the DLMM position account that holds this room's liquidity. */
@@ -115,21 +159,57 @@ async function deployToDlmm(opts: {
   signer: Keypair;
   totalSolLamports: bigint;
 }): Promise<DeployResult> {
-  const half = opts.totalSolLamports / 2n;
-
-  // 1) Swap half of the SOL into USDC.
-  const swap: SwapResult = await swapSolToUsdc({
-    connection: opts.connection,
-    signer: opts.signer,
-    amountLamports: half,
-  });
-
-  // 2) Open a DLMM position with the SOL/USDC balances. Spot strategy ±10
-  //    bins around active gives a tight range that maximizes fee accrual at
-  //    the cost of being more sensitive to price drift. Re-centering is a
-  //    follow-up for v2.
-  const poolAddress = new PublicKey(env.METEORA_POOL_ADDRESS);
+  // Resolve SDK enum at runtime (the import is dynamic — see top-of-file
+  // note about @meteora-ag/dlmm ESM/CJS interop). Reject typo'd env values
+  // with a clear, listing-all-options error rather than `undefined`-cast.
   const { default: DLMM, StrategyType } = await import("@meteora-ag/dlmm");
+  const strategyType =
+    StrategyType[env.LP_STRATEGY_TYPE as keyof typeof StrategyType];
+  if (strategyType === undefined) {
+    const valid = Object.keys(StrategyType).filter((k) =>
+      Number.isNaN(Number(k)),
+    );
+    throw new Error(
+      `[lpManager] LP_STRATEGY_TYPE="${env.LP_STRATEGY_TYPE}" is not a valid ` +
+        `Meteora StrategyType. Valid values: ${valid.join(", ")}`,
+    );
+  }
+
+  // Split SOL between the SOL leg of the position and the portion that's
+  // swapped into USDC. LP_SOL_USDC_SPLIT_BPS = 5000 reproduces the prior
+  // 50/50 behavior; lowering keeps more SOL exposure and reduces the
+  // amount routed through Jupiter (less swap slippage).
+  const solSideBps = BigInt(env.LP_SOL_USDC_SPLIT_BPS);
+  const solSide = (opts.totalSolLamports * solSideBps) / 10_000n;
+  const usdcSide = opts.totalSolLamports - solSide;
+
+  // 1) Swap the USDC portion of the SOL into USDC. Skip when the whole
+  //    deposit is the SOL leg (LP_SOL_USDC_SPLIT_BPS=10000) — saves a
+  //    Jupiter round-trip and avoids a 0-amount swap revert.
+  let swap: SwapResult;
+  if (usdcSide > 0n) {
+    swap = await swapWithSendRetry(
+      () =>
+        swapSolToUsdc({
+          connection: opts.connection,
+          signer: opts.signer,
+          amountLamports: usdcSide,
+        }),
+      "swapSolToUsdc (deploy)",
+    );
+  } else {
+    swap = {
+      signature: "",
+      inLamports: 0n,
+      outLamports: 0n,
+      slippageLamports: 0n,
+    };
+  }
+
+  // 2) Open a DLMM position with the SOL/USDC balances. Strategy + range
+  //    + deposit slippage are env-driven so they can be tuned per pool
+  //    without a redeploy. See env.ts comments for trade-offs.
+  const poolAddress = new PublicKey(env.METEORA_POOL_ADDRESS);
   const dlmmPool = await DLMM.create(opts.connection, poolAddress);
   const activeBin = await dlmmPool.getActiveBin();
   const positionKeypair = Keypair.generate();
@@ -137,15 +217,15 @@ async function deployToDlmm(opts: {
   const tx: Transaction =
     await dlmmPool.initializePositionAndAddLiquidityByStrategy({
       positionPubKey: positionKeypair.publicKey,
-      totalXAmount: new BN((opts.totalSolLamports - half).toString()),
+      totalXAmount: new BN(solSide.toString()),
       totalYAmount: new BN(swap.outLamports.toString()),
       strategy: {
-        minBinId: activeBin.binId - 10,
-        maxBinId: activeBin.binId + 10,
-        strategyType: StrategyType.Spot,
+        minBinId: activeBin.binId - env.LP_BIN_RANGE,
+        maxBinId: activeBin.binId + env.LP_BIN_RANGE,
+        strategyType,
       },
       user: opts.signer.publicKey,
-      slippage: 1,
+      slippage: env.LP_DEPLOY_SLIPPAGE_PCT,
     });
   tx.feePayer = opts.signer.publicKey;
   const { blockhash } = await opts.connection.getLatestBlockhash("confirmed");
@@ -157,12 +237,16 @@ async function deployToDlmm(opts: {
   });
   await opts.connection.confirmTransaction(initSig, "confirmed");
 
+  // Drop the swap sig from the tx list / signature field when no swap ran
+  // (LP_SOL_USDC_SPLIT_BPS=10000). Avoids exposing "" as a confirmed tx.
+  const didSwap = swap.signature !== "";
+
   return {
     positionPubkey: positionKeypair.publicKey.toBase58(),
     deployedLamports: opts.totalSolLamports,
     swapSlippageLamports: swap.slippageLamports,
-    signatures: [swap.signature, initSig],
-    swapInTxSignature: swap.signature,
+    signatures: didSwap ? [swap.signature, initSig] : [initSig],
+    swapInTxSignature: didSwap ? swap.signature : null,
     swapInSolLamports: swap.inLamports,
     swapInUsdcRaw: swap.outLamports,
     addLiquidityTxSignature: initSig,
@@ -238,11 +322,15 @@ async function exitFromDlmm(opts: {
     const usdcLamports = BigInt(balance.value.amount);
     removedUsdc = usdcLamports;
     if (usdcLamports > 0n) {
-      const swap = await swapUsdcToSol({
-        connection: opts.connection,
-        signer: opts.signer,
-        amountLamports: usdcLamports,
-      });
+      const swap = await swapWithSendRetry(
+        () =>
+          swapUsdcToSol({
+            connection: opts.connection,
+            signer: opts.signer,
+            amountLamports: usdcLamports,
+          }),
+        "swapUsdcToSol (exit)",
+      );
       swapBackSig = swap.signature;
       swapBackSlippage = swap.slippageLamports;
       swapBackUsdcIn = swap.inLamports;

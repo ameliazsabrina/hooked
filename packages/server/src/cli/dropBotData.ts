@@ -1,6 +1,6 @@
 import mongoose from "mongoose";
-import Redis from "ioredis";
 import { env } from "../config/env.js";
+import { buildRedis } from "../plugins/redisFactory.js";
 
 /**
  * One-off cleanup after the bot system was removed.
@@ -33,7 +33,7 @@ async function dropMongoBotCollection(dryRun: boolean): Promise<void> {
 }
 
 async function pruneRedisBotEntries(dryRun: boolean): Promise<void> {
-  const redis = new Redis(env.REDIS_URL, { maxRetriesPerRequest: null });
+  const redis = buildRedis(env.REDIS_URL, { maxRetriesPerRequest: null });
   try {
     let cursor = "0";
     let zsetRemoved = 0;

@@ -89,8 +89,70 @@ const envSchema = z.object({
   LP_DRY_RUN_YIELD_LAMPORTS: z.coerce.number().int().nonnegative().default(0),
   // Slippage tolerance for Jupiter swaps (basis points, e.g. 50 = 0.5%).
   LP_SWAP_SLIPPAGE_BPS: z.coerce.number().int().nonnegative().default(50),
+  // Jupiter HTTP reliability knobs. Retries apply only to the quote and
+  // swap-build calls (both are idempotent GET/POST without side effects).
+  // The on-chain send/confirm step is NEVER retried — once a tx is signed
+  // and submitted it may have landed even if confirmation timed out, so
+  // re-sending could double-spend the LP_MANAGER buffer.
+  LP_JUPITER_RETRY_ATTEMPTS: z.coerce.number().int().min(1).default(3),
+  LP_JUPITER_RETRY_BASE_DELAY_MS: z.coerce
+    .number()
+    .int()
+    .nonnegative()
+    .default(500),
+  LP_JUPITER_RETRY_MAX_DELAY_MS: z.coerce
+    .number()
+    .int()
+    .nonnegative()
+    .default(5_000),
+  LP_JUPITER_RETRY_JITTER_PCT: z.coerce.number().min(0).max(1).default(0.2),
+  // Per-call HTTP timeout for Jupiter quote/swap-build (ms). The wall-clock
+  // budget per swap attempt is roughly 2× this (quote + build), plus the
+  // chain send + confirm round-trip. Tune up if you see frequent timeouts
+  // from slow Jupiter responses; down if you'd rather fail fast.
+  LP_JUPITER_TIMEOUT_MS: z.coerce.number().int().positive().default(10_000),
+  // Outer-loop retry attempts for the SOL/USDC swap call from lpManager.
+  // Specifically covers the `send_failed` kind — RPC rejected submission,
+  // blockhash expired, sim failed mid-deploy — which lpJupiterSwap.executeSwap
+  // intentionally does NOT retry to avoid double-spend. lpManager re-runs
+  // the whole quote→build→send chain (each attempt gets a fresh blockhash)
+  // because no signature was issued. `confirm_failed` is NOT retried here
+  // either: a confirmed-with-err response means the tx landed, and the
+  // outer caller would need to verify on-chain state before re-attempting.
+  LP_SWAP_SEND_RETRY_ATTEMPTS: z.coerce.number().int().min(1).default(2),
   // Hours before closes_at to fire the lpExit job.
   LP_EXIT_HOURS_BEFORE_CLOSE: z.coerce.number().nonnegative().default(12),
+  // Meteora DLMM strategy used when opening a position. Matches the
+  // `StrategyType` enum exported by `@meteora-ag/dlmm`. Common values:
+  //   - "Spot"   uniform liquidity across the range — max fee accrual,
+  //              most sensitive to price drift. Default; preserves prior
+  //              behavior.
+  //   - "Curve"  concentrated at the active bin — even more fee-dense
+  //              when price stays put, worse if it drifts.
+  //   - "BidAsk" weighted at the edges of the range — less fee in calm
+  //              markets, smoother re-centering when price moves.
+  // The Meteora SDK rejects unknown values at runtime, so a typo here
+  // surfaces as a clear error on the first deploy attempt rather than
+  // silently picking a default.
+  LP_STRATEGY_TYPE: z.string().default("Spot"),
+  // Number of DLMM bins on each side of the active bin. Wider range =
+  // less fee per unit of liquidity but less sensitivity to price drift.
+  // The historical default was ±10.
+  LP_BIN_RANGE: z.coerce.number().int().positive().default(10),
+  // Slippage tolerance passed to Meteora's `initializePositionAndAddLiquidityByStrategy`
+  // (percent, where 1 = 1%). Raise to 3–5 for volatile pools to reduce
+  // "deposit failed" reverts; lower to tighten execution.
+  LP_DEPLOY_SLIPPAGE_PCT: z.coerce.number().nonnegative().default(1),
+  // Fraction of deployed SOL to keep as the SOL leg of the LP position,
+  // in basis points. The remainder is swapped to USDC before opening.
+  // 5000 = 50/50 SOL/USDC (default and historical behavior). Lower when
+  // the pool's active bin price is far from 1:1 to reduce swap slippage.
+  LP_SOL_USDC_SPLIT_BPS: z.coerce
+    .number()
+    .int()
+    .min(0)
+    .max(10_000)
+    .default(5_000),
   // 64-char hex string (32 bytes) used as the HMAC key in the off-chain
   // fishing RNG. Rotated daily in production (Phase 5 audit layer); a single
   // long-lived value is acceptable for dev. If absent, cast.initiate fails

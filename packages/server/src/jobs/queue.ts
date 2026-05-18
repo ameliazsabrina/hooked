@@ -1,4 +1,5 @@
 import { Queue } from "bullmq";
+import { buildBullMqConnection } from "../plugins/redisFactory.js";
 
 let dailyResetQueue: Queue | null = null;
 let payoutQueue: Queue | null = null;
@@ -25,13 +26,11 @@ export function getQueues() {
 }
 
 export function registerJobs(redisUrl: string) {
-  // Heroku Redis (rediss://) uses a self-signed cert chain; ioredis (and
-  // therefore BullMQ) rejects it unless we explicitly relax verification.
-  const useTls = redisUrl.startsWith("rediss://");
-  const connection = {
-    url: redisUrl,
-    ...(useTls ? { tls: { rejectUnauthorized: false } } : {}),
-  };
+  // TLS handling (Heroku rediss:// self-signed chain) is consolidated in
+  // buildBullMqConnection — see plugins/redisFactory.ts. Don't open-code
+  // the connection object here or the next `new Queue(...)` author will
+  // copy a config that's silently missing the tls flag.
+  const connection = buildBullMqConnection(redisUrl);
 
   dailyResetQueue = new Queue("daily-reset", { connection });
   payoutQueue = new Queue("payout", { connection });

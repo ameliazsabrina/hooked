@@ -1,13 +1,17 @@
 import { Worker, type ConnectionOptions, type Job } from "bullmq";
-import Redis from "ioredis";
+import type Redis from "ioredis";
 import { YIELD_SPLIT, DEPOSIT_APY_ESTIMATE, POOL_DURATION_DAYS } from "@hooked/shared";
 import { PoolTier, Player } from "../db/schema.js";
 import * as lb from "../services/leaderboard.js";
 import { getQueues } from "./queue.js";
+import { buildRedis } from "../plugins/redisFactory.js";
 
 async function processPoolLifecycle(job: Job) {
   const redisUrl = process.env.REDIS_URL ?? "redis://localhost:6379";
-  const redis = new Redis(redisUrl);
+  // buildRedis applies tls.rejectUnauthorized=false for rediss:// URLs.
+  // Skipping that was one of the silent ioredis "self-signed cert"
+  // failure modes catalogued in the 2026-05-18 incident.
+  const redis = buildRedis(redisUrl);
 
   try {
     const now = new Date();

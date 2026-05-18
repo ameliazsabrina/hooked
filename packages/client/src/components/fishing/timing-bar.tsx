@@ -173,6 +173,16 @@ export function TimingBar({
     // back up after the snap, rather than firing immediately off the stale
     // pre-snap progress.
     lastResolveSentAtRef.current = 0;
+    // Clear the resolve latch. Without this, the countdown timer (which is
+    // gated on `resolvedRef.current`) stays hidden through the snap because
+    // the latch only resets in the physics tick once local progress falls
+    // below LOCAL_FULL_TRIGGER — and immediately after a snap-down, local
+    // physics may still report a value above 0.95 for one or more frames.
+    // Player would see the timer stay hidden through the visual "reset".
+    // Server-side this path is no longer reached on the normal desync flow
+    // (gateway resolves the cast instead of emitting desync_correction),
+    // but kept for any future path that does emit a reconcile.
+    resolvedRef.current = false;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reconcileVersion]);
 

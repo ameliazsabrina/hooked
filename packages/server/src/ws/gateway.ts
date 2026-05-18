@@ -1464,26 +1464,26 @@ export default fp(async (fastify) => {
             return;
           }
           ctx.rejectedFinalCount += 1;
-          // First time we cross the divergence threshold: snapshot server
-          // state to the client and stamp the detection time so the
-          // physicsTimer can shrink the safety timeout. Sent exactly once
-          // per cast — subsequent rejections just count up (the existing
-          // fishing_state cadence keeps the client's serverProgressRef
-          // current).
+          // Divergence detected. Previously we emitted a `desync_correction`
+          // snapshot and kept physics running, betting the client would
+          // re-sync. In practice the input timeline can be permanently
+          // diverged (e.g. a late-arriving transition gets clamped server-
+          // side at the `input_samples` handler), so the cast spiralled:
+          // client gauge snapped down on reconcile, refilled, retried
+          // finalize, server rejected again, eventually safety-timeout
+          // fired 30s later. Player saw the gauge "reset after filling"
+          // repeatedly with the countdown timer hidden by the resolve-latch.
+          //
+          // Now: resolve as escaped on the first detection. Server is
+          // authoritative — its progress hasn't reached the floor, so the
+          // catch isn't earned. Player gets a clean miss popup instead of
+          // a confusing restart cycle.
           if (
             ctx.rejectedFinalCount === DESYNC_REJECT_THRESHOLD &&
             ctx.desyncDetectedAt === null
           ) {
             ctx.desyncDetectedAt = Date.now();
-            safeSend(socket, {
-              type: "desync_correction",
-              sessionId: ctx.sessionPda ?? "",
-              clientCastId: ctx.activeCastId ?? "",
-              barY: ctx.game.barY,
-              fishY: ctx.game.fishYDisplay,
-              progress: ctx.game.progress,
-              tickIndex: ctx.game.sampleCount,
-            });
+            resolveCatch(socket, false);
           }
           return;
         }

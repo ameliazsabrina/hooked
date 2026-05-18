@@ -314,6 +314,18 @@ const roomSchema = new Schema(
     createTxSignature: { type: String, default: null },
     closeTxSignature: { type: String, default: null },
     finalizeTxSignature: { type: String, default: null },
+
+    // B10 (post-2026-05-18 incident): flagged by settleRoom when the
+    // pre-close finalize-leaderboard step finds Redis ahead of the
+    // on-chain top-3 cache. Indicates the per-session score-bridge
+    // worker was silently broken for this room's lifetime. Admin
+    // dashboards can list rooms with this flag to triage score-bridge
+    // health; the settlement itself proceeds normally (the keeper
+    // pushed `scoreBridgeGapPushed` update_room_entry_score txs to
+    // patch the cache before close_room ran).
+    scoreBridgeGapDetected: { type: Boolean, default: false },
+    scoreBridgeGapAt: { type: Date, default: null },
+    scoreBridgeGapPushed: { type: Number, default: 0 },
   },
   { timestamps: true }
 );
@@ -737,6 +749,35 @@ fishingSessionSchema.index(
 fishingSessionSchema.index({ status: 1, dateKey: 1 });
 fishingSessionSchema.index({ walletAddress: 1, dateKey: -1 });
 
+// Heartbeat written by every keeper tick (room-lifecycle, event-lifecycle,
+// etc). Single doc per keeperName, upserted with each completion. The
+// /healthz/keeper endpoint reads these and returns 500 when any required
+// keeper is stale beyond its threshold — catches Redis-flushed scheduler
+// state, dead worker dyno, repeated tick failures, etc. without anyone
+// having to watch logs.
+//
+// Why Mongo and not Redis: Redis is the thing most likely to be the
+// failure mode (BullMQ scheduler key lost on Redis flush). Storing the
+// heartbeat in the same place as the BullMQ state would mean a Redis
+// outage hides the very symptom we're trying to detect.
+const keeperHeartbeatSchema = new Schema(
+  {
+    keeperName: { type: String, required: true, unique: true, index: true },
+    lastTickAt: { type: Date, required: true, index: true },
+    lastTickStatus: {
+      type: String,
+      enum: ["ok", "error"],
+      required: true,
+    },
+    lastError: { type: String, default: null },
+    /** Number of consecutive ticks ending in `error`. Reset to 0 on ok.
+     *  Surfaces "keeper is running but every tick fails" — different
+     *  failure mode than "keeper hasn't ticked at all". */
+    consecutiveErrors: { type: Number, required: true, default: 0 },
+  },
+  { timestamps: true },
+);
+
 export type PlayerDocument = InferSchemaType<typeof playerSchema>;
 export type CatchDocument = InferSchemaType<typeof catchSchema>;
 export type FishingSessionDocument = InferSchemaType<typeof fishingSessionSchema>;
@@ -786,3 +827,10 @@ export const PlayerBountyProgress = model(
   "PlayerBountyProgress",
   playerBountyProgressSchema,
 );
+export const KeeperHeartbeat = model(
+  "KeeperHeartbeat",
+  keeperHeartbeatSchema,
+);
+export type KeeperHeartbeatDocument = InferSchemaType<
+  typeof keeperHeartbeatSchema
+>;

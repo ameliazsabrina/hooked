@@ -15,6 +15,7 @@ import {
   deployRoomLiquidity,
   exitRoomLiquidity,
 } from "./lpManager.js";
+import { formatSolanaError } from "../solana/formatError.js";
 
 type LpLogger = {
   info: (msg: string) => void;
@@ -128,13 +129,17 @@ export async function deployReadyRoomLp(logger: LpLogger = noopLogger) {
         },
       );
     } catch (err) {
-      logger.error(`lpDeploy room=${room.roomId} failed: ${(err as Error).message}`);
+      const detailed = formatSolanaError(err);
+      logger.error(`lpDeploy room=${room.roomId} failed: ${detailed}`);
       await Room.updateOne(
         { roomId: room.roomId },
         {
           $set: {
             "lp.status": "failed",
-            "lp.lastError": (err as Error).message,
+            // Store the detailed multi-line variant so admin dashboards
+            // (and the depositYieldFromLpManager CLI's dry-run output)
+            // show the program logs without re-running.
+            "lp.lastError": detailed.slice(0, 4000),
           },
         },
       );
@@ -222,13 +227,14 @@ export async function exitReadyRoomLp(logger: LpLogger = noopLogger) {
         },
       );
     } catch (err) {
-      logger.error(`lpExit room=${room.roomId} failed: ${(err as Error).message}`);
+      const detailed = formatSolanaError(err);
+      logger.error(`lpExit room=${room.roomId} failed: ${detailed}`);
       await Room.updateOne(
         { roomId: room.roomId },
         {
           $set: {
             "lp.status": "failed",
-            "lp.lastError": (err as Error).message,
+            "lp.lastError": detailed.slice(0, 4000),
           },
         },
       );

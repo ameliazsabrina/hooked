@@ -1,15 +1,19 @@
 import BN from "bn.js";
 import { PublicKey, SystemProgram } from "@solana/web3.js";
+import type Redis from "ioredis";
 import {
   getRoomsProgram,
   getRoomPda,
   getRoomVaultPda,
   getRoomEntryPda,
   getProgramConfigPda,
+  loadKeeperKeypair,
 } from "../solana/roomsProgram.js";
 import { isProgramPaused } from "../solana/configCache.js";
 import { Player, Room } from "../db/schema.js";
 import { shareForRecipient } from "./yieldShare.js";
+import { formatSolanaError } from "../solana/formatError.js";
+import { finalizeRoomLeaderboardOnChain } from "./roomLeaderboardFinalize.js";
 
 type SettleResult = {
   roomId: string;
@@ -66,8 +70,17 @@ async function markReturnedInDb(opts: {
   ]);
 }
 
+export interface SettleDeps {
+  /** Redis client used for the B10 finalizeRoomLeaderboardOnChain step.
+   *  Pass null to skip the on-chain top-3 patch — settlement still
+   *  proceeds (yield distribution falls back to whatever top-3 was
+   *  populated by score-bridge per session commits). */
+  redis?: Redis | null;
+}
+
 export async function settleAllReadyRooms(
   logger: Logger = defaultLogger,
+  deps: SettleDeps = {},
 ): Promise<SettleResult[]> {
   const rooms = await Room.find({
     phase: "settling",
@@ -77,7 +90,7 @@ export async function settleAllReadyRooms(
   const results: SettleResult[] = [];
   for (const room of rooms) {
     try {
-      const result = await settleRoom(room.roomId, logger);
+      const result = await settleRoom(room.roomId, logger, deps);
       results.push(result);
     } catch (err) {
       results.push({
@@ -93,6 +106,7 @@ export async function settleAllReadyRooms(
 export async function settleRoom(
   roomId: string,
   logger: Logger = defaultLogger,
+  deps: SettleDeps = {},
 ): Promise<SettleResult> {
   const doc = await Room.findOne({ roomId });
   if (!doc) return { roomId, status: "skipped", message: "not found" };
@@ -138,7 +152,112 @@ export async function settleRoom(
     doc.lp?.realizedYieldLamports ?? 0,
   );
 
+  // RoomEntry layout: [8 disc][1 version][32 room]…  so the room pubkey
+  // sits at byte 9, not 8. Filtering at offset 8 was matching the version
+  // byte against the first byte of roomPda, which never hits.
+  //
+  // We fetch entries BEFORE close_room so the precondition check below
+  // can sum unreturned principal against the live vault balance. Entries
+  // are immutable across close_room — close_room only mutates the room
+  // status and protocol-share transfer, not the entry accounts — so the
+  // single fetch is correct for the whole tick.
+  const entries = await program.account.roomEntry.all([
+    {
+      memcmp: { offset: 9, bytes: roomPda.toBase58() },
+    },
+  ]);
+
+  // B2 precondition (post-2026-05-18 incident): refuse to advance past
+  // close_room if the vault doesn't hold enough lamports to cover every
+  // unreturned entry. The chain's `finalize_room` closes the vault
+  // permanently, so if we run close_room → return_principal × N on a
+  // drained vault, every return_principal reverts with VaultInsufficientFunds,
+  // then B1's finalize gate would skip finalize (good) — but if any prior
+  // bug or admin action let finalize through, the vault is gone forever
+  // and recovery requires manual out-of-band transfers (what the incident
+  // forced). Failing closed at the close_room step keeps the room in
+  // `settling` indefinitely, recoverable by refunding the vault.
+  //
+  // Required balance: sum of unreturned depositLamports + full yield (the
+  // 30% protocol share leaves the vault during close_room; the remaining
+  // 70% is distributed by return_principal per top-3 share) + rent-exempt
+  // floor for the vault SystemAccount.
+  const connection = program.provider.connection;
+  const unreturnedPrincipal = entries
+    .filter(({ account }) => !account.returned)
+    .reduce(
+      (s, { account }) => s + BigInt(account.depositLamports.toString()),
+      0n,
+    );
+  const vaultBalance = BigInt(await connection.getBalance(roomVaultPda));
+  const rentExempt = BigInt(
+    await connection.getMinimumBalanceForRentExemption(0),
+  );
+  const vaultRequired =
+    unreturnedPrincipal + realizedYieldLamports + rentExempt;
+
   if (status < 2) {
+    if (vaultBalance < vaultRequired) {
+      logger.error(
+        `room=${roomId} close_room precondition failed: vault holds ` +
+          `${vaultBalance.toString()} lamports but needs ` +
+          `${vaultRequired.toString()} (unreturnedPrincipal=` +
+          `${unreturnedPrincipal.toString()}, yield=` +
+          `${realizedYieldLamports.toString()}, rentExempt=` +
+          `${rentExempt.toString()}). Skipping close_room — room stays in ` +
+          `'settling'. Top up the vault PDA, then the next tick will retry.`,
+      );
+      return {
+        roomId,
+        status: "skipped",
+        message:
+          `vault insufficient before close_room ` +
+          `(${vaultBalance.toString()} < ${vaultRequired.toString()})`,
+        returned: 0,
+        reconciled: 0,
+        failed: 0,
+      };
+    }
+
+    // B10 (post-2026-05-18 incident): patch the on-chain top-3 cache
+    // from Redis BEFORE close_room reads it. Without this, a silently
+    // broken score-bridge worker (KEEPER_KEYPAIR missing in env, queue
+    // backed up, etc.) leaves first/second/thirdPlace as default pubkey
+    // — close_room then locks in zero yield share for everyone. This
+    // step is idempotent + best-effort: when redis is missing or the
+    // top-3 is already current, it no-ops. The keeper keypair is
+    // optional; if absent the function logs the degradation and
+    // settlement continues with whatever top-3 was already on chain.
+    try {
+      const finalizeResult = await finalizeRoomLeaderboardOnChain({
+        redis: deps.redis ?? null,
+        program,
+        keeper: loadKeeperKeypair(),
+        roomId,
+        roomPda,
+        logger,
+      });
+      if (finalizeResult.detectedScoreBridgeGap) {
+        await Room.updateOne(
+          { roomId },
+          {
+            $set: {
+              scoreBridgeGapDetected: true,
+              scoreBridgeGapAt: new Date(),
+              scoreBridgeGapPushed: finalizeResult.pushed,
+            },
+          },
+        );
+      }
+    } catch (err) {
+      // Treat as soft-failure: log loudly, let close_room proceed.
+      // Falling back to default top-3 is still better than blocking
+      // settlement on a Redis blip.
+      logger.error(
+        `room=${roomId} finalizeRoomLeaderboardOnChain threw: ${formatSolanaError(err)}`,
+      );
+    }
+
     // close_room reads the on-chain top-3 cache (populated by
     // update_room_entry_score). It extracts 30% × yield as protocol share
     // to `treasury` and stores `yield_lamports` on the room for downstream
@@ -165,15 +284,6 @@ export async function settleRoom(
     second: settledRoom.secondPlace as PublicKey,
     third: settledRoom.thirdPlace as PublicKey,
   };
-
-  // RoomEntry layout: [8 disc][1 version][32 room]…  so the room pubkey
-  // sits at byte 9, not 8. Filtering at offset 8 was matching the version
-  // byte against the first byte of roomPda, which never hits.
-  const entries = await program.account.roomEntry.all([
-    {
-      memcmp: { offset: 9, bytes: roomPda.toBase58() },
-    },
-  ]);
 
   let returned = 0;
   let reconciled = 0;
@@ -248,8 +358,11 @@ export async function settleRoom(
       }
     } catch (rpcErr) {
       failed += 1;
+      // B8: include program logs / anchor breakdown so the cause of a
+      // VaultInsufficientFunds (or any other revert) is visible without
+      // a separate explorer round-trip.
       logger.error(
-        `room=${roomId} return_principal RPC failed for ${recipientStr}: ${(rpcErr as Error).message}`,
+        `room=${roomId} return_principal RPC failed for ${recipientStr}: ${formatSolanaError(rpcErr)}`,
       );
     }
   }
@@ -259,7 +372,29 @@ export async function settleRoom(
   );
 
   const latest = await program.account.room.fetch(roomPda);
-  if (latest.status === 2) {
+
+  // B1 finalize gate (post-2026-05-18 incident): `finalize_room` closes
+  // the vault account on-chain, which is irreversible — after that,
+  // `return_principal` reverts with "vault not initialized" forever and
+  // any remaining unpaid players have to be reimbursed manually. The OLD
+  // code finalized as soon as `status === 2`, regardless of whether a
+  // single return_principal succeeded; that's exactly how the incident
+  // turned a recoverable "vault is empty, retry next tick" into an
+  // unrecoverable "vault is closed, manual payout required" state.
+  //
+  // Only finalize when every entry has been settled. Specifically:
+  //   - `failed === 0`: no return_principal failures THIS tick.
+  //   - `returned + reconciled === humanCount`: every on-chain entry is
+  //     marked returned, either from a fresh transfer or the reconcile
+  //     path that heals stale DB writes.
+  //
+  // When the gate doesn't open, the room stays in `phase: "settling"`.
+  // The next lifecycle tick re-runs settleAllReadyRooms; transient
+  // failures (RPC blips, blockhash expiry) retry automatically, and the
+  // operator has time to investigate persistent failures before the
+  // vault disappears.
+  const allSettled = failed === 0 && returned + reconciled === humanCount;
+  if (latest.status === 2 && allSettled) {
     try {
       const finalizeTxSig = await program.methods
         .finalizeRoom()
@@ -280,13 +415,23 @@ export async function settleRoom(
       return {
         roomId,
         status: "error",
-        message: `finalize_room failed: ${(err as Error).message}`,
+        message: `finalize_room failed: ${formatSolanaError(err)}`,
         returned,
         reconciled,
         failed,
       };
     }
+  } else if (latest.status === 2 && !allSettled) {
+    logger.error(
+      `room=${roomId} finalize_room SKIPPED: ${returned}/${humanCount} returned, ` +
+        `${reconciled} reconciled, ${failed} failed. Room stays in 'settling' ` +
+        `so unpaid entries can retry next tick. Investigate persistent failures ` +
+        `before the next tick or vault state may degrade.`,
+    );
   } else if (latest.status === 3) {
+    // Status already 3 means a previous tick (or out-of-band action)
+    // already finalized — sync the DB so the room exits the settling
+    // query on the next tick.
     await Room.updateOne({ roomId }, { $set: { phase: "closed" } });
   }
 

@@ -19,6 +19,10 @@ const CODE_MAP: Record<CastEngineErrorCode, TRPCError["code"]> = {
   CANCEL_GRACE_EXPIRED: "BAD_REQUEST",
   CATCHES_FULL: "BAD_REQUEST",
   CAST_RACE: "CONFLICT",
+  // Cast attempted on a room past closesAt or past its `entry`/`active`
+  // phase. PRECONDITION_FAILED rather than BAD_REQUEST because the client's
+  // request is well-formed — the world state just no longer permits it.
+  WINDOW_CLOSED: "PRECONDITION_FAILED",
 };
 
 export function mapFishingError(err: unknown): never {

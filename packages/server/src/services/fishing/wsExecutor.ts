@@ -15,7 +15,7 @@
 import type { PublicKey } from "@solana/web3.js";
 import { FishRarity } from "@hooked/shared";
 
-import { FishingSession, Player } from "../../db/schema.js";
+import { FishingSession, Player, Room } from "../../db/schema.js";
 import { env } from "../../config/env.js";
 import { baitAmountForDeposit } from "../baitAmount.js";
 import { getActiveEvent } from "../eventConfig.js";
@@ -92,6 +92,39 @@ async function ensureActiveSession(walletBase58: string): Promise<string> {
       "No active room deposit — cannot start a fishing session",
     );
   }
+
+  // Defense-in-depth: the only previous gate was `deposits[].returned`,
+  // which only flips when the settlement keeper successfully runs
+  // `return_principal`. If the keeper is wedged (insufficient vault, paused
+  // program, dead Redis scheduler), `returned` stays false and players can
+  // keep casting on a window that's effectively closed — which is exactly
+  // the symptom of the 2026-05-18 incident. Check the room state directly
+  // here so the cast path fails closed regardless of keeper health.
+  //
+  // Phases:
+  //   "entry"    — deposits open, casting allowed
+  //   "active"   — deposits closed, casting allowed (the gameplay window)
+  //   "settling" — closesAt has passed, settlement in progress
+  //   "closed"   — settlement complete, room terminal
+  // We allow only entry+active. `closesAt <= now` catches the rare gap
+  // where the lifecycle tick hasn't run yet but the wall clock has passed.
+  const room = await Room.findOne(
+    { roomId: active.poolId },
+    { phase: 1, closesAt: 1 },
+  ).lean();
+  const nowMs = Date.now();
+  if (
+    !room ||
+    (room.phase !== "entry" && room.phase !== "active") ||
+    room.closesAt.getTime() <= nowMs
+  ) {
+    throw new CastEngineError(
+      "WINDOW_CLOSED",
+      `Room ${active.poolId} is no longer accepting casts ` +
+        `(phase=${room?.phase ?? "missing"}, closesAt=${room?.closesAt?.toISOString() ?? "—"})`,
+    );
+  }
+
   const baitInitial = baitAmountForDeposit(active.amount);
   const tier = Math.min(4, Math.max(1, Math.round(active.amount / 0.5)));
 

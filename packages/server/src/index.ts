@@ -59,7 +59,8 @@ async function buildServer() {
     global: true,
     max: 600,
     timeWindow: "1 minute",
-    allowList: (req) => req.url === "/health",
+    allowList: (req) =>
+      req.url === "/health" || req.url === "/healthz/keeper",
     redis: server.redis,
     nameSpace: "hooked-rl:",
     addHeaders: {

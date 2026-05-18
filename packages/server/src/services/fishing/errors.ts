@@ -12,7 +12,8 @@ export type CastEngineErrorCode =
   | "NO_CAST_TO_RESOLVE"
   | "CANCEL_GRACE_EXPIRED"
   | "CATCHES_FULL"
-  | "CAST_RACE";
+  | "CAST_RACE"
+  | "WINDOW_CLOSED";
 
 export class CastEngineError extends Error {
   constructor(
