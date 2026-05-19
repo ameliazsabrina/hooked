@@ -23,7 +23,9 @@ export const INPUT_SAMPLE_HZ = 20;
 // origin (first input's `t_ms`), then step physics up to `wallSinceOriginS - INPUT_DELAY_S`.
 // Aligning the input timeline (the only non-deterministic axis; fish RNG is seeded)
 // keeps both simulations bit-for-bit. Sized to absorb regional one-way latency + a tick boundary.
-export const INPUT_DELAY_MS = 60;
+// At 60ms a single mobile-RTT transition got silently clamped server-side and forked the
+// timeline for the rest of the cast; 150ms tracks the client keep-alive cadence.
+export const INPUT_DELAY_MS = 150;
 export const INPUT_DELAY_S = INPUT_DELAY_MS / 1000;
 
 export interface TimedInput {
