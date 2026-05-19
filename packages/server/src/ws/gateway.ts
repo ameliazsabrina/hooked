@@ -206,20 +206,29 @@ interface Socket {
 
 const sockets = new Map<string, Socket>();
 const socketsByWallet = new Map<string, Set<string>>();
-const pendingNonces = new Map<string, number>();
 
+// Nonce store lives in Redis, not process memory: the WS upgrade and the
+// preceding /ws/claim-nonce HTTP call may land on different Fly machines
+// when min_machines_running > 1 or during rolling deploys. In-memory state
+// produced split-brain "unknown or expired nonce" failures and triggered
+// the client's auth_failed → re-sign → loop.
 const NONCE_TTL_MS = 2 * 60 * 1000;
 
-function registerNonce(wallet: string, nonce: string): void {
-  pendingNonces.set(`${wallet}:${nonce}`, Date.now());
+function nonceRedisKey(wallet: string, nonce: string): string {
+  return `ws:nonce:${wallet}:${nonce}`;
 }
 
-function consumeNonce(wallet: string, nonce: string): boolean {
-  const key = `${wallet}:${nonce}`;
-  const stamp = pendingNonces.get(key);
-  if (!stamp) return false;
-  pendingNonces.delete(key);
-  return Date.now() - stamp < NONCE_TTL_MS;
+async function registerNonce(wallet: string, nonce: string): Promise<void> {
+  if (!redisRef) throw new Error("[gateway] redis not initialized");
+  await redisRef.set(nonceRedisKey(wallet, nonce), "1", "PX", NONCE_TTL_MS);
+}
+
+async function consumeNonce(wallet: string, nonce: string): Promise<boolean> {
+  if (!redisRef) return false;
+  // GETDEL is atomic in Redis 6.2+: exactly one consumer wins, no
+  // races between competing WS upgrades reusing the same nonce.
+  const value = await redisRef.getdel(nonceRedisKey(wallet, nonce));
+  return value === "1";
 }
 
 function verifySignature(
@@ -805,7 +814,7 @@ export default fp(async (fastify) => {
         reply.code(400).send({ error: "invalid wallet" });
         return reply;
       }
-      registerNonce(wallet, nonce);
+      await registerNonce(wallet, nonce);
       reply.send({ ok: true });
       return reply;
     },
@@ -867,7 +876,7 @@ export default fp(async (fastify) => {
       }
     }, PHYSICS_TICK_MS);
 
-    raw.on("message", (data: Buffer) => {
+    raw.on("message", async (data: Buffer) => {
       let msg: ClientMessage;
       try {
         msg = JSON.parse(data.toString()) as ClientMessage;
@@ -889,7 +898,7 @@ export default fp(async (fastify) => {
             );
             safeSend(socket, { type: "auth_failed", reason });
           };
-          if (!consumeNonce(msg.wallet, msg.nonce)) {
+          if (!(await consumeNonce(msg.wallet, msg.nonce))) {
             authFail("unknown or expired nonce");
             return;
           }
