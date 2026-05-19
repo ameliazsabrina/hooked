@@ -114,7 +114,9 @@ export async function finalizeRoomLeaderboardOnChain(opts: {
 
     // BN / bigint / undefined across IDL versions.
     const onChainScore = (() => {
-      const raw = (entry as { score?: unknown }).score;
+      const raw =
+        (entry as { finalScore?: unknown; score?: unknown }).finalScore ??
+        (entry as { finalScore?: unknown; score?: unknown }).score;
       if (raw === undefined || raw === null) return 0n;
       if (typeof raw === "bigint") return raw;
       if (typeof raw === "number") return BigInt(raw);

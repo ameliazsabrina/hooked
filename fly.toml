@@ -1,0 +1,57 @@
+# Fly.io config for the Hooked Fastify + WebSocket game server.
+# Primary region is Singapore (sin) to put the authoritative game loop next to
+# our SEA player base — that single move is worth more than every in-code
+# latency hack combined.
+
+app = "hooked-server"
+primary_region = "sin"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  NODE_ENV = "production"
+  HOST = "0.0.0.0"
+  PORT = "3001"
+  # Everything else (MONGODB_URI, REDIS_URL, SOLANA_RPC_URL, *_KEYPAIR, etc.)
+  # is set via `fly secrets set` — never commit them here.
+
+[http_service]
+  internal_port = 3001
+  force_https = true
+  # Game server: never scale to zero. A cold start mid-cast is a lost session
+  # and (because SOL is staked) a player-trust event.
+  auto_stop_machines = false
+  auto_start_machines = false
+  min_machines_running = 1
+  processes = ["app"]
+
+  # WebSocket connections are long-lived — count concurrency by connection,
+  # not by request. Tune `hard_limit` from real load; 500 is a safe ceiling
+  # for one shared-cpu-2x machine running the fishing loop + tRPC.
+  [http_service.concurrency]
+    type = "connections"
+    soft_limit = 350
+    hard_limit = 500
+
+  [[http_service.checks]]
+    grace_period = "20s"
+    interval = "15s"
+    method = "GET"
+    timeout = "5s"
+    path = "/health"
+
+# Single process group for now. When we split the BullMQ payout worker off the
+# web dyno, add a `worker` process here and give it its own VM.
+[processes]
+  app = "node dist/index.js"
+
+[[vm]]
+  size = "shared-cpu-2x"
+  memory = "1gb"
+  processes = ["app"]
+
+# Deploy strategy: rolling so at least one machine always serves WS traffic.
+# Bluegreen would force-disconnect every player on every deploy.
+[deploy]
+  strategy = "rolling"

@@ -1,10 +1,11 @@
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
 import { adminSessionProcedure, router } from "../trpc.js";
-import { FishingSession, Room } from "../../db/schema.js";
+import { FishingSession, Player, Room } from "../../db/schema.js";
 import {
   getRoomsProgram,
   getRoomPda,
+  getRoomVaultPda,
 } from "../../solana/roomsProgram.js";
 
 const PHASE_VALUES = ["entry", "active", "settling", "closed"] as const;
@@ -55,13 +56,64 @@ type TxRow = {
   at: Date | null;
   signature: string | null;
   wallet?: string | null;
+  walletName?: string | null;
   lamports?: number | null;
   notes?: string | null;
 };
 
-function buildTxTrail(room: LeanRoom): TxRow[] {
+const DEFAULT_PUBKEY = "11111111111111111111111111111111";
+const WINNER_YIELD_BPS = [4000, 2000, 1000] as const;
+const BPS_SCALE = 10_000;
+
+function asBase58(value: unknown): string | null {
+  if (!value) return null;
+  if (
+    typeof (value as { toBase58?: () => string }).toBase58 === "function"
+  ) {
+    return (value as { toBase58: () => string }).toBase58();
+  }
+  if (typeof value === "string") return value;
+  return null;
+}
+
+function asLamportsNumber(value: unknown): number | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "number") return value;
+  if (typeof value === "bigint") return Number(value);
+  if (typeof value === "string") {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : null;
+  }
+  if (typeof (value as { toString?: () => string }).toString === "function") {
+    const n = Number((value as { toString: () => string }).toString());
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
+
+function serializeAnchorAccount(value: unknown): unknown {
+  return JSON.parse(
+    JSON.stringify(value, (_, v) =>
+      typeof v === "bigint"
+        ? v.toString()
+        : v?.toBase58 && typeof v.toBase58 === "function"
+          ? v.toBase58()
+          : v,
+    ),
+  );
+}
+
+function playerDisplayName(wallet: string, namesByWallet: Map<string, string>) {
+  return namesByWallet.get(wallet) ?? "Anonymous";
+}
+
+function buildTxTrail(
+  room: LeanRoom,
+  playersOverride?: Array<Record<string, unknown>>,
+): TxRow[] {
   const rows: TxRow[] = [];
   const lp = (room.lp ?? {}) as Record<string, unknown>;
+  const players = playersOverride ?? room.players ?? [];
 
   rows.push({
     kind: "create_room",
@@ -72,12 +124,13 @@ function buildTxTrail(room: LeanRoom): TxRow[] {
     notes: `room ${room.roomId} created`,
   });
 
-  for (const p of room.players ?? []) {
+  for (const p of players) {
     rows.push({
       kind: "deposit",
       at: (p.depositedAt as Date | null) ?? null,
       signature: (p.depositTxSignature as string | null) ?? null,
       wallet: (p.walletAddress as string) ?? null,
+      walletName: (p.displayName as string | null) ?? null,
       lamports: Math.round(((p.deposit as number) ?? 0) * 1e9),
     });
   }
@@ -128,11 +181,17 @@ function buildTxTrail(room: LeanRoom): TxRow[] {
     });
   }
   if (lp.depositYieldTxSignature) {
+    const deployedLamports = asLamportsNumber(lp.deployedLamports);
+    const realizedYieldLamports = asLamportsNumber(lp.realizedYieldLamports) ?? 0;
+    const vaultReturnLamports =
+      deployedLamports !== null
+        ? deployedLamports + realizedYieldLamports
+        : asLamportsNumber(lp.exitedLamports);
     rows.push({
       kind: "deposit_yield",
       at: (lp.exitedAt as Date | null) ?? null,
       signature: lp.depositYieldTxSignature as string,
-      lamports: (lp.exitedLamports as number | null) ?? null,
+      lamports: vaultReturnLamports,
       notes: `principal + yield → vault (realized yield: ${lp.realizedYieldLamports ?? 0})`,
     });
   }
@@ -146,14 +205,22 @@ function buildTxTrail(room: LeanRoom): TxRow[] {
     });
   }
 
-  for (const p of room.players ?? []) {
+  for (const p of players) {
     if ((p.returned as boolean) === true) {
+      const principalLamports = Math.round(((p.deposit as number) ?? 0) * 1e9);
+      const yieldAwardedLamports =
+        asLamportsNumber(p.yieldAwardedLamports) ?? 0;
       rows.push({
         kind: "return_principal",
         at: (p.returnedAt as Date | null) ?? null,
         signature: (p.returnTxSignature as string | null) ?? null,
         wallet: (p.walletAddress as string) ?? null,
-        lamports: Math.round(((p.deposit as number) ?? 0) * 1e9),
+        walletName: (p.displayName as string | null) ?? null,
+        lamports: principalLamports + yieldAwardedLamports,
+        notes:
+          yieldAwardedLamports > 0
+            ? `principal + yield (${yieldAwardedLamports} lamports)`
+            : "principal",
       });
     }
   }
@@ -270,6 +337,17 @@ export const adminRoomsRouter = router({
       }
       const room = doc as unknown as LeanRoom;
 
+      const rawPlayers = (room.players ?? []) as Array<{
+        walletAddress: string;
+        deposit: number;
+        depositTxSignature: string;
+        depositedAt: Date;
+        returned: boolean;
+        returnTxSignature: string | null;
+        returnedAt: Date | null;
+      }>;
+      const playerWallets = rawPlayers.map((p) => p.walletAddress);
+
       const lp = (room.lp ?? null) as null | {
         status?: string | null;
         positionPubkey?: string | null;
@@ -297,25 +375,86 @@ export const adminRoomsRouter = router({
         depositYieldTxSignature?: string | null;
       };
 
-      const players = ((room.players ?? []) as Array<{
-        walletAddress: string;
-        deposit: number;
-        depositTxSignature: string;
-        depositedAt: Date;
-        returned: boolean;
-        returnTxSignature: string | null;
-        returnedAt: Date | null;
-      }>).map((p) => ({
-        walletAddress: p.walletAddress,
-        deposit: p.deposit,
-        depositTxSignature: p.depositTxSignature,
-        depositedAt: p.depositedAt,
-        returned: p.returned,
-        returnTxSignature: p.returnTxSignature ?? null,
-        returnedAt: p.returnedAt ?? null,
-      }));
+      let onChainRoom: unknown = null;
+      let onChainEntries: unknown[] = [];
+      const onChainEntriesByWallet = new Map<string, Record<string, unknown>>();
+      let onChainError: string | null = null;
+      let roomVaultAddress: string | null = null;
+      try {
+        const roomPda = room.onChainPoolId
+          ? getRoomPda(BigInt(room.onChainPoolId))
+          : null;
+        if (roomPda) {
+          roomVaultAddress = getRoomVaultPda(roomPda).toBase58();
+        }
 
-      const winners = ((room.winners ?? []) as Array<{
+        const loaded = getRoomsProgram();
+        if (!loaded || !roomPda) {
+          onChainError = !loaded
+            ? "TREASURY_KEYPAIR not configured"
+            : "no on-chain pool id";
+        } else {
+          const fetchedRoom = await loaded.program.account.room.fetchNullable(
+            roomPda,
+          );
+          onChainRoom = fetchedRoom
+            ? serializeAnchorAccount(fetchedRoom)
+            : null;
+          if (!fetchedRoom) {
+            onChainError = "on-chain room account missing";
+          } else {
+            const entries = await loaded.program.account.roomEntry.all([
+              { memcmp: { offset: 9, bytes: roomPda.toBase58() } },
+            ]);
+            onChainEntries = entries.map((e) => ({
+              pubkey: e.publicKey.toBase58(),
+              account: serializeAnchorAccount(e.account),
+            }));
+            for (const e of onChainEntries as Array<{
+              account?: Record<string, unknown>;
+            }>) {
+              const authority = asBase58(e.account?.authority);
+              if (authority && e.account) {
+                onChainEntriesByWallet.set(authority, e.account);
+              }
+            }
+          }
+        }
+      } catch (err) {
+        onChainError = (err as Error).message;
+      }
+
+      const playerDocs = playerWallets.length
+        ? await Player.find(
+            { walletAddress: { $in: playerWallets } },
+            { walletAddress: 1, nickname: 1 },
+          ).lean()
+        : [];
+      const namesByWallet = new Map(
+        playerDocs.map((p) => [
+          p.walletAddress,
+          (p.nickname as string | null) ?? "Anonymous",
+        ]),
+      );
+
+      const players = rawPlayers.map((p) => {
+        const entry = onChainEntriesByWallet.get(p.walletAddress);
+        return {
+          walletAddress: p.walletAddress,
+          displayName: playerDisplayName(p.walletAddress, namesByWallet),
+          deposit: p.deposit,
+          depositTxSignature: p.depositTxSignature,
+          depositedAt: p.depositedAt,
+          returned: p.returned,
+          returnTxSignature: p.returnTxSignature ?? null,
+          returnedAt: p.returnedAt ?? null,
+          finalScore: asLamportsNumber(entry?.finalScore),
+          finalRank: asLamportsNumber(entry?.finalRank),
+          yieldAwardedLamports: asLamportsNumber(entry?.yieldAwardedLamports),
+        };
+      });
+
+      const dbWinners = ((room.winners ?? []) as Array<{
         rank: number;
         walletAddress: string;
         displayName: string;
@@ -326,47 +465,41 @@ export const adminRoomsRouter = router({
         displayName: w.displayName,
         prizeSol: w.prizeSol,
       }));
+      const onChainWinners =
+        dbWinners.length === 0 && onChainRoom
+          ? [
+              (onChainRoom as Record<string, unknown>).firstPlace,
+              (onChainRoom as Record<string, unknown>).secondPlace,
+              (onChainRoom as Record<string, unknown>).thirdPlace,
+            ]
+              .map(asBase58)
+              .map((walletAddress, i) => {
+                if (!walletAddress || walletAddress === DEFAULT_PUBKEY) {
+                  return null;
+                }
+                const totalYieldLamports =
+                  asLamportsNumber(
+                    (onChainRoom as Record<string, unknown>).yieldLamports,
+                  ) ?? lp?.realizedYieldLamports ?? 0;
+                const prizeLamports = Math.floor(
+                  (totalYieldLamports * WINNER_YIELD_BPS[i]) / BPS_SCALE,
+                );
+                return {
+                  rank: i + 1,
+                  walletAddress,
+                  displayName: playerDisplayName(walletAddress, namesByWallet),
+                  prizeSol: prizeLamports / 1e9,
+                };
+              })
+              .filter((w): w is NonNullable<typeof w> => w !== null)
+          : [];
+      const winners = dbWinners.length > 0 ? dbWinners : onChainWinners;
 
-      let onChainRoom: unknown = null;
-      let onChainEntries: unknown[] = [];
-      let onChainError: string | null = null;
-      try {
-        const loaded = getRoomsProgram();
-        if (!loaded || !room.onChainPoolId) {
-          onChainError = !loaded
-            ? "TREASURY_KEYPAIR not configured"
-            : "no on-chain pool id";
-        } else {
-          const roomPda = getRoomPda(BigInt(room.onChainPoolId));
-          onChainRoom = await loaded.program.account.room.fetchNullable(
-            roomPda,
-          );
-          if (!onChainRoom) {
-            onChainError = "on-chain room account missing";
-          } else {
-            const entries = await loaded.program.account.roomEntry.all([
-              { memcmp: { offset: 8, bytes: roomPda.toBase58() } },
-            ]);
-            onChainEntries = entries.map((e) => ({
-              pubkey: e.publicKey.toBase58(),
-              account: JSON.parse(
-                JSON.stringify(e.account, (_, v) =>
-                  typeof v === "bigint" ? v.toString() : v,
-                ),
-              ),
-            }));
-          }
-        }
-      } catch (err) {
-        onChainError = (err as Error).message;
-      }
-
-      const txTrail = buildTxTrail(room);
+      const txTrail = buildTxTrail(room, players);
 
       // Score bridge txs: each player's session writes a memo to
       // hooked_rooms.update_room_entry_score after commit. Surface them
       // alongside the room so admins can confirm scores landed on-chain.
-      const playerWallets = players.map((p) => p.walletAddress);
       const scoreBridges = playerWallets.length
         ? await FishingSession.find({
             walletAddress: { $in: playerWallets },
@@ -398,6 +531,7 @@ export const adminRoomsRouter = router({
           realPlayerCount: room.realPlayerCount,
           onChainPoolId: room.onChainPoolId,
           onChainPoolAddress: room.onChainPoolAddress,
+          roomVaultAddress,
           totalYieldSol: room.totalYieldSol,
           createdByAdmin: room.createdByAdmin,
           overflowTriggered: room.overflowTriggered ?? false,
