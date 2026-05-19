@@ -21,7 +21,12 @@ import App from "./app.tsx";
 
 function Root() {
   const endpoint = useMemo(() => {
-    const rawCluster = import.meta.env.VITE_SOLANA_CLUSTER ?? "devnet";
+    const rawCluster = import.meta.env.VITE_SOLANA_CLUSTER;
+    if (!rawCluster) {
+      throw new Error(
+        "VITE_SOLANA_CLUSTER is not set. Configure it in the build environment (e.g. 'mainnet-beta')."
+      );
+    }
     const cluster = (rawCluster === "mainnet" ? "mainnet-beta" : rawCluster) as Cluster;
     const heliusKey = import.meta.env.VITE_HELIUS_API_KEY;
     if (heliusKey) {
