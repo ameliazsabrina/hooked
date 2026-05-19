@@ -1,0 +1,22 @@
+# Vercel only builds the client. Skip everything it doesn't need to read.
+# pnpm-workspace.yaml + lockfile + shared MUST be uploaded (the build
+# resolves @hooked/shared as a workspace dep), so they are NOT ignored.
+
+# Server-side workspaces — Vercel never runs these.
+packages/server/dist
+packages/server/node_modules
+packages/server/.env*
+
+# Anchor program build artifacts — large, irrelevant for the client build.
+packages/programs/target
+packages/programs/node_modules
+packages/programs/.surfpool
+
+# Design files.
+design
+
+# Local-only.
+.env
+.env.local
+node_modules
+.DS_Store
