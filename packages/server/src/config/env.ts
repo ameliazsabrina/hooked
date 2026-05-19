@@ -12,10 +12,7 @@ const envSchema = z.object({
   MONGODB_URI: z.string().startsWith("mongodb"),
   CLIENT_URL: z.string().url().default("http://localhost:5173"),
   ADMIN_CLIENT_URL: z.string().url().default("http://localhost:3000"),
-  // Public origin the API is reachable on. Used to build absolute URLs the
-  // admin dashboard / player client can load over HTTP (e.g. apex fish
-  // images served from `/admin/apex-fish/:id/image`). Default suits local
-  // dev where the server listens on PORT 3001; override in deploy envs.
+  // Used to build absolute URLs for assets like apex fish images.
   SERVER_PUBLIC_URL: z.string().url().default("http://localhost:3001"),
   HELIUS_API_KEY: z.string().optional(),
   REDIS_URL: z.string().default("redis://localhost:6379"),
@@ -40,60 +37,39 @@ const envSchema = z.object({
   ER_WEBHOOK_SECRET: z.string().default("dev-er-webhook-secret"),
   KEEPER_KEYPAIR: z.string().optional(),
   GATEWAY_KEYPAIR: z.string().optional(),
-  // Server-held admin keypair for on-chain admin instructions (e.g. set_event,
-  // update_program_config). MUST match the `admin` pubkey stored on the
-  // ProgramConfig PDA. Distinct from `ADMIN_WALLETS` which authorizes who can
-  // *trigger* admin endpoints over tRPC.
+  // Must match the `admin` pubkey on the ProgramConfig PDA. ADMIN_WALLETS
+  // gates tRPC endpoints; this gates on-chain admin instructions.
   ADMIN_KEYPAIR: z.string().optional(),
 
-  // LP integration (Meteora DLMM SOL/USDC). Off when FEATURES_LP_ENABLED=false;
-  // when enabled, LP_MANAGER_KEYPAIR must be set and the manager wallet must
-  // hold at least IL_BUFFER_LAMPORTS_MIN to absorb impermanent loss.
   LP_MANAGER_KEYPAIR: z.string().optional(),
-  // Meteora DLMM SOL/USDC pool address. Default below is a USDC/USDT pool —
-  // PLACEHOLDER ONLY so the schema parses in dev. Override in .env with the
-  // real SOL/USDC address from https://dlmm.datapi.meteora.ag/pair/all
-  // (filter SOL/USDC, pick a high-volume bin step like 25 or 100).
-  // Booting with FEATURES_LP_ENABLED=true on the placeholder will refuse to
-  // deploy (validated in lpManager).
+  // PLACEHOLDER — must be overridden with the real SOL/USDC pool address.
+  // lpManager refuses to deploy on the placeholder.
   METEORA_POOL_ADDRESS: z
     .string()
     .default("ARwi1S4DaiTG5DX7S4M4ZsrXqpMD1MrTmbu9ue2tpmEq"),
-  // Canonical mainnet USDC mint. Override only if running against a devnet
-  // test mint or a non-USDC quote token.
   USDC_MINT_ADDRESS: z
     .string()
     .default("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"),
   JUPITER_API_URL: z.string().default("https://quote-api.jup.ag/v6"),
-  // Minimum buffer balance LP_MANAGER must hold (in lamports) before
-  // the deploy job is allowed to run. Trips kill switch when below.
+  // Minimum LP_MANAGER buffer (lamports) before deploy is allowed.
   IL_BUFFER_LAMPORTS_MIN: z.coerce
     .number()
     .int()
     .nonnegative()
     .default(500_000_000),
-  // Hard kill switch — flip to true to halt all new LP deployments without
-  // touching deploy/exit code. Existing positions still get exited normally.
   LP_KILL_SWITCH: z
     .enum(["true", "false"])
     .default("false")
     .transform((v) => v === "true"),
-  // Dry-run mode for devnet/testing: still calls withdraw_to_lp_manager to
-  // move SOL out of room_vault, but skips DLMM/Jupiter calls and synthesizes
-  // a fake yield (0 by default). Set to a positive lamport count to simulate
-  // a winning cycle. Useful because Meteora DLMM is mainnet-only.
+  // Skips DLMM/Jupiter and synthesizes yield for devnet (Meteora is mainnet-only).
   LP_DRY_RUN: z
     .enum(["true", "false"])
     .default("true")
     .transform((v) => v === "true"),
   LP_DRY_RUN_YIELD_LAMPORTS: z.coerce.number().int().nonnegative().default(0),
-  // Slippage tolerance for Jupiter swaps (basis points, e.g. 50 = 0.5%).
   LP_SWAP_SLIPPAGE_BPS: z.coerce.number().int().nonnegative().default(50),
-  // Jupiter HTTP reliability knobs. Retries apply only to the quote and
-  // swap-build calls (both are idempotent GET/POST without side effects).
-  // The on-chain send/confirm step is NEVER retried — once a tx is signed
-  // and submitted it may have landed even if confirmation timed out, so
-  // re-sending could double-spend the LP_MANAGER buffer.
+  // Retries only the idempotent quote/build calls. On-chain send/confirm is
+  // NEVER retried — re-sending a signed tx could double-spend the buffer.
   LP_JUPITER_RETRY_ATTEMPTS: z.coerce.number().int().min(1).default(3),
   LP_JUPITER_RETRY_BASE_DELAY_MS: z.coerce
     .number()
@@ -106,57 +82,26 @@ const envSchema = z.object({
     .nonnegative()
     .default(5_000),
   LP_JUPITER_RETRY_JITTER_PCT: z.coerce.number().min(0).max(1).default(0.2),
-  // Per-call HTTP timeout for Jupiter quote/swap-build (ms). The wall-clock
-  // budget per swap attempt is roughly 2× this (quote + build), plus the
-  // chain send + confirm round-trip. Tune up if you see frequent timeouts
-  // from slow Jupiter responses; down if you'd rather fail fast.
   LP_JUPITER_TIMEOUT_MS: z.coerce.number().int().positive().default(10_000),
-  // Outer-loop retry attempts for the SOL/USDC swap call from lpManager.
-  // Specifically covers the `send_failed` kind — RPC rejected submission,
-  // blockhash expired, sim failed mid-deploy — which lpJupiterSwap.executeSwap
-  // intentionally does NOT retry to avoid double-spend. lpManager re-runs
-  // the whole quote→build→send chain (each attempt gets a fresh blockhash)
-  // because no signature was issued. `confirm_failed` is NOT retried here
-  // either: a confirmed-with-err response means the tx landed, and the
-  // outer caller would need to verify on-chain state before re-attempting.
+  // Retries on `send_failed` only — covers RPC-rejected submission with no
+  // signature issued, so re-running quote→build→send is safe.
+  // `confirm_failed` is NEVER retried: tx may have landed.
   LP_SWAP_SEND_RETRY_ATTEMPTS: z.coerce.number().int().min(1).default(2),
-  // Hours before closes_at to fire the lpExit job.
   LP_EXIT_HOURS_BEFORE_CLOSE: z.coerce.number().nonnegative().default(12),
-  // Meteora DLMM strategy used when opening a position. Matches the
-  // `StrategyType` enum exported by `@meteora-ag/dlmm`. Common values:
-  //   - "Spot"   uniform liquidity across the range — max fee accrual,
-  //              most sensitive to price drift. Default; preserves prior
-  //              behavior.
-  //   - "Curve"  concentrated at the active bin — even more fee-dense
-  //              when price stays put, worse if it drifts.
-  //   - "BidAsk" weighted at the edges of the range — less fee in calm
-  //              markets, smoother re-centering when price moves.
-  // The Meteora SDK rejects unknown values at runtime, so a typo here
-  // surfaces as a clear error on the first deploy attempt rather than
-  // silently picking a default.
+  // Meteora `StrategyType`: "Spot" | "Curve" | "BidAsk". SDK rejects unknown.
   LP_STRATEGY_TYPE: z.string().default("Spot"),
-  // Number of DLMM bins on each side of the active bin. Wider range =
-  // less fee per unit of liquidity but less sensitivity to price drift.
-  // The historical default was ±10.
   LP_BIN_RANGE: z.coerce.number().int().positive().default(10),
-  // Slippage tolerance passed to Meteora's `initializePositionAndAddLiquidityByStrategy`
-  // (percent, where 1 = 1%). Raise to 3–5 for volatile pools to reduce
-  // "deposit failed" reverts; lower to tighten execution.
+  // Percent (1 = 1%) for Meteora's initializePositionAndAddLiquidityByStrategy.
   LP_DEPLOY_SLIPPAGE_PCT: z.coerce.number().nonnegative().default(1),
-  // Fraction of deployed SOL to keep as the SOL leg of the LP position,
-  // in basis points. The remainder is swapped to USDC before opening.
-  // 5000 = 50/50 SOL/USDC (default and historical behavior). Lower when
-  // the pool's active bin price is far from 1:1 to reduce swap slippage.
+  // SOL leg basis points; remainder swaps to USDC. 5000 = 50/50.
   LP_SOL_USDC_SPLIT_BPS: z.coerce
     .number()
     .int()
     .min(0)
     .max(10_000)
     .default(5_000),
-  // 64-char hex string (32 bytes) used as the HMAC key in the off-chain
-  // fishing RNG. Rotated daily in production (Phase 5 audit layer); a single
-  // long-lived value is acceptable for dev. If absent, cast.initiate fails
-  // with a clear error rather than silently using a weak default.
+  // 32-byte HMAC key for off-chain fishing RNG. Rotated daily in prod.
+  // Absent → cast.initiate fails clearly rather than using a weak default.
   FISHING_DAILY_SEED_HEX: z
     .string()
     .regex(
@@ -164,22 +109,11 @@ const envSchema = z.object({
       "FISHING_DAILY_SEED_HEX must be 64 hex chars (32 bytes)",
     )
     .optional(),
-  // Master cutover flag for the off-chain fishing engine. When true, the WS
-  // gateway routes cast/resolve/cancel through services/fishing/* (DB only);
-  // the on-chain hooked_fishing program is no longer touched. Default true
-  // post-Phase-6: the legacy on-chain branches in gateway.ts have been
-  // removed. The flag is kept as a kill-switch in case we need to short-
-  // circuit gameplay during an incident; flipping it false just disables
-  // casting since there is no longer a chain-backed fallback.
+  // Kept as a kill-switch — false disables casting (no chain-backed fallback).
   FISHING_OFFCHAIN: z
     .enum(["true", "false"])
     .default("true")
     .transform((v) => v === "true"),
-  // Filesystem path to the apex-fish PNG directory served by the player
-  // client. Used by `services/fishing/apexCatalog.ts` to enumerate which
-  // fish the admin can pick from for an event. Default resolves to the
-  // sibling client package's public folder relative to the server source;
-  // override in production where the client is deployed separately.
   APEX_FISH_DIR: z.string().optional(),
 });
 
@@ -195,9 +129,8 @@ export function isAdminWallet(address: string): boolean {
   return adminWalletSet.has(address);
 }
 
-// Normalize via URL.origin so a trailing slash or path in the env value
-// (e.g. CLIENT_URL=https://hooked.fish/) doesn't silently mismatch the
-// scheme://host[:port] form that browsers send in the Origin header.
+// URL.origin strips trailing slash/path so the env value matches the
+// scheme://host[:port] form browsers send in the Origin header.
 function normalizeOrigin(value: string): string {
   try {
     return new URL(value).origin;
@@ -212,10 +145,8 @@ const allowedOriginSet = new Set(
     .map(normalizeOrigin),
 );
 
-// Match CORS semantics: missing Origin header is allowed (covers non-browser
-// clients like curl/wscat and same-origin requests that omit it). Browser-only
-// CSWSH attacks always send an Origin header, so the explicit-mismatch check
-// is what closes the hole.
+// Missing Origin allowed (non-browser clients). Browser CSWSH always sends
+// Origin, so the explicit-mismatch check is what closes the hole.
 export function isAllowedOrigin(
   origin: string | string[] | undefined,
 ): boolean {

@@ -24,11 +24,7 @@ export interface ScoreBridgeJobData {
   sessionId: string;
 }
 
-/**
- * Sentinel value persisted to `chainScoreTxSignature` when the bridge has
- * intentionally short-circuited (zero score, no keeper, etc). Keeps the
- * idempotency check simple — non-null means "don't retry".
- */
+/** Persisted to chainScoreTxSignature on intentional skip — non-null = don't retry. */
 const SKIP_SENTINEL_PREFIX = "skipped:";
 
 export interface ScoreBridgeOutcome {
@@ -37,10 +33,7 @@ export interface ScoreBridgeOutcome {
   reason: string | null;
 }
 
-/**
- * Submitter abstraction so tests can drive the processor without a live
- * Solana connection. Production wires `submitOnChain` from this module.
- */
+/** Injection seam — prod uses submitOnChain. */
 export interface ScoreBridgeSubmitter {
   submit(input: {
     keeper: Keypair;
@@ -52,11 +45,7 @@ export interface ScoreBridgeSubmitter {
   }): Promise<string>;
 }
 
-/**
- * Production submitter: builds an `update_room_entry_score(scoreDelta)` tx
- * with a memo instruction in the same transaction so the audit context
- * (sessionId + merkleRoot) is committed atomically with the score push.
- */
+/** Memo + score update in one tx so audit context commits atomically. */
 export const submitOnChain: ScoreBridgeSubmitter = {
   async submit(input) {
     const programResult = getRoomsProgram(input.keeper);
@@ -76,8 +65,6 @@ export const submitOnChain: ScoreBridgeSubmitter = {
       .instruction();
 
     const memoIx = buildMemoInstruction(input.memo, input.keeper.publicKey);
-    // Modest priority fee so the bridge tx lands under congestion. The
-    // micro-lamport unit budget is conservative — well under 1% of one tx.
     const priorityIx = ComputeBudgetProgram.setComputeUnitPrice({
       microLamports: 1_000,
     });
@@ -106,23 +93,11 @@ export const submitOnChain: ScoreBridgeSubmitter = {
 
 export interface ProcessScoreBridgeDeps {
   submitter?: ScoreBridgeSubmitter;
-  /**
-   * Loader for the keeper keypair. Injected so tests aren't affected by
-   * the module-level cache in `loadKeeperKeypair` (the cache returns
-   * stale results across test cases when env vars change).
-   */
+  /** Injected to bypass loadKeeperKeypair's stale module-level cache in tests. */
   keeperLoader?: () => Keypair | null;
 }
 
-/**
- * Process a single score-bridge job. Pure of BullMQ — tests call this
- * directly with injected deps. Returns an outcome describing what happened
- * so callers (logs, alerts) don't have to inspect DB state.
- *
- * Idempotency: a session with `chainScoreTxSignature` already set returns
- * `already-bridged` without touching chain. Skip sentinels (zero-score, no
- * keeper, etc) are treated the same.
- */
+/** Idempotent: non-null chainScoreTxSignature short-circuits with already-bridged. */
 export async function processScoreBridge(
   sessionId: string,
   deps: ProcessScoreBridgeDeps = {},
@@ -149,8 +124,6 @@ export async function processScoreBridge(
   }
 
   if (session.sessionScore === 0) {
-    // Mark as bridged with a sentinel so we don't keep re-queueing zero-score
-    // sessions every time the queue scans.
     const sentinel = `${SKIP_SENTINEL_PREFIX}zero-score`;
     await FishingSession.updateOne(
       { _id: session._id, chainScoreTxSignature: null },
@@ -216,9 +189,7 @@ export async function processScoreBridge(
     memo,
   });
 
-  // Conditional update so two parallel workers can't double-credit if both
-  // somehow win the chain race (manifests as the second submission failing
-  // its own conditional update — sentinel value preserves the first signature).
+  // Prevents double-credit on parallel-worker chain races.
   const persisted = await FishingSession.findOneAndUpdate(
     { _id: session._id, chainScoreTxSignature: null },
     {
@@ -239,10 +210,7 @@ export async function processScoreBridge(
   return { status: "submitted", signature, reason: null };
 }
 
-/**
- * BullMQ worker factory. Job key = sessionId for natural dedupe (BullMQ
- * coalesces same-key jobs at the queue level too).
- */
+/** Job key = sessionId for natural dedupe. */
 export function createScoreBridgeWorker(connection: ConnectionOptions): Worker {
   const worker = new Worker<ScoreBridgeJobData>(
     SCORE_BRIDGE_QUEUE_NAME,

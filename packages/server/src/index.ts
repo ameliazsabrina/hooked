@@ -53,8 +53,6 @@ async function buildServer() {
 
   await server.register(redisPlugin);
 
-  // Global HTTP flood protection. Per-IP by default; webhook and tRPC auth
-  // paths get tighter limits via route-level config below.
   await server.register(rateLimit, {
     global: true,
     max: 600,
@@ -82,8 +80,6 @@ async function buildServer() {
       router: appRouter,
       createContext,
       onError: ({ error, path, ctx }) => {
-        // Log server-side with enough detail to debug; the client only sees the
-        // sanitized TRPCError shape.
         if (error.code === "INTERNAL_SERVER_ERROR") {
           server.log.error(
             { err: error, path, walletAddress: ctx?.walletAddress ?? null },
@@ -94,9 +90,7 @@ async function buildServer() {
     } satisfies FastifyTRPCPluginOptions<AppRouter>["trpcOptions"],
   });
 
-  // Central error handler — tRPC's plugin handles its own errors, so this
-  // mainly catches thrown errors from plain HTTP routes (webhook, WS nonce,
-  // health). Clients receive { error, requestId }; server logs hold the detail.
+  // Catches non-tRPC errors (webhook, WS nonce, health).
   server.setErrorHandler((err: FastifyError, req, reply) => {
     if (err instanceof TRPCError) {
       reply.code(400).send({ error: err.message, requestId: req.id });
@@ -113,12 +107,8 @@ async function buildServer() {
 
   registerJobs(env.REDIS_URL);
 
-  // BullMQ's `every` schedulers and the `0 2,14 * * *` cron only fire at
-  // their next future boundary — they don't backfill missed runs. So a
-  // server restart that crosses 02:00 or 14:00 UTC, or a fresh deploy,
-  // would otherwise leave players staring at "no room for entry" until
-  // the next boundary. Run the watchdog once on boot so it self-heals
-  // immediately if no joinable room exists.
+  // BullMQ schedulers don't backfill missed runs across a restart — run
+  // the watchdog once on boot so deployments crossing 02:00/14:00 UTC heal.
   runRoomLifecycleTick((msg) => server.log.info(`[boot watchdog] ${msg}`)).catch(
     (err) => {
       server.log.error({ err }, "boot room lifecycle tick failed");

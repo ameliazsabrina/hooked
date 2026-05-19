@@ -124,9 +124,7 @@ const isSignedAdmin = t.middleware(async ({ ctx, path, getRawInput, next }) => {
     });
   };
 
-  // tRPC v11 middlewares do not throw on downstream handler errors — next()
-  // resolves with `{ ok: false, error }`. The try/catch is still kept as a
-  // safety net for synchronous throws inside the middleware chain itself.
+  // try/catch is a safety net for synchronous throws; v11 next() resolves with errors.
   try {
     const result = await next({ ctx: { ...ctx, adminWallet: wallet } });
     if (result.ok) {
@@ -144,10 +142,7 @@ const isSignedAdmin = t.middleware(async ({ ctx, path, getRawInput, next }) => {
   }
 });
 
-// Session-based admin auth. Issued by `admin.session.login` (one wallet
-// signature) and stored as `admin-session:{token} → wallet` in Redis with
-// 1h TTL. The dashboard sends `Authorization: Bearer <token>` on every call;
-// per-call signing was unusable in a browser UI (popup on every fetch).
+// Admin session: bearer token in Redis with 1h TTL — avoids per-call wallet signing.
 const ADMIN_SESSION_REDIS_PREFIX = "admin-session:";
 const ADMIN_SESSION_RATE_LIMIT_MAX = 120;
 const ADMIN_SESSION_RATE_LIMIT_WINDOW_SEC = 60;

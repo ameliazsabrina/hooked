@@ -3,19 +3,8 @@ import { env } from "../config/env.js";
 import { Player } from "../db/schema.js";
 
 /**
- * Dev-only: seed a fake deposit on a Player so fishing works without an
- * actual on-chain `deposit_room` flow. The cast flow reads
- * `player.deposits[].amount` to compute initial bait
- * (services/fishing/wsExecutor.ts:ensureActiveSession). This script inserts
- * a row with that shape.
- *
- * Refuses to run in production.
- *
- * Usage:
- *   pnpm exec tsx src/cli/seedDevDeposit.ts <walletAddress> [amountSol]
- *
- * Example:
- *   pnpm exec tsx src/cli/seedDevDeposit.ts 7xK...abc 1
+ * Dev-only: seed a fake deposit. Refuses to run in production.
+ * Usage: pnpm exec tsx src/cli/seedDevDeposit.ts <walletAddress> [amountSol]
  */
 async function main() {
   if (env.APP_ENV === "production") {

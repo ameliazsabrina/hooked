@@ -36,8 +36,7 @@ export interface AuthenticateMessage {
   wallet: string;
   nonce: string;
   signature: string;
-  // When present, `signature` is the nonce signed by the delegated session
-  // key; server verifies delegation.signature against the wallet once.
+  // If present, `signature` is signed by the delegated session key.
   delegation?: WsDelegation;
 }
 
@@ -58,9 +57,6 @@ export interface CastInitiateMessage {
   clientCastId: string;
 }
 
-// Acks the cast. The on-chain initiate_cast has already committed
-// (bait spent, fish rolled); the server is now silently holding the
-// nibble timer.
 export interface CastAcceptedMessage {
   type: "cast_accepted";
   sessionId: string;
@@ -68,11 +64,8 @@ export interface CastAcceptedMessage {
   castTimestamp: number;
 }
 
-// Server-determined "fish is biting" signal. `serverTs` is the gateway's wall
-// clock at the moment of emission and is the reference for reaction-time
-// validation: a nibble_response with `clientTs` outside [serverTs, serverTs+2000]
-// is treated as an escape (or, if before, a pre-nibble tap and silently
-// ignored).
+// `serverTs` is authoritative for reaction-time validation; clientTs is
+// recorded for cheat telemetry only.
 export interface NibbleEventMessage {
   type: "nibble_event";
   sessionId: string;
@@ -80,9 +73,6 @@ export interface NibbleEventMessage {
   serverTs: number;
 }
 
-// Player tap during the 2s reaction window. The client sends its own clock
-// for cheat telemetry; the server validates against its own `nibbleSentAt`
-// and never trusts the client value for window admission.
 export interface NibbleResponseMessage {
   type: "nibble_response";
   sessionId: string;
@@ -90,10 +80,7 @@ export interface NibbleResponseMessage {
   clientTs: number;
 }
 
-// Server tells the client the fish has escaped (no tap in 2s window, or a
-// pre-nibble tap that the server chose to surface). Bait stays consumed.
-// Distinguished from catch_resolved so the client can play a line-slack /
-// "got away" anim before transitioning back to idle.
+// Distinguished from catch_resolved so the client can play a line-slack anim.
 export interface FishEscapedMessage {
   type: "fish_escaped";
   sessionId: string;
@@ -115,19 +102,9 @@ export interface InputSamplesMessage {
 }
 
 /**
- * Client asks the server to resolve the current timing-bar cast as a catch
- * if its progress is at/above CLIENT_FINAL_FLOOR. Dedicated message so the
- * "verdict claim" is separated from the input-timeline (`input_samples`)
- * channel — earlier these were conflated via a `final: true` flag on
- * `input_samples` with a `held` bit hijacked to carry the outcome, which
- * caused input-history asymmetry where retried "final" samples planted
- * phantom transitions on the server that the client's local physics never
- * saw. This protocol split makes that class of bug impossible by design.
- *
- * Server runs `advancePhysics` once and checks `ctx.game.progress`. No
- * client-side state is trusted for the verdict itself; the floor check
- * is purely server-side. If progress is below the floor the request is
- * silently ignored and the desync-recovery rejection counter increments.
+ * Verdict claim separated from input_samples — prevents phantom
+ * input-history transitions from retried "final" messages. Server-side
+ * floor check is authoritative; client state is not trusted.
  */
 export interface CastFinalizeMessage {
   type: "cast_finalize";
@@ -143,13 +120,8 @@ export interface FishHookedMessage {
   speciesId: number;
   /** ApexFish ObjectId (24-char hex) when apex rolled; null otherwise. */
   apexFishId: string | null;
-  /**
-   * Public asset URL for apex catches (admin-uploaded image). Null for
-   * non-apex casts; the client renders those from the static FISH_SPECIES
-   * table lookup keyed on `speciesId`.
-   */
+  /** Null for non-apex (client renders from FISH_SPECIES by speciesId). */
   apexAssetUrl: string | null;
-  /** Display name (FISH_SPECIES for non-apex, ApexFish.name for apex). */
   speciesName: string;
   rarity: number;
   mechanic: number;
@@ -157,7 +129,7 @@ export interface FishHookedMessage {
   greenZoneWidth: number;
   weightHg: number;
   castTimestamp: number;
-  // Same RNG seed the server uses for fish motion so client visuals match resolution.
+  /** Same seed the server uses, so client visuals match resolution. */
   rngSeed: number;
 }
 
@@ -209,8 +181,6 @@ export interface LeaderboardUpdateMessage {
   }>;
 }
 
-// Server→client push when sessionLifecycle issues fresh bait at window rotation.
-// Lets the HUD update without the client having to poll or re-run sessionState.
 export interface BaitRefilledMessage {
   type: "bait_refilled";
   bait: number;
@@ -218,23 +188,14 @@ export interface BaitRefilledMessage {
   date: number;
 }
 
-/**
- * One tap as the renderer recorded it. `msSinceTapStart` is the per-tap-local
- * elapsed time (the renderer resets its tap clock each time it advances), so
- * the server can replay the spinner physics without needing absolute clocks
- * or RTT correction.
- */
+/** msSinceTapStart resets per tap so the server can replay without RTT correction. */
 export interface CircularTapInputMsg {
   tapIndex: number;
   msSinceTapStart: number;
 }
 
-// Client sends this once the circular-tap phase has completed (whether
-// every tap landed or not). The server replays the taps through its own
-// spinner physics — the boolean outcome is server-authoritative; the
-// client cannot win the encounter by lying about hits. On a server-verified
-// pass the server then chains into the timing-bar second phase (physics,
-// safety-timeout, resolution path) for Legendary/Apex casts.
+// Server replays taps through its own spinner physics — verdict is
+// server-authoritative.
 export interface CircularTapCompleteMessage {
   type: "circular_tap_complete";
   sessionId: string;
@@ -243,11 +204,6 @@ export interface CircularTapCompleteMessage {
   taps: CircularTapInputMsg[];
 }
 
-// Server→client push when the active event transitions (or on initial auth).
-// `active=false` clears any active-event UI. `name` is empty when inactive
-// so the client doesn't need a separate null check; `apexFishes` carries
-// each apex fish's id + name + asset URL so HUD banners and announcement
-// modals can render the active pool without re-querying.
 export interface EventStatusApexFish {
   id: string;
   name: string;

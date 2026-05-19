@@ -56,22 +56,17 @@ function sessionKey(token: string): string {
   return `http-session:${token}`;
 }
 
-// Companion key holding the sessionPubkey that minted a given session token,
-// so logout can locate and delete the matching delegation binding.
+/** Lets logout find the sessionPubkey that minted this token. */
 function sessionMetaKey(token: string): string {
   return `http-session-meta:${token}`;
 }
 
-// Tracks (wallet, sessionPubkey) bindings already minted into a session token,
-// so a leaked delegation can't be exchanged repeatedly for fresh tokens.
+/** Prevents a leaked delegation from being exchanged repeatedly. */
 function delegationBindingKey(wallet: string, sessionPubkey: string): string {
   return `http-auth-delegation:${wallet}:${sessionPubkey}`;
 }
 
-// Marker set on logout for the (wallet, sessionPubkey) of the revoked
-// delegation. exchangeDelegation refuses to mint a token for a marker hit
-// until the original delegation expires, so a captured delegation can't be
-// replayed after the user explicitly logged out.
+/** Set on logout to block delegation replay until the original expires. */
 function delegationRevokedKey(wallet: string, sessionPubkey: string): string {
   return `http-auth-revoked:${wallet}:${sessionPubkey}`;
 }
@@ -90,9 +85,7 @@ function buildExpectedDelegationMessage(
 }
 
 export const authRouter = router({
-  // Single-signature handshake: client signs a delegation message that
-  // authorizes an ephemeral keypair to act on its behalf for both HTTP
-  // (this token) and WS (gateway verifies the same delegation on connect).
+  // Same delegation authorizes both HTTP (this token) and WS (gateway verifies).
   exchangeDelegation: publicProcedure
     .input(z.object({ delegation: DelegationSchema }))
     .mutation(async ({ ctx, input }) => {
@@ -167,12 +160,8 @@ export const authRouter = router({
         Math.max(1, Math.floor((delegation.expiresAt - Date.now()) / 1000)),
       );
 
-      // Idempotent re-exchange: if this delegation already minted a token
-      // and the token is still in Redis, return it. Refusing replay would
-      // punish legitimate clients (cleared storage, second tab, recovered
-      // session) without raising the bar for an attacker who already has
-      // the delegation. Rate limit + session TTL + logout-revokes-binding
-      // (see logout below) cover the abuse surface.
+      // Idempotent re-exchange — abuse surface is bounded by rate limit,
+      // session TTL, and logout-revokes-binding.
       const priorToken = await ctx.redis.get(bindingKey);
       if (priorToken) {
         const priorTtlSec = await ctx.redis.ttl(sessionKey(priorToken));
@@ -183,8 +172,7 @@ export const authRouter = router({
             walletAddress: delegation.wallet,
           };
         }
-        // Binding outlived its token — fall through and mint a fresh one,
-        // overwriting the binding.
+        // Binding outlived its token — mint a fresh one.
       }
 
       const token = randomBytes(32).toString("hex");
@@ -212,10 +200,7 @@ export const authRouter = router({
 
   logout: protectedProcedure.mutation(async ({ ctx }) => {
     if (ctx.sessionToken) {
-      // Revoke the delegation too, so a captured delegation can't be replayed
-      // via exchangeDelegation to mint a fresh token after logout. We mark
-      // (wallet, sessionPubkey) as revoked for the full delegation lifetime
-      // and tear down the binding + session state.
+      // Revoke delegation so a captured one can't be replayed after logout.
       const metaKey = sessionMetaKey(ctx.sessionToken);
       const sessionPubkey = await ctx.redis.get(metaKey);
       if (sessionPubkey && ctx.walletAddress) {

@@ -3,33 +3,18 @@ import { createHash, randomBytes } from "node:crypto";
 import { env } from "../../config/env.js";
 import { FishingDailySeed } from "../../db/schema.js";
 
-/**
- * UTC date string used as `dailySeedDate` on FishingSession documents and as
- * the primary key for FishingDailySeed rows.
- */
 export function dailySeedDateFor(now: Date): string {
   return now.toISOString().slice(0, 10);
 }
 
-/**
- * Start of the UTC day that follows `dateISO` (e.g. "2026-05-09" → 2026-05-10
- * 00:00:00.000 UTC). Used as `revealAfter` so today's seed becomes
- * audit-visible only after the day is over.
- */
 function nextUtcMidnight(dateISO: string): Date {
   const [y, m, d] = dateISO.split("-").map((s) => Number(s));
   return new Date(Date.UTC(y, m - 1, d + 1));
 }
 
 /**
- * Lazily ensure a FishingDailySeed row exists for the given UTC date and
- * return the raw seed buffer. Idempotent — concurrent callers see the same
- * row (mongoose unique index on `date`).
- *
- * Bootstrap: if `FISHING_DAILY_SEED_HEX` env is set AND no row exists yet
- * (typically test setup or first prod boot), the env value is used as the
- * seed bytes. Otherwise a fresh `randomBytes(32)` is generated. After the
- * first row is written, env is ignored — DB is the source of truth.
+ * Idempotent (unique index on date). Bootstrap uses
+ * FISHING_DAILY_SEED_HEX if set and no row exists; DB is source of truth after.
  */
 export async function ensureDailySeed(dateISO: string): Promise<Buffer> {
   const existing = await FishingDailySeed.findOne({ date: dateISO });
@@ -41,9 +26,7 @@ export async function ensureDailySeed(dateISO: string): Promise<Buffer> {
   const seedHash = createHash("sha256").update(seed).digest();
   const revealAfter = nextUtcMidnight(dateISO);
 
-  // Race-safe: another caller may have written the row between our find and
-  // create. The unique index makes the second create throw — fall through to
-  // re-fetch and return the winner's seed.
+  // Race-safe via unique index — re-fetch the winner on 11000.
   try {
     const row = await FishingDailySeed.create({
       date: dateISO,
@@ -62,20 +45,12 @@ export async function ensureDailySeed(dateISO: string): Promise<Buffer> {
   }
 }
 
-/**
- * Load today's daily seed for use by castEngine. Async because it may need
- * to write a fresh row on first call. Cast routes already run in async
- * handlers so this doesn't ripple through the API.
- */
 export async function loadDailySeed(now: Date = new Date()): Promise<Buffer> {
   const dateISO = dailySeedDateFor(now);
   return ensureDailySeed(dateISO);
 }
 
-/**
- * Audit view: always exposes the commitment (seedHash). Exposes the raw seed
- * only after `revealAfter`. Returns null if no row exists for the date.
- */
+/** Raw seed exposed only after revealAfter. */
 export interface DailySeedAuditView {
   date: string;
   seedHash: string;
@@ -90,9 +65,7 @@ export async function getDailySeedAudit(
   dateISO: string,
   now: Date = new Date(),
 ): Promise<DailySeedAuditView | null> {
-  // Don't use .lean() — mongoose returns Buffer fields as BSON Binary in
-  // lean mode, which doesn't round-trip through `Buffer.from(...).toString
-  // ("hex")` cleanly. Hydrated docs preserve Node Buffer.
+  // Hydrated (not .lean()) — lean returns BSON Binary, not Node Buffer.
   const row = await FishingDailySeed.findOne({ date: dateISO });
   if (!row) return null;
   const revealed = now >= row.revealAfter;

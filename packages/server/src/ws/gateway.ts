@@ -38,13 +38,9 @@ import { Player } from "../db/schema.js";
 import { creditCatch } from "../services/leaderboardCredit.js";
 import { getRoomLeaderboard } from "../services/leaderboard.js";
 
-// Module-scoped redis handle. Captured from `fastify.redis` when the plugin
-// boots so module-level functions like `resolveCatch` (defined outside the
-// plugin closure) can credit leaderboards without threading the fastify
-// instance through every call site.
+// Captured at plugin boot so module-scope helpers (resolveCatch) can credit
+// leaderboards without threading the fastify instance through every call site.
 let redisRef: Redis | null = null;
-
-
 
 async function loadEquippedBaitSlug(wallet: PublicKey): Promise<string> {
   try {
@@ -62,12 +58,9 @@ async function loadEquippedBaitSlug(wallet: PublicKey): Promise<string> {
   }
 }
 
-// Mirrors loadEquippedBaitSlug — the client's TimingBar reads rodTier from
-// playerQuery and feeds it into resolveGreenBarHeight / initialFishingGameState.
-// The server MUST use the same value or client and server compute different
-// green-bar heights (every tier = 10px), the in-bar predicate disagrees, and
-// progress diverges within a few seconds. Symptom: client bar fills, server
-// resolves as escape.
+// Server MUST use the same rodTier as client — green-bar height scales per
+// tier (10px each), and a mismatch makes the in-bar predicate disagree so
+// progress diverges. Symptom: client bar fills, server resolves as escape.
 async function loadEquippedRodTier(wallet: PublicKey): Promise<number> {
   try {
     const player = await Player.findOne(
@@ -125,26 +118,20 @@ interface SessionContext {
   rarity: number;
   mechanic: number;
   weightHg: number;
-  // Stored so we can emit fish_hooked after the nibble timer fires and the
-  // player taps to hook (deferred from immediate emission post-cast).
+  // Deferred fish_hooked payload — emitted after nibble timer fires and the
+  // player taps to hook.
   pendingHookPayload: Extract<ServerMessage, { type: "fish_hooked" }> | null;
   samples: InputSample[];
   heldLatest: boolean;
-  // Physics starts only once the client has sent its first input sample.
   physicsStarted: boolean;
   lastTickAt: number;
-  // Fixed-timestep accumulator (seconds). Mirrors the client's RAF-driven
-  // accumulator in components/fishing/timing-bar.tsx — both sides MUST step
-  // at PHYSICS_FIXED_DT or the shared mulberry32 RNG state diverges within
-  // a few seconds and the fish swims down different trajectories.
+  // Fixed-timestep accumulator (seconds). Both sides MUST step at
+  // PHYSICS_FIXED_DT or the shared mulberry32 RNG state diverges.
   physicsAccumS: number;
-  // Lag-comp state. The first input sample's `t_ms` defines simulation
-  // time = 0; every later sample's simTimeS = (t_ms - physicsClientOriginMs)
-  // / 1000. The same mapping runs on the client. Both sides step physics up
-  // to `(wallNow - physicsServerOriginMs)/1000 - INPUT_DELAY_S`, looking up
-  // the input that was *active* at each step's simTimeS — so the bar
-  // trajectory is a deterministic function of the input timeline, identical
-  // on both sides modulo the constant clock-skew offset baked into origin.
+  // Lag-comp: first input sample's `t_ms` defines simTimeS=0. Both sides
+  // step physics up to (wallNow - physicsServerOriginMs)/1000 - INPUT_DELAY_S,
+  // looking up the input active at each step's simTimeS so the bar trajectory
+  // is deterministic modulo the clock-skew offset baked into origin.
   physicsClientOriginMs: number | null;
   physicsServerOriginMs: number;
   simTimeS: number;
@@ -153,64 +140,41 @@ interface SessionContext {
   profile: VerticalProfile;
   greenBarHeight: number;
   game: FishingGameState;
-  // Server-determined nibble delay (fixed 3000ms) and timer plumbing.
-  // The client cannot predict this — it only sees `cast_accepted` followed
-  // some ms later by `nibble_event`. Validating `nibble_response` against
-  // `nibbleSentAt` gates the entry to the input mechanic.
+  // Server-determined nibble delay (fixed 3000ms). Validating nibble_response
+  // against nibbleSentAt gates entry to the input mechanic.
   nibbleDelayMs: number;
   nibbleTimer: ReturnType<typeof setTimeout> | null;
   nibbleSentAt: number | null;
   reactionTimer: ReturnType<typeof setTimeout> | null;
   reactionTimeMs: number | null;
   preNibbleTapCount: number;
-  // Becomes true after a valid nibble_response (and fish_hooked has been sent).
-  // Until then, input_samples are rejected.
+  // True after a valid nibble_response. Until then input_samples are rejected.
   hooked: boolean;
-  // Server-authoritative spinner state for Legendary/Apex casts. Computed at
-  // startSession() time from the same `(rarity, profile)` the renderer sees
-  // so `validateCircularTapTaps` can replay client-reported taps and decide
-  // pass/fail without trusting any boolean from the wire (C-1 fix).
+  // Server-authoritative spinner state — lets validateCircularTapTaps replay
+  // client-reported taps without trusting any wire boolean (C-1 fix).
   circularTap: {
     profile: CircularProfile;
     targets: number[];
   } | null;
-  // For Legendary/Apex casts, the vertical profile used by the timing-bar
-  // phase that chains AFTER a successful spinner. Pre-built at startSession
-  // (matching the client's `legendaryVerticalProfileRef`) so when
-  // circular_tap_complete passes, we can swap ctx.profile/greenBarHeight
-  // to the correct legendary/apex difficulty rather than the Basic
-  // placeholder used during the spinner phase.
+  // Pre-built timing-bar profile for the chained phase after a Legendary/Apex
+  // spinner pass. Without this the chained physics runs at Basic difficulty.
   secondaryVerticalProfile: VerticalProfile | null;
-  // Original cast seed (kept so the chained timing-bar can re-init game
-  // state with the same seed the client uses for its remounted TimingBar).
   rngSeed: number;
-  // Player's equipped rod tier at cast start. Cached on the session so the
-  // chained legendary timing-bar phase can re-init the game state with the
-  // same tier (and therefore the same greenBarHeight) the client uses.
   rodTier: number;
-  // Desync recovery state. Each `cast_finalize` whose server progress is
-  // below CLIENT_FINAL_FLOOR increments `rejectedFinalCount`; once that
-  // threshold crosses DESYNC_REJECT_THRESHOLD we emit a `desync_correction`
-  // snapshot to the client AND stamp `desyncDetectedAt` so the physicsTimer
-  // can shrink its safety timeout from the normal SAFETY_TIMEOUT_MS to
-  // DESYNC_TIMEOUT_MS. Without this, a client whose local physics has
-  // diverged from server's sits watching a frozen UI for ~25s before
-  // anything resolves.
+  // Desync recovery: cast_finalize below CLIENT_FINAL_FLOOR bumps the count;
+  // crossing DESYNC_REJECT_THRESHOLD stamps desyncDetectedAt so physicsTimer
+  // shrinks its safety timeout (otherwise the UI sits frozen for ~25s).
   rejectedFinalCount: number;
   desyncDetectedAt: number | null;
 }
 
 const NIBBLE_DELAY_MS = 3000;
 const REACTION_WINDOW_MS = 2000;
-// Desync recovery: number of consecutive `cast_finalize` requests we'll
-// reject before declaring the cast diverged and emitting a snapshot. With
-// the input-timeline determinism guarantees in place, a legitimate single
-// rejection from normal lag is rare; 2 trades a small false-positive risk
-// for fast recovery (~500ms of disagreement at the client's 250ms retry).
+// 2 trades a small false-positive risk for ~500ms-of-disagreement recovery
+// at the client's 250ms retry cadence.
 const DESYNC_REJECT_THRESHOLD = 2;
-// After divergence is declared, give the player this much time (from
-// detection) to either reconcile and finish the cast or accept the miss —
-// rather than letting the 30s SAFETY_TIMEOUT_MS run its full course.
+// After divergence is declared, resolve within this window rather than
+// running the full 30s SAFETY_TIMEOUT_MS.
 const DESYNC_TIMEOUT_MS = 5000;
 
 function rollNibbleDelayMs(): number {
@@ -362,9 +326,8 @@ export function broadcastToWallet(
   }
 }
 
-// Update the room binding for every open socket of a wallet. Called when the
-// HTTP-side `recoverEntry` path admits the player to a room: existing WS
-// connections need to learn the new roomId without forcing a reconnect.
+// Updates room binding for open sockets when the HTTP-side recoverEntry
+// admits a player — avoids forcing a reconnect.
 export function bindWalletToRoom(
   walletAddress: string,
   roomId: string,
@@ -377,10 +340,7 @@ export function bindWalletToRoom(
   }
 }
 
-// Look up the player's active deposit and assign socket.roomId. Runs
-// asynchronously after auth so the `authenticated` reply is not delayed by a
-// Mongo round-trip. No-op if the socket has been closed by the time the
-// lookup returns.
+// Runs async after auth so the `authenticated` reply isn't blocked on Mongo.
 async function hydrateRoomBindingForSocket(
   socketId: string,
   walletAddress: string,
@@ -403,9 +363,7 @@ async function hydrateRoomBindingForSocket(
   }
 }
 
-// Per-room debounce: a burst of catches in a busy room collapses into one
-// broadcast. The skill spec calls this out — 250ms is short enough to feel
-// real-time and long enough to absorb ~7 catches at our 30Hz physics tick.
+// Per-room debounce: 250ms feels real-time and absorbs ~7 catches at 30Hz.
 const lbBroadcastTimers = new Map<string, NodeJS.Timeout>();
 const LB_BROADCAST_DEBOUNCE_MS = 250;
 
@@ -445,8 +403,7 @@ async function emitRoomLeaderboard(roomId: string): Promise<void> {
           wallet: p?.walletAddress ?? e.member,
           displayName: p?.nickname ?? "Anonymous",
           score: e.score,
-          // catchCount isn't tracked in the score sorted set today; surface 0
-          // so the wire shape stays stable for future consumers.
+          // Wire stability: catchCount not tracked in the score sorted set yet.
           catchCount: 0,
         };
       }),
@@ -472,9 +429,8 @@ function eventStatusMessage(status: EventStatus | null): ServerMessage {
       apexFishes: [],
     };
   }
-  // Self-healing: an event whose endsAt has passed reads as inactive on the
-  // wire even if the lifecycle worker hasn't flipped the flag yet, so
-  // clients always see state consistent with what the cast roll uses.
+  // Self-healing: an expired event reads as inactive even if the lifecycle
+  // worker hasn't flipped the flag — wire state matches what cast roll uses.
   const live = getActiveEvent();
   if (!live) {
     return {
@@ -509,31 +465,17 @@ let eventCacheUnsubscribe: (() => void) | null = null;
 function ensureEventCacheBound(): void {
   if (eventCacheUnsubscribe) return;
   eventCacheUnsubscribe = onEventChange((status) => broadcastEventStatus(status));
-  // Warm cache + start the 30s poller. The listener fires only on
-  // transitions, so an idle period costs one DB read every 30s and zero
-  // WS broadcasts.
   void getEventStatus(true).catch(() => {});
   startEventPolling();
 }
 
-// Client and server run identical physics from @hooked/shared. Physics is
-// paused until the client sends its first input sample, so the pre-reeling
-// "BITE!" flash cannot drain the progress meter.
-//
-// LAG-COMP MODEL. The bar physics depends on player input timing; running it
-// against `heldLatest` (newest sample regardless of when the player acted)
-// drifts the server's bar trajectory away from the client's by exactly the
-// network jitter on each transition. We instead replay inputs at their
-// client-stamped time:
-//
-//   simTimeS(sample)     = (sample.t_ms - physicsClientOriginMs) / 1000
-//   wallSinceOriginS     = (now - physicsServerOriginMs) / 1000
-//   server steps physics → up to wallSinceOriginS - INPUT_DELAY_S
-//
-// Each fixed step looks up the input active at its simTimeS via the sorted
-// `inputHistory`. INPUT_DELAY_S buffers the simulation behind wallclock so
-// most samples land before their step is processed — late samples (RTT/2 >
-// INPUT_DELAY) are dropped with a warning rather than rewinding state.
+// LAG-COMP MODEL. Bar physics depends on input timing; running against
+// `heldLatest` drifts trajectory by the network jitter on each transition.
+// Instead we replay inputs at client-stamped simTime:
+//   simTimeS(sample) = (sample.t_ms - physicsClientOriginMs) / 1000
+//   server steps physics up to (now - physicsServerOriginMs)/1000 - INPUT_DELAY_S
+// INPUT_DELAY_S buffers behind wallclock so most samples land before their
+// step is processed — late samples (RTT/2 > INPUT_DELAY) are dropped.
 
 const PHYSICS_TICK_MS = 33;
 
@@ -542,7 +484,7 @@ function advancePhysics(ctx: SessionContext, now: number): void {
   if (ctx.physicsClientOriginMs === null) return;
   const wallSinceOriginS = (now - ctx.physicsServerOriginMs) / 1000;
   const targetSimTimeS = wallSinceOriginS - INPUT_DELAY_S;
-  // Clamp how far we can sprint forward in one wall-tick (covers GC pauses).
+  // Clamp forward sprint per wall-tick (covers GC pauses).
   const maxAdvance = ctx.simTimeS + PHYSICS_MAX_STEP_ACCUM;
   const stepUpTo = Math.min(targetSimTimeS, maxAdvance);
   while (ctx.simTimeS + PHYSICS_FIXED_DT <= stepUpTo) {
@@ -564,10 +506,8 @@ function advancePhysics(ctx: SessionContext, now: number): void {
   }
 }
 
-// Pre-nibble disconnect refund. The on-chain initiate_cast already consumed
-// bait, so we ask the program to roll it back. Best-effort: if ER is offline
-// or the call fails, the keeper will eventually clean up stale pending
-// casts; the worst case for the player is one bait lost to a network blip.
+// Pre-nibble disconnect refund. Best-effort — keeper cleans up stale pending
+// casts if the rollback fails.
 async function cancelCastOnDisconnect(
   socket: Socket,
   ctx: SessionContext,
@@ -590,12 +530,9 @@ async function cancelCastOnDisconnect(
   }
 }
 
-// Mid-reel disconnect refund. Called when the player has tapped through the
-// nibble and is in the reel/spinner phase but loses connection before the
-// cast resolves. Uses the broader `abandonCast` window (ABANDON_CAST_GRACE_SECS)
-// so a single network blip doesn't permanently burn a bait. The cheat surface
-// (force-disconnect post-rarity-reveal to re-roll) is bounded by the grace
-// window AND surfaced in the reaction log so we can detect abuse.
+// Mid-reel disconnect refund. Uses ABANDON_CAST_GRACE_SECS so a single blip
+// doesn't burn a bait. Force-disconnect-to-re-roll cheats are bounded by the
+// grace window and surfaced in the reaction log.
 async function abandonCastOnDisconnect(
   socket: Socket,
   ctx: SessionContext,
@@ -611,10 +548,8 @@ async function abandonCastOnDisconnect(
       reactionTimeMs: ctx.reactionTimeMs,
       preNibbleTapCount: ctx.preNibbleTapCount,
       sampleJitterMaxMs: computeSampleJitterMaxMs(ctx.samples),
-      // "cancelled" when bait was actually refunded; "escaped_miss" if the
-      // window had expired (bait stays spent, equivalent to a missed cast).
-      // This split is what lets the audit pipeline distinguish "network
-      // blip" from "force-disconnect cheat attempt past the grace window."
+      // Distinguishes "network blip" from "force-disconnect cheat attempt
+      // past the grace window" in the audit pipeline.
       outcome: refunded ? "cancelled" : "escaped_miss",
       rarity: ctx.rarity,
       speciesId: ctx.speciesId,
@@ -622,8 +557,8 @@ async function abandonCastOnDisconnect(
   }
 }
 
-// Fire the server-determined nibble. Idempotent against late cancels (a
-// disconnect that races the timer leaves activeCastId null).
+// Idempotent against late cancels (a disconnect that races the timer leaves
+// activeCastId null).
 function fireNibble(socket: Socket, clientCastId: string): void {
   const ctx = socket.session;
   if (!ctx || ctx.activeCastId !== clientCastId) return;
@@ -640,8 +575,7 @@ function fireNibble(socket: Socket, clientCastId: string): void {
   }, REACTION_WINDOW_MS);
 }
 
-// 2s elapsed without nibble_response → fish escapes. Bait stays consumed
-// (the spec calls this out explicitly: missed reactions still cost a bait).
+// 2s without nibble_response → escape. Missed reactions still cost a bait.
 function handleReactionTimeout(socket: Socket, clientCastId: string): void {
   const ctx = socket.session;
   if (!ctx || ctx.activeCastId !== clientCastId) return;
@@ -655,10 +589,8 @@ function handleReactionTimeout(socket: Socket, clientCastId: string): void {
   resolveCatch(socket, false, "escaped_no_tap");
 }
 
-// Promotes the pending hook payload into a fish_hooked broadcast and lets
-// input_samples through. Validates the response is inside the reaction
-// window using server clock (clientTs is logged but never trusted for
-// admission).
+// Server clock is authoritative for the reaction window; clientTs is logged
+// but never trusted for admission.
 function handleNibbleResponse(
   socket: Socket,
   clientCastId: string,
@@ -668,15 +600,13 @@ function handleNibbleResponse(
   if (!ctx || ctx.activeCastId !== clientCastId) return;
   if (ctx.hooked) return;
   if (ctx.nibbleSentAt === null) {
-    // Pre-nibble tap: count it for cheat telemetry and ignore. The client
-    // also gates locally, so seeing this server-side is suspicious.
+    // Pre-nibble tap: count for cheat telemetry and ignore.
     ctx.preNibbleTapCount += 1;
     return;
   }
   const elapsed = Date.now() - ctx.nibbleSentAt;
   if (elapsed > REACTION_WINDOW_MS) {
-    // The reaction timer should already be in flight or fired; let it
-    // handle the escape. Don't double-resolve.
+    // Reaction timer handles the escape; don't double-resolve.
     return;
   }
   if (ctx.reactionTimer) {
@@ -684,8 +614,7 @@ function handleNibbleResponse(
     ctx.reactionTimer = null;
   }
   ctx.reactionTimeMs = elapsed;
-  // clientTs is recorded for offline drift analysis (clock skew, replay
-  // detection). Server clock is authoritative for the window.
+  // clientTs is recorded for offline drift analysis only.
   void clientTs;
   ctx.hooked = true;
   if (ctx.pendingHookPayload) {
@@ -701,7 +630,7 @@ function resolveCatch(
 ): void {
   const ctx = socket.session;
   if (!ctx || !ctx.activeCastId) return;
-  // Clear the slot before async work so a follow-up cast can start while the
+  // Clear slot before async work so a follow-up cast can start while the
   // ER CPI + fetch are in flight.
   const activeCastId = ctx.activeCastId;
   const sessionIdStr = ctx.sessionPda ?? "";
@@ -711,15 +640,13 @@ function resolveCatch(
   const speciesName = ctx.speciesName;
   const rarity = ctx.rarity;
   const weightHg = hit ? ctx.weightHg : 0;
-  // Canonical score computed on the tick from the same inputs `submitInputSamples`
-  // uses (rarity + rolled weightHg). With this match, the wire score and the
-  // persisted score are bit-identical, so we can deliver `catch_resolved`
-  // immediately and let persistence run in the background.
+  // Wire score == persisted score (same inputs as submitInputSamples), so
+  // we can deliver catch_resolved immediately and persist in the background.
   const score = computeCatchScore(rarity as Rarity, weightHg);
   const roomId = socket.roomId;
 
-  // Snapshot reaction telemetry before we wipe the cast slot so the async
-  // log write below sees consistent data even if a follow-up cast races in.
+  // Snapshot reaction telemetry before wiping the slot so the async log
+  // write sees consistent data even if a follow-up cast races in.
   const reactionSnapshot = {
     sessionPda: ctx.sessionPda,
     nibbleDelayMs: ctx.nibbleDelayMs,
@@ -767,13 +694,8 @@ function resolveCatch(
   ctx.rejectedFinalCount = 0;
   ctx.desyncDetectedAt = null;
 
-  // Deliver `catch_resolved` ON THE TICK — the verdict was decided by
-  // deterministic physics, the score is computed from `ctx` values we already
-  // hold, and the persisted weight is exactly `ctx.weightHg` (submitInputSamples
-  // re-clamps a client-supplied weight, but the wsExecutor never forwards one,
-  // so `effectiveWeight === pc.weightHg === ctx.weightHg`). Awaiting Mongo
-  // here added ~500–1500ms of dead air between the bar filling and the catch
-  // popup; persistence is bookkeeping and runs below.
+  // Deliver on the tick — awaiting Mongo here added ~500-1500ms of dead air
+  // between the bar filling and the catch popup. Persistence runs below.
   safeSend(socket, {
     type: "catch_resolved",
     sessionId: sessionIdStr,
@@ -791,16 +713,12 @@ function resolveCatch(
 
   if (!ctx.sessionPda) return;
 
-  // Persistence + leaderboard run after the wire send. A failure here means
-  // the player saw the catch but Mongo never recorded it; the reaction log
-  // above is still written (audit trail intact) and the error log is loud
-  // enough to drive an ops alert.
+  // Persistence runs after wire send. On failure the reaction log retains
+  // the audit trail; the error log is loud enough for an ops alert.
   void (async () => {
     try {
       const res = await executeSubmitResolveOffchain(sessionIdStr, hit);
-      // Credit leaderboards only when the catch row was persisted (res truthy)
-      // AND was a hit. Skipping miss/fallback paths keeps the Redis sorted
-      // sets aligned with what's actually in Mongo.
+      // Credit leaderboards only on persisted hits — keeps Redis aligned with Mongo.
       if (hit && walletStr && redisRef && res && res.score > 0) {
         void creditCatch({
           redis: redisRef,
@@ -823,9 +741,6 @@ function resolveCatch(
   })();
 }
 
-// Cast roll types are owned by services/fishing/wsExecutor.ts now; the
-// gateway just consumes them.
-
 const WS_MAX_PAYLOAD_BYTES = 64 * 1024;
 
 const AUTH_RATE_LIMIT = {
@@ -833,10 +748,8 @@ const AUTH_RATE_LIMIT = {
   timeWindow: "1 minute",
 };
 
-// CSWSH defense: reject any /ws/* request whose Origin doesn't match the CORS
-// allowlist. Runs before the WebSocket upgrade so a bad origin gets a 403
-// instead of an open socket. Missing Origin is allowed (matches CORS) so
-// non-browser callers like wscat/curl still work.
+// CSWSH defense: pre-upgrade origin check. Missing Origin is allowed so
+// non-browser callers (wscat/curl) still work.
 async function rejectIfBadOrigin(
   req: FastifyRequest,
   reply: FastifyReply,
@@ -851,8 +764,6 @@ export default fp(async (fastify) => {
     options: { maxPayload: WS_MAX_PAYLOAD_BYTES },
   });
 
-  // Capture redis once at plugin boot so resolveCatch (module-scope) can
-  // fire leaderboard credits without needing the fastify instance.
   redisRef = fastify.redis;
 
   ensureEventCacheBound();
@@ -923,41 +834,27 @@ export default fp(async (fastify) => {
       if (ctx.mechanic !== TIMING_BAR_MECHANIC) return;
       const now = Date.now();
       advancePhysics(ctx, now);
-      // Only broadcast snapshots once physics has actually started. Before
-      // the first input arrives, `sampleCount` stays at 0 and `0 % 3 === 0`
-      // is true on every 33ms tick — without this guard the server would
-      // spam ~30 redundant "initial state" snapshots/second during the
-      // nibble + biting window.
+      // Guard against spamming ~30 redundant "initial state" snapshots/sec
+      // during the nibble window (sampleCount stays at 0 → 0%3===0 every tick).
       if (ctx.physicsStarted && ctx.game.sampleCount % 3 === 0) {
         safeSend(socket, {
           type: "fishing_state",
           sessionId: ctx.sessionPda ?? "",
           clientCastId: ctx.activeCastId,
           barY: ctx.game.barY,
-          // Push the SMOOTHED fish position. Both server stepProgress and
-          // client rendering use this same value, eliminating the local-vs-
-          // server fishY divergence that previously let local progress fill
-          // to 0.99 while server progress stayed at 0.
+          // SMOOTHED fish position — both server stepProgress and client
+          // rendering use this same value to avoid fishY divergence.
           fishY: ctx.game.fishYDisplay,
           progress: ctx.game.progress,
           tickIndex: ctx.game.sampleCount,
         });
       }
-      // Server-authoritative resolution. The server runs its own copy of
-      // the physics every tick; as soon as terminalState() declares a
-      // verdict, we resolve. Always resolving on the server's own terminal
-      // state means the player can never lose a cast the server thinks is
-      // still in progress.
       const terminalNow = terminalState(ctx.game, ctx.greenBarHeight);
       if (terminalNow !== null) {
         resolveCatch(socket, terminalNow === "caught");
         return;
       }
       const SAFETY_TIMEOUT_MS = 30_000;
-      // Desync-aware early timeout: once we've declared divergence, give
-      // the player DESYNC_TIMEOUT_MS to either reconcile or accept the
-      // miss — rather than letting the 30s wall-clock budget keep running
-      // while the UI shows a frozen "full" bar.
       if (
         ctx.desyncDetectedAt !== null &&
         now - ctx.desyncDetectedAt > DESYNC_TIMEOUT_MS
@@ -966,7 +863,6 @@ export default fp(async (fastify) => {
         return;
       }
       if (now - ctx.castStartedAt > SAFETY_TIMEOUT_MS) {
-        // Force escape — physics didn't reach terminal in time.
         resolveCatch(socket, false);
       }
     }, PHYSICS_TICK_MS);
@@ -986,8 +882,7 @@ export default fp(async (fastify) => {
 
       switch (msg.type) {
         case "authenticate": {
-          // Temporary diagnostic log — surface why auth keeps failing in the
-          // dev loop. Drop once we've stabilized the auth path.
+          // TODO: drop diagnostic log once auth path is stable.
           const authFail = (reason: string) => {
             console.warn(
               `[gateway] auth_failed wallet=${msg.wallet?.slice(0, 8)}… reason=${reason} hasDelegation=${!!msg.delegation}`,
@@ -1028,14 +923,9 @@ export default fp(async (fastify) => {
             type: "authenticated",
             wallet: msg.wallet,
           });
-          // Push current event status so the HUD alert mounts before the
-          // first cast; status tracks the L1 cache (refresh on TTL or change).
           void getEventStatus().then((status) =>
             safeSend(socket, eventStatusMessage(status)),
           );
-          // Resolve the player's current room from their active deposit and
-          // bind it to this socket so room-scoped broadcasts (leaderboard
-          // updates) reach them. Async — must not delay the auth reply.
           void hydrateRoomBindingForSocket(socketId, msg.wallet);
           return;
         }
@@ -1076,22 +966,16 @@ export default fp(async (fastify) => {
               rolled.rngSeed,
               computeModifiers({ streak: 0, poolTier: 0, sessionElapsedMs: 0 }),
             ) as VerticalProfile;
-            // For circular casts we additionally pre-compute the canonical
-            // spinner state so the gateway can replay client-reported taps
-            // without trusting any wire boolean (C-1). Targets are derived
-            // deterministically from `(rarity, castCount=0)` — same call
-            // shape the renderer uses on the client.
+            // Pre-computed spinner state lets gateway replay client taps
+            // without trusting any wire boolean (C-1).
             const circularTap =
               rolled.mechanic === CIRCULAR_TAP_MECHANIC &&
               (rolled.rarityEnum === FishRarity.Legendary ||
                 rolled.rarityEnum === FishRarity.Apex)
                 ? buildCircularTapState(rolled.rarityEnum, 0)
                 : null;
-            // Pre-build the chained timing-bar profile for Legendary/Apex.
-            // Mirrors the client's `legendaryVerticalProfileRef` (built at
-            // fish_hooked from the same seed + zero modifiers) so when the
-            // spinner clears and we swap ctx.profile, both sides agree on
-            // the chained-phase difficulty.
+            // Mirrors client's legendaryVerticalProfileRef so post-spinner
+            // swap leaves both sides on the same chained difficulty.
             const secondaryVerticalProfile =
               rolled.mechanic === CIRCULAR_TAP_MECHANIC &&
               (rolled.rarityEnum === FishRarity.Legendary ||
@@ -1156,10 +1040,7 @@ export default fp(async (fastify) => {
               pendingHookPayload,
               samples: [],
               heldLatest: false,
-              // Physics starts when the first input_sample arrives — the
-              // server is silent during the nibble window, and the input
-              // mechanic only mounts once we've broadcast fish_hooked after
-              // a valid nibble_response.
+              // Physics starts on first input_sample (after fish_hooked).
               physicsStarted: false,
               lastTickAt: castTimestamp,
               physicsAccumS: 0,
@@ -1185,26 +1066,19 @@ export default fp(async (fastify) => {
               rejectedFinalCount: 0,
               desyncDetectedAt: null,
             };
-            // Acks the cast so the client may begin its splash + idle anim.
-            // The fish has been rolled and bait is consumed; the gateway is
-            // now silently holding the nibble timer.
             safeSend(socket, {
               type: "cast_accepted",
               sessionId: sessionPdaStr ?? "",
               clientCastId,
               castTimestamp,
             });
-            // Schedule nibble. Using the captured ctx ref via socket.session
-            // keeps cancellation centralized in clearCastTimers / disconnect.
             socket.session.nibbleTimer = setTimeout(() => {
               fireNibble(socket, clientCastId);
             }, nibbleDelayMs);
           };
 
-          // wallet is guaranteed non-null by the not_authenticated guard
-          // earlier in this case. Claim the slot immediately so a rapid
-          // follow-up cast can't race the in-flight engine call; startSession()
-          // fills the real fields after.
+          // Claim the slot immediately so a rapid follow-up cast can't race
+          // the in-flight engine call; startSession() fills real fields after.
           socket.session = {
             wallet,
             sessionPda: null,
@@ -1257,10 +1131,8 @@ export default fp(async (fastify) => {
               );
               startSession(rolled, sessionId, baitSlug, rodTier);
             } catch (err) {
-              // Off-chain initiate can fail with NO_BAIT (no active deposit)
-              // or transient DB errors. Surface a clean error to the client
-              // rather than silently rolling a stub cast — the player needs
-              // to know they can't fish.
+              // Surface clean error (NO_BAIT, transient DB) rather than
+              // silently rolling a stub cast.
               console.warn(
                 "[gateway] off-chain initiate failed:",
                 (err as Error).message,
@@ -1286,24 +1158,14 @@ export default fp(async (fastify) => {
         }
 
         case "circular_tap_complete": {
-          // Server-authoritative resolution of the circular-tap phase. We
-          // replay the client-reported per-tap timestamps through our copy
-          // of the spinner physics; the client's hit/miss claims are never
-          // trusted. On a verified pass we then chain into the timing-bar
-          // second phase (still server-authoritative) for Legendary/Apex.
-          // On a verified fail we resolve the catch as missed immediately.
-          //
-          // C-1 fix: the previous handler trusted the client's "all hits
-          // landed" signal. Sending `circular_tap_complete` was enough to
-          // skip the spinner entirely. Now the gateway recomputes hits from
-          // submitted timestamps against its own copy of the spinner.
+          // C-1 fix: replay client-reported tap timestamps through server's
+          // own spinner copy. The client's hit/miss claims are never trusted.
           const ctx = socket.session;
           if (!ctx?.activeCastId || ctx.activeCastId !== msg.clientCastId) return;
           if (!ctx.hooked) return;
           if (ctx.mechanic !== CIRCULAR_TAP_MECHANIC) return;
           if (!ctx.circularTap) {
-            // Should be impossible — startSession sets this for every
-            // circular cast — but fail closed if it ever isn't.
+            // Should be impossible; fail closed.
             console.warn(
               "[gateway] circular_tap_complete with no server-side state",
             );
@@ -1319,13 +1181,8 @@ export default fp(async (fastify) => {
             resolveCatch(socket, false);
             return;
           }
-          // Pass. Chain into the timing-bar phase. Critically, swap the
-          // server's vertical profile from the Basic placeholder used during
-          // the spinner to the real legendary/apex profile — otherwise the
-          // chained physics runs at Basic difficulty while the client renders
-          // a Legendary/Apex UI. Also re-init the game state so the chained
-          // phase starts from canonical bar/fish positions, matching the
-          // client's freshly-mounted `TimingBar` component.
+          // Swap to the real legendary/apex profile — otherwise chained
+          // physics runs at Basic difficulty while the client renders Legendary.
           if (ctx.secondaryVerticalProfile) {
             ctx.profile = ctx.secondaryVerticalProfile;
             ctx.greenBarHeight = resolveGreenBarHeight(ctx.profile, ctx.rodTier);
@@ -1361,27 +1218,16 @@ export default fp(async (fastify) => {
             });
             return;
           }
-          // Reject samples that arrive before the player has been hooked.
-          // The client's input mechanic isn't supposed to mount until after
-          // fish_hooked, so any samples here are suspect.
+          // Pre-hook samples are suspect — the input mechanic shouldn't
+          // mount until after fish_hooked.
           if (!ctx.hooked) {
             return;
           }
           for (const s of msg.samples) ctx.samples.push(s);
-          // Build the lag-comp input history. The simulation-time origin is
-          // the `t_ms` of the FIRST sample with held=true — the first frame
-          // the player actually inputs. Pre-tap keep-alives (held=false,
-          // re-stating default) are absorbed silently so client and server
-          // origins land on the same wallclock instant. The renderer
-          // (TimingBar.setHeld) captures a single `tNow = Date.now()` and
-          // threads it through both the local inputHistory push AND the
-          // wire sample's `t_ms`, so client and server simTimeS values are
-          // bit-identical per event.
-          //
-          // Late arrivals (sample.t_ms whose simTimeS is already behind the
-          // server's stepped simTimeS) get clamped forward — the input
-          // takes effect at the earliest simTime the server can absorb.
-          // With INPUT_DELAY_S = 60ms of buffer this should be rare.
+          // Simulation-time origin = `t_ms` of the FIRST held=true sample.
+          // Pre-tap keep-alives are absorbed so client/server origins land
+          // on the same wallclock instant. Late arrivals are clamped forward
+          // to the earliest simTime the server can absorb.
           for (const s of msg.samples) {
             if (ctx.physicsClientOriginMs === null) {
               if (!s.held) continue;
@@ -1400,8 +1246,7 @@ export default fp(async (fastify) => {
           if (latest) {
             ctx.heldLatest = latest.held;
           }
-          // Start physics on first input so server timing aligns with the
-          // client's TimingBar (mounts 450ms after fish_hooked).
+          // Align server start with client's TimingBar (mounts 450ms after fish_hooked).
           if (!ctx.physicsStarted && ctx.mechanic === TIMING_BAR_MECHANIC) {
             ctx.physicsStarted = true;
             ctx.lastTickAt = Date.now();
@@ -1421,15 +1266,10 @@ export default fp(async (fastify) => {
             return;
           }
           if (!ctx.hooked) {
-            // Finalize before the player has actually been hooked is
-            // meaningless; the timing-bar physics hasn't even started.
             return;
           }
           if (ctx.mechanic !== TIMING_BAR_MECHANIC) {
-            // Circular-tap casts resolve via `circular_tap_complete` only.
-            // The dedicated verdict channel for the spinner phase exists
-            // because hits are validated by replaying client tap timestamps
-            // through server physics — there's no equivalent floor check.
+            // Circular-tap resolves via circular_tap_complete only.
             safeSend(socket, {
               type: "error",
               code: "wrong_resolution_path",
@@ -1438,46 +1278,26 @@ export default fp(async (fastify) => {
             });
             return;
           }
-          // Run one more physics tick so the floor check sees the latest
-          // state before deciding. The server's physicsTimer is still the
-          // primary resolver (it can fire `caught` autonomously via
-          // terminalState the moment progress hits 1.0), but accepting the
-          // client's claim lets the player feel an instant catch instead
-          // of watching the last ~150ms of fill rate drift in.
+          // Floor check sees the freshest state — lets the player feel an
+          // instant catch vs. waiting for the last ~150ms of fill to drift in.
           advancePhysics(ctx, Date.now());
-          // Server progress floor required to accept a client-driven catch.
-          // With both sides now running bit-deterministic physics (matched
-          // RNG seed + bit-identical input timeline via unified t_ms),
-          // local and server progress track each other to within rounding.
-          // Cheat surface: a forged finalize can at most skip ~1.6s of
-          // server fill — never produce a catch from nothing. Misses are
-          // ALWAYS decided by the server's own terminalState / safety
-          // timeout / desync timeout.
+          // Cheat surface: a forged finalize can at most skip ~1.6s of fill
+          // — never produce a catch from nothing. Misses are ALWAYS decided
+          // by the server's terminalState / safety timeout / desync timeout.
           const CLIENT_FINAL_FLOOR = 0.65;
           if (ctx.game.progress >= CLIENT_FINAL_FLOOR) {
-            // Defensive resets — resolveCatch itself wipes the slot, but
-            // this keeps the counters sane if any future code path skips
-            // that.
             ctx.rejectedFinalCount = 0;
             ctx.desyncDetectedAt = null;
             resolveCatch(socket, true);
             return;
           }
           ctx.rejectedFinalCount += 1;
-          // Divergence detected. Previously we emitted a `desync_correction`
-          // snapshot and kept physics running, betting the client would
-          // re-sync. In practice the input timeline can be permanently
-          // diverged (e.g. a late-arriving transition gets clamped server-
-          // side at the `input_samples` handler), so the cast spiralled:
-          // client gauge snapped down on reconcile, refilled, retried
-          // finalize, server rejected again, eventually safety-timeout
-          // fired 30s later. Player saw the gauge "reset after filling"
-          // repeatedly with the countdown timer hidden by the resolve-latch.
-          //
-          // Now: resolve as escaped on the first detection. Server is
-          // authoritative — its progress hasn't reached the floor, so the
-          // catch isn't earned. Player gets a clean miss popup instead of
-          // a confusing restart cycle.
+          // On divergence, resolve as escaped instead of looping. Previously
+          // we emitted desync_correction and kept retrying; in practice the
+          // input timeline can be permanently diverged (late transitions
+          // clamped server-side), so the cast would spiral until the 30s
+          // safety timeout. Server is authoritative — progress didn't reach
+          // the floor, so the catch isn't earned.
           if (
             ctx.rejectedFinalCount === DESYNC_REJECT_THRESHOLD &&
             ctx.desyncDetectedAt === null
@@ -1509,15 +1329,10 @@ export default fp(async (fastify) => {
       if (ctx?.activeCastId) {
         clearCastTimers(ctx);
         if (!ctx.hooked) {
-          // Pre-nibble disconnect: bait was consumed at initiate. The 8s
-          // cancel grace handles refund; this is the legacy fast path.
+          // 8s cancel grace.
           void cancelCastOnDisconnect(socket, ctx);
         } else {
-          // Post-nibble disconnect (player was reeling/spinning). Use the
-          // broader abandon path — refund inside the 30s ABANDON grace,
-          // log telemetry past it. Without this branch, every mid-reel
-          // network blip burned a bait, which was the leading cause of
-          // "had bait but can't cast / something feels stuck" reports.
+          // 30s abandon grace covers mid-reel network blips.
           void abandonCastOnDisconnect(socket, ctx);
         }
       }

@@ -1,33 +1,8 @@
 /**
- * One-shot migration for the apex catalog move from filesystem → MongoDB.
- *
- * Pre-cutover (filesystem-driven):
- *   - 3 apex fish were defined in `@hooked/shared` FISH_SPECIES with rarity Apex
- *     (Anh Lucerna, Mattus Aureus, Maximus Tridens).
- *   - Their PNGs lived at `packages/client/public/assets/fish/apex/<file>.png`.
- *   - FishingEvent.apexSpeciesIds held FISH_SPECIES indices into those entries.
- *
- * Post-cutover (DB-backed):
- *   - The ApexFish collection is the source of truth (image + name + weights).
- *   - FishingEvent uses `apexFishIds: ObjectId[]`.
- *   - FishingSession snapshots a richer `eventApexFishesAtStart`.
- *
- * What this script does (idempotent, safe to re-run):
- *   1. For each FISH_SPECIES entry with rarity Apex, read the PNG bytes from
- *      the client public dir and upsert an ApexFish doc keyed on `name`.
- *   2. Walk every FishingEvent that still has the legacy `apexSpeciesIds`
- *      field, build the ObjectId array from the upserted docs, and rewrite
- *      to `apexFishIds`. The legacy field is removed after a successful
- *      rewrite.
- *   3. Walk every active FishingSession that still has the legacy
- *      `eventApexSpeciesAtStart` array, rebuild `eventApexFishesAtStart`
- *      from FISH_SPECIES weights × 10 (kg → hg), then unset the legacy field.
- *
- * Run from the server package:
- *   pnpm --filter @hooked/server tsx src/scripts/migrateApexCatalog.ts
- *
- * Steps 2 + 3 use raw collection ops so they can read fields the new mongoose
- * schema no longer declares (mongoose silently drops them otherwise).
+ * Idempotent migration: filesystem apex assets → ApexFish docs; rewrites
+ * legacy FishingEvent.apexSpeciesIds and FishingSession.eventApexSpeciesAtStart.
+ * Run: pnpm --filter @hooked/server tsx src/scripts/migrateApexCatalog.ts
+ * Uses raw collection ops to read fields mongoose schemas no longer declare.
  */
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -95,8 +70,7 @@ async function seedApexFish(entries: SeedEntry[]): Promise<Map<number, string>> 
   for (const e of entries) {
     const existing = await ApexFish.findOne({ name: e.name });
     if (existing) {
-      // Idempotent: keep the existing image bytes (don't churn) but ensure
-      // the weight range still matches the legacy values for sanity.
+      // Keep image bytes; sync weight range only.
       if (
         existing.weightMinKg !== e.weightMinKg ||
         existing.weightMaxKg !== e.weightMaxKg
@@ -139,7 +113,6 @@ async function rewriteFishingEvents(
   for await (const doc of cursor) {
     const legacyIds = doc.apexSpeciesIds as number[] | undefined;
     if (!legacyIds || legacyIds.length === 0) {
-      // Drop the legacy field even if empty so the schema stays clean.
       await col.updateOne(
         { _id: doc._id },
         { $unset: { apexSpeciesIds: 1 } },

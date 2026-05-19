@@ -59,9 +59,7 @@ const playerSchema = new Schema(
     },
     loginStreak: { type: Number, required: true, default: 0 },
     totalCatches: { type: Number, required: true, default: 0 },
-    // Lifetime aggregate of session_score across all committed sessions.
-    // Mirrors PlayerProfile.total_score from the deprecated on-chain program;
-    // bumped by sessionEngine.commitSession.
+    // Lifetime aggregate of session_score; bumped by sessionEngine.commitSession.
     totalScore: { type: Number, required: true, default: 0 },
     lastSeenAt: { type: Date, default: null },
     ipCountry: { type: String, default: null },
@@ -77,21 +75,16 @@ const catchSchema = new Schema(
       required: true,
       index: true,
     },
-    // Linkage to the off-chain FishingSession that produced this catch.
-    // Null on legacy rows written by the deprecated ER webhook before cutover.
+    // Null on legacy rows written by the deprecated ER webhook.
     sessionId: {
       type: Schema.Types.ObjectId,
       ref: "FishingSession",
       default: null,
       index: true,
     },
-    // Position of this catch within the session — used by the audit Merkle
-    // tree and to detect dropped catches. Null on legacy rows.
+    // Position within the session — used by the audit Merkle tree.
     castIndex: { type: Number, default: null },
-    // Numeric species id (matches SPECIES_TABLE in services/fishing/constants.ts).
-    // The string `species` field is the human-facing label; speciesId is the
-    // canonical identifier for audit and migrations. Null on apex catches —
-    // those are identified by `apexFishId` instead.
+    // Canonical id for audit/migrations. Null on apex catches (identified by apexFishId).
     speciesId: { type: Number, default: null },
     apexFishId: {
       type: Schema.Types.ObjectId,
@@ -107,9 +100,7 @@ const catchSchema = new Schema(
     },
     weightKg: { type: Number, required: true },
     score: { type: Number, required: true },
-    // Single zone post-migration. Enum kept as a one-element list so mongoose
-    // enforces the value on writes; legacy rows with other zones still load
-    // because mongoose enum validation runs on save, not load.
+    // Legacy rows with other zones still load (enum validation is save-time).
     zone: {
       type: String,
       required: true,
@@ -262,13 +253,8 @@ const roomSchema = new Schema(
 
     totalYieldSol: { type: Number, default: null },
 
-    // LP cycle tracking (Meteora DLMM SOL/USDC). Populated by the
-    // room-lifecycle tick: deployedAt when withdraw_to_lp_manager fires,
-    // exitedAt when liquidity is removed and yield reconciled.
-    // realizedYieldLamports is what gets passed to close_room; clamped to 0
-    // on net loss (LP_MANAGER buffer covers the gap).
-    // Per-leg signatures + amounts let the admin dashboard reconstruct the
-    // full SOL→USDC→SOL cycle. Fields are optional; older rooms have null.
+    // LP cycle tracking (Meteora DLMM SOL/USDC). realizedYieldLamports is
+    // clamped to 0 on net loss (LP_MANAGER buffer covers the gap).
     lp: {
       type: {
         status: {
@@ -315,14 +301,9 @@ const roomSchema = new Schema(
     closeTxSignature: { type: String, default: null },
     finalizeTxSignature: { type: String, default: null },
 
-    // B10 (post-2026-05-18 incident): flagged by settleRoom when the
-    // pre-close finalize-leaderboard step finds Redis ahead of the
-    // on-chain top-3 cache. Indicates the per-session score-bridge
-    // worker was silently broken for this room's lifetime. Admin
-    // dashboards can list rooms with this flag to triage score-bridge
-    // health; the settlement itself proceeds normally (the keeper
-    // pushed `scoreBridgeGapPushed` update_room_entry_score txs to
-    // patch the cache before close_room ran).
+    // Set when settleRoom finds Redis ahead of the on-chain top-3 cache —
+    // indicates the per-session score-bridge worker was broken for this
+    // room. Settlement proceeds normally via patch txs.
     scoreBridgeGapDetected: { type: Boolean, default: false },
     scoreBridgeGapAt: { type: Date, default: null },
     scoreBridgeGapPushed: { type: Number, default: 0 },
@@ -331,18 +312,15 @@ const roomSchema = new Schema(
 );
 roomSchema.index({ phase: 1, closesAt: 1 });
 
-// Per-cast reaction telemetry. Written by the WS gateway when a cast resolves
-// (whether hit, missed reaction, miss in mechanic, or pre-nibble cancel) so
-// offline analysis can spot impossible reflexes (<100ms), repeated pre-nibble
-// taps, or sample jitter outside human ranges.
+// Per-cast reaction telemetry for offline cheat detection (impossible reflexes,
+// repeated pre-nibble taps, inhuman sample jitter).
 const reactionLogSchema = new Schema(
   {
     wallet: { type: String, required: true, index: true },
     clientCastId: { type: String, required: true },
     sessionPda: { type: String, default: null },
     nibbleDelayMs: { type: Number, required: true },
-    // Null when outcome is "cancelled" (disconnect before nibble) or
-    // "escaped_no_tap" (player never tapped within window).
+    // Null on "cancelled" or "escaped_no_tap".
     reactionTimeMs: { type: Number, default: null },
     preNibbleTapCount: { type: Number, required: true, default: 0 },
     sampleJitterMaxMs: { type: Number, default: null },
@@ -454,14 +432,8 @@ playerBountyProgressSchema.index(
   { unique: true }
 );
 
-// ---------------------------------------------------------------------------
-// ApexFish — admin-uploaded apex fish definition. Replaces the legacy
-// filesystem catalog (PNGs in client/public/assets/fish/apex + entries in
-// FISH_SPECIES). Image bytes are stored inline as a Buffer; the public
-// `GET /admin/apex-fish/:id/image` route streams them. Weights are stored
-// in kilograms (admin UX); converted to hectograms (×10) when snapshot onto
-// a session for the cast roll's integer math.
-// ---------------------------------------------------------------------------
+// Weights stored in kg (admin UX); converted to hectograms (×10) when
+// snapshot onto a session for the cast roll's integer math.
 const APEX_IMAGE_MIME_TYPES = [
   "image/png",
   "image/jpeg",
@@ -497,24 +469,6 @@ apexFishSchema.pre("validate", function (next) {
   next();
 });
 
-// ---------------------------------------------------------------------------
-// FishingEvent — admin-managed event window that gates Apex fish drops and
-// holds an optional SOL prize pool. One document per event; `active: true`
-// is enforced as unique by a partial index so only one event is live at a
-// time. The lifecycle worker (`jobs/eventLifecycle.ts`) auto-promotes the
-// next-scheduled event to active when its `startsAt` arrives and demotes
-// it when `endsAt` passes.
-//
-// `apexFishIds` references the `ApexFish` collection. Cast rolls during this
-// event only pick from this list when the rarity tier lands on Apex (see
-// services/fishing/rng.ts:rollCast). The session-start snapshot
-// (`eventApexFishesAtStart`) freezes the chosen pool + weight ranges so an
-// admin can't retroactively change Apex availability mid-session.
-//
-// `finalRanks` is computed after `endsAt` by services/eventWinners.ts and
-// mirrors `roomWinnerSchema` so the existing `bountySolPayout` keeper
-// transfer pattern can drive payout without a new worker.
-// ---------------------------------------------------------------------------
 const fishingEventFinalRankSchema = new Schema(
   {
     rank: { type: Number, required: true },
@@ -537,13 +491,10 @@ const fishingEventSchema = new Schema(
     active: { type: Boolean, required: true, default: false },
     startsAt: { type: Date, required: true },
     endsAt: { type: Date, required: true },
-    // Basis points (out of BPS_SCALE = 10_000) redirected from Basic to Apex
-    // during the event. Capped at 5000 (MAX_EVENT_APEX_BP) so the rarity
-    // distribution stays well-formed; see effectiveRarityWeights in rng.ts.
+    // Basis points redirected from Basic to Apex. Capped at 5000 to keep
+    // the rarity distribution well-formed (see effectiveRarityWeights).
     apexBp: { type: Number, required: true, min: 0, max: 5000 },
     prizePoolSol: { type: Number, required: true, default: 0, min: 0 },
-    // ApexFish ObjectIds (admin-uploaded catalog). At least one required so a
-    // cast that rolls Apex during this event always has a fish to land on.
     apexFishIds: {
       type: [{ type: Schema.Types.ObjectId, ref: "ApexFish" }],
       required: true,
@@ -552,16 +503,13 @@ const fishingEventSchema = new Schema(
         message: "apexFishIds must contain at least one fish id",
       },
     },
-    // Populated by services/eventWinners.computeEventWinners after endsAt.
-    // null until computed; payout flow flips `paid` true per row.
     finalRanks: { type: [fishingEventFinalRankSchema], default: null },
     createdBy: { type: String, required: true },
   },
   { timestamps: true },
 );
 
-// Only one active event at a time. Mongo partial unique index on the active
-// flag ensures concurrent activations resolve to a single winner.
+// Partial unique index ensures concurrent activations resolve to one winner.
 fishingEventSchema.index(
   { active: 1 },
   { unique: true, partialFilterExpression: { active: true } },
@@ -569,70 +517,30 @@ fishingEventSchema.index(
 fishingEventSchema.index({ startsAt: 1 });
 fishingEventSchema.index({ endsAt: 1 });
 
-// ---------------------------------------------------------------------------
-// FishingDailySeed — daily HMAC key with public commit-reveal so players can
-// audit RNG fairness post-hoc. One document per UTC date.
-//
-//   publishedAt: row written (commitment, sha256(seed), is public immediately)
-//   revealAfter: timestamp after which the raw `seed` is exposed via the
-//                audit API. Set to start-of-next-UTC-day at write time.
-//
-// Phase 5 audit flow:
-//   1. cast time     → row exists with seed + seedHash; seedHash exposed publicly
-//   2. cast persists → pendingCast.seedHash = sha256(seedForCast(seed, ...))
-//   3. day ends      → revealAfter < Date.now(); audit API returns the raw seed
-//   4. player        → recomputes seedForCast(...), checks it matches their
-//                      catch's seedHash, proving the fish wasn't rerolled
-// ---------------------------------------------------------------------------
+// Daily HMAC key with public commit-reveal for post-hoc RNG fairness audits.
+// Players recompute seedForCast(...) after revealAfter and match against the
+// catch's seedHash to prove the fish wasn't rerolled.
 const fishingDailySeedSchema = new Schema(
   {
-    // ISO date (YYYY-MM-DD) in UTC. Unique — one seed per day.
     date: { type: String, required: true, unique: true, index: true },
-    // 32-byte raw seed used as HMAC key in seedForCast. Never exposed before
-    // revealAfter; gated by the audit endpoint.
+    // 32-byte HMAC key. Never exposed before revealAfter.
     seed: { type: Buffer, required: true },
-    // sha256(seed). Public from the moment the row is written.
     seedHash: { type: Buffer, required: true },
     publishedAt: { type: Date, required: true, default: () => new Date() },
-    // Public exposure of `seed` only after this timestamp. Default = start of
-    // next UTC day (i.e. once today is over).
+    // Default = start of next UTC day.
     revealAfter: { type: Date, required: true },
   },
   { timestamps: true },
 );
 
-// ---------------------------------------------------------------------------
-// FishingSession — server-authoritative replacement for the on-chain
-// `FishingSession` PDA. One document per (player, dateKey, window). Tracks
-// bait, score, in-flight cast state, and the audit hooks (daily seed, merkle
-// root, keeper bridge tx) that let players verify their session was rolled
-// fairly even though the RNG ran off-chain.
-//
-// Field map to the on-chain struct (programs/hooked-fishing/src/state.rs):
-//   authority     → playerId + walletAddress
-//   bait_remaining→ baitRemaining
-//   session_score → sessionScore
-//   cast_count    → castCount
-//   pity_counter  → pityCounter
-//   window        → window (0 day, 1 night)
-//   date          → dateKey (full int, not u16-truncated)
-//   tier          → tier (bait tier, derived from deposit)
-//   is_active     → status = "active"
-//   pending_cast + current_*  → pendingCast subdoc
-//   delegation_state, bump    → DROPPED (no PDA / no ER)
-// ---------------------------------------------------------------------------
 const pendingCastSchema = new Schema(
   {
     castIndex: { type: Number, required: true },
-    // Numeric SPECIES_TABLE index for non-apex casts. Null when the cast
-    // rolled Apex — the rolled fish is identified by `apexFishId` (a doc
-    // in the admin-managed `ApexFish` collection) instead, since the apex
-    // catalog is dynamic and not represented in SPECIES_TABLE.
+    // Null when the cast rolled Apex (use apexFishId instead).
     speciesId: { type: Number, default: null },
     apexFishId: { type: Schema.Types.ObjectId, ref: "ApexFish", default: null },
-    // Display name from FISH_SPECIES (non-apex) or ApexFish.name (apex).
-    // Persisted at cast time so the catch row gets a stable label even if
-    // the apex fish is later renamed.
+    // Persisted at cast time so the catch row keeps a stable label even
+    // if the apex fish is later renamed.
     speciesName: { type: String, default: null },
     rarity: { type: Number, required: true, min: 0, max: 4 },
     weightHg: { type: Number, required: true },
@@ -640,9 +548,7 @@ const pendingCastSchema = new Schema(
     greenZoneWidth: { type: Number, required: true },
     mechanic: { type: Number, required: true, min: 0, max: 1 },
     castAt: { type: Date, required: true },
-    // sha256 of the per-cast HMAC seed. Used by the audit endpoint to prove
-    // the rolled fish is the one the seed produced — without leaking the
-    // seed itself until the daily reveal.
+    // Used by the audit endpoint without leaking the seed before reveal.
     seedHash: { type: Buffer, required: true },
   },
   { _id: false },
@@ -656,34 +562,27 @@ const fishingSessionSchema = new Schema(
       required: true,
       index: true,
     },
-    // Denormalized for fast wallet → session lookups during cast handling
-    // and for inclusion in the per-cast HMAC seed input.
+    // Denormalized for fast wallet → session lookups and HMAC seed input.
     walletAddress: { type: String, required: true, index: true },
 
-    // Room this session is funded by. A new room deposit within the same
-    // (dateKey, window) abandons any prior active session and creates a
-    // fresh one — see roomRouter.markPriorSessionAbandoned. Null on legacy
-    // rows written before this field was added.
+    // A new room deposit within the same (dateKey, window) abandons any
+    // prior active session — see roomRouter.markPriorSessionAbandoned.
     roomId: { type: String, default: null, index: true },
 
-    // Day-grouping (UTC days since epoch) and window (0 day, 1 night).
+    // UTC days since epoch and window (0 day, 1 night).
     dateKey: { type: Number, required: true },
     window: { type: Number, required: true, enum: [0, 1] },
 
-    // Bait economy. baitInitial is captured at start so we can show "X/Y left"
-    // without re-deriving from deposit tier.
     baitInitial: { type: Number, required: true, min: 0 },
     baitRemaining: { type: Number, required: true, min: 0 },
     tier: { type: Number, required: true, default: 0 },
 
-    // Score + pity counters.
     sessionScore: { type: Number, required: true, default: 0, min: 0 },
     castCount: { type: Number, required: true, default: 0, min: 0 },
     catchCount: { type: Number, required: true, default: 0, min: 0 },
     pityCounter: { type: Number, required: true, default: 0, min: 0 },
 
-    // Lifecycle. "active" → "committed" on commitSession. "abandoned" if
-    // the player never commits before the next window opens (keeper sweep).
+    // "active" → "committed" on commitSession; "abandoned" via keeper sweep.
     status: {
       type: String,
       enum: ["active", "committed", "abandoned"],
@@ -694,27 +593,16 @@ const fishingSessionSchema = new Schema(
     startedAt: { type: Date, required: true, default: () => new Date() },
     committedAt: { type: Date, default: null },
 
-    // In-flight cast (replaces FishingSession.pending_cast + current_*).
-    // Null when no cast is pending.
     pendingCast: { type: pendingCastSchema, default: null },
 
-    // Audit context: which dailySeed key this session's casts were rolled
-    // against, and the per-session merkle root submitted in the keeper
-    // bridge tx memo.
     dailySeedDate: { type: String, required: true },
     merkleRoot: { type: Buffer, default: null },
 
-    // Bridge to hooked_rooms.update_room_entry_score. Populated by the
-    // keeper job in Phase 3.
     chainScoreTxSignature: { type: String, default: null },
     chainScoreBridgedAt: { type: Date, default: null },
 
-    // Snapshot of the active FishingEvent at session start so an admin can't
-    // retroactively change Apex availability or species choice for an already-
-    // rolled session. `eventApexFishesAtStart` pins the apex fish pool +
-    // weight ranges so cast rolls in this session always resolve against the
-    // pool the admin selected at session-start time, even if the event (or
-    // an individual ApexFish doc) is later edited.
+    // Snapshot at session-start so admins can't retroactively change Apex
+    // availability for an already-rolled session.
     eventActiveAtStart: { type: Boolean, required: true, default: false },
     eventNameAtStart: { type: String, default: null },
     eventApexBpAtStart: { type: Number, required: true, default: 0 },
@@ -738,10 +626,8 @@ const fishingSessionSchema = new Schema(
 );
 
 // One ACTIVE session per (player, dateKey, window). Committed/abandoned
-// sessions can coexist for the same slot — that's what lets a new room
-// deposit mid-window abandon the prior session and create a fresh one
-// (see roomRouter.markPriorSessionAbandoned) without losing the audit
-// trail of the prior session's catches and merkle root.
+// can coexist — preserves audit trail when a new room deposit abandons
+// the prior session mid-window.
 fishingSessionSchema.index(
   { playerId: 1, dateKey: 1, window: 1 },
   { unique: true, partialFilterExpression: { status: "active" } },
@@ -749,17 +635,9 @@ fishingSessionSchema.index(
 fishingSessionSchema.index({ status: 1, dateKey: 1 });
 fishingSessionSchema.index({ walletAddress: 1, dateKey: -1 });
 
-// Heartbeat written by every keeper tick (room-lifecycle, event-lifecycle,
-// etc). Single doc per keeperName, upserted with each completion. The
-// /healthz/keeper endpoint reads these and returns 500 when any required
-// keeper is stale beyond its threshold — catches Redis-flushed scheduler
-// state, dead worker dyno, repeated tick failures, etc. without anyone
-// having to watch logs.
-//
-// Why Mongo and not Redis: Redis is the thing most likely to be the
-// failure mode (BullMQ scheduler key lost on Redis flush). Storing the
-// heartbeat in the same place as the BullMQ state would mean a Redis
-// outage hides the very symptom we're trying to detect.
+// Stored in Mongo (not Redis): Redis is the most likely failure mode
+// (BullMQ scheduler key lost on flush). Putting the heartbeat in Redis
+// would let an outage mask the very symptom we're detecting.
 const keeperHeartbeatSchema = new Schema(
   {
     keeperName: { type: String, required: true, unique: true, index: true },
@@ -770,9 +648,7 @@ const keeperHeartbeatSchema = new Schema(
       required: true,
     },
     lastError: { type: String, default: null },
-    /** Number of consecutive ticks ending in `error`. Reset to 0 on ok.
-     *  Surfaces "keeper is running but every tick fails" — different
-     *  failure mode than "keeper hasn't ticked at all". */
+    /** Surfaces "keeper running but every tick fails" vs "keeper not ticking". */
     consecutiveErrors: { type: Number, required: true, default: 0 },
   },
   { timestamps: true },
@@ -796,8 +672,7 @@ export type PlayerBountyProgressDocument = InferSchemaType<typeof playerBountyPr
 export const APEX_IMAGE_MIME_TYPES_LIST = APEX_IMAGE_MIME_TYPES;
 export type ApexImageMimeType = (typeof APEX_IMAGE_MIME_TYPES)[number];
 
-// Reuse an already-registered model if the module graph is loaded twice
-// (happens under Vitest when multiple test files import schema.ts).
+// Reuse an already-registered model — Vitest may load schema.ts twice.
 function model<S extends mongoose.Schema>(
   name: string,
   schema: S,

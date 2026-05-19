@@ -8,30 +8,6 @@ import { computeSessionDigest } from "../services/fishing/sessionEngine.js";
 import { seedForCast } from "../services/fishing/rng.js";
 import { publicProcedure, router } from "./trpc.js";
 
-// ---------------------------------------------------------------------------
-// Audit router — public read-only endpoints that let any player verify the
-// off-chain RNG was fair. Three layers of evidence:
-//
-//   1. dailySeed(date)
-//      - Pre-day-end:  returns sha256(seed) only (commitment).
-//      - Post-day-end: returns the raw seed too. Combined with the per-cast
-//                      seedHash stored on FishingSession.pendingCast, the
-//                      player can prove their cast wasn't rerolled by
-//                      recomputing seedForCast(seed, sessionId, castIndex,
-//                      pity, wallet) → sha256 → equals stored seedHash.
-//
-//   2. session(sessionId)
-//      - Returns the canonical catch leaves (sorted by castIndex) plus the
-//        merkleRoot stored at commit time. Player recomputes the digest
-//        from leaves and asserts equality with the on-chain memo's root.
-//
-//   3. castVerify(sessionId, castIndex, dailySeedHex, ...)
-//      - Convenience: server reproduces the seed → catch derivation given
-//        a revealed daily seed and returns the recomputed catch alongside
-//        the stored values so a player without local crypto tooling can
-//        spot-check.
-// ---------------------------------------------------------------------------
-
 const ObjectIdString = z
   .string()
   .regex(/^[0-9a-f]{24}$/i, "Must be a 24-char hex ObjectId");
@@ -79,8 +55,7 @@ const SessionAuditOutput = z
         })
         .strict(),
     ),
-    /** Merkle root the server recomputes from public catches; should match
-     *  `merkleRoot` if the session was committed. */
+    /** Should equal `merkleRoot` if the session was committed. */
     recomputedDigest: z.string(),
   })
   .strict();
@@ -110,10 +85,7 @@ const RARITY_NAME_TO_INT: Record<string, number> = {
 };
 
 export const auditRouter = router({
-  /**
-   * Return the daily seed commitment (sha256) and, after the reveal
-   * timestamp, the raw seed itself. Public: anyone can audit any past day.
-   */
+  /** Returns sha256(seed) commitment; after revealAfter also returns raw seed. */
   dailySeed: publicProcedure
     .input(z.object({ date: DateISO }).strict())
     .output(DailySeedOutput.nullable())
@@ -122,24 +94,15 @@ export const auditRouter = router({
       return view;
     }),
 
-  /**
-   * Return the canonical catch leaves for a session plus the merkle root
-   * recomputed server-side. A player compares `recomputedDigest` against the
-   * `merkleRoot` field — if equal, the catch list is the same one used to
-   * compute the on-chain memo.
-   */
   session: publicProcedure
     .input(z.object({ sessionId: ObjectIdString }).strict())
     .output(SessionAuditOutput)
     .query(async ({ input }) => {
-      // Avoid .lean() — mongoose returns Buffer fields as BSON Binary in lean
-      // mode, which doesn't round-trip through `.toString("hex")`.
+      // Hydrated (not .lean()) — Buffer fields don't round-trip through lean.
       const session = await FishingSession.findById(input.sessionId);
       if (!session) {
         throw new TRPCError({ code: "NOT_FOUND", message: "Session not found" });
       }
-      // Catch docs have no Buffer fields, so .lean() is safe and saves a
-      // hydration pass when the catch list is large.
       const catches = await Catch.find({ sessionId: session._id })
         .sort({ castIndex: 1 })
         .lean();
@@ -170,20 +133,11 @@ export const auditRouter = router({
       };
     }),
 
-  /**
-   * Given a revealed daily seed, recompute the per-cast HMAC seed hash and
-   * compare it to the stored value on the session's pendingCast (or, after
-   * resolution, the value committed in the catch's audit context).
-   *
-   * For now we only verify against `pendingCast.seedHash` — Phase 6 will
-   * persist seedHash on the Catch row itself so historical casts are
-   * verifiable too. v1 is sufficient for live-cast audit.
-   */
+  /** Currently verifies only against pendingCast.seedHash (live-cast audit). */
   castVerify: publicProcedure
     .input(CastVerifyInput)
     .output(CastVerifyOutput)
     .query(async ({ input }) => {
-      // Hydrated doc — see note on session() above.
       const session = await FishingSession.findById(input.sessionId);
       if (!session) {
         throw new TRPCError({ code: "NOT_FOUND", message: "Session not found" });

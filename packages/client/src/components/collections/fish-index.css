@@ -150,9 +150,7 @@
   filter: brightness(0) opacity(0.35);
 }
 
-/* Apex art renders as a black silhouette placeholder for now — admin-uploaded
-   apex assets are surfaced as proper-color art in a later pass. The locked
-   rule above wins for undiscovered apex (it adds the dim opacity). */
+/* Black silhouette placeholder until proper apex art lands. */
 .fish-index-slot-apex .fish-index-slot-art {
   filter: brightness(0);
 }

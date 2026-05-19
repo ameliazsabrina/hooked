@@ -22,10 +22,8 @@ import { useProgramPaused } from "~/hooks/use-program-paused";
 import "./onboarding.css";
 
 function collectErrorText(raw: unknown): string {
-  // Wallet adapters (WalletError), Anchor, and web3.js all wrap the real
-  // Solana error inside nested fields. Walk the common ones so the classifier
-  // sees the underlying message even when `.message` is a generic wrapper
-  // like "Unexpected error".
+  // Walk nested error fields — wallet adapters/Anchor/web3.js wrap the real
+  // message behind generic outer messages like "Unexpected error".
   const parts: string[] = [];
   const seen = new Set<unknown>();
   const visit = (node: unknown, depth: number) => {
@@ -48,7 +46,6 @@ function collectErrorText(raw: unknown): string {
   try {
     parts.push(JSON.stringify(raw));
   } catch {
-    // ignore circular structures
   }
   return parts.join(" \n ");
 }
@@ -92,9 +89,7 @@ export function DepositScreen() {
     activeRoom.data?.status === "open" ? activeRoom.data.room : null;
   const openRoomId = openRoom?.onChainRoomId ?? null;
 
-  // programPaused === null means we haven't loaded the config yet — don't
-  // block the user during initial render; the on-chain check is the source
-  // of truth if we're wrong.
+  // null = config not loaded yet; on-chain check is source of truth.
   const canSubmit =
     isValidDepositAmount(amount) &&
     !loading &&
@@ -119,10 +114,6 @@ export function DepositScreen() {
       const roomEntryPda = getRoomEntryPda(roomPda, publicKey);
       const depositLamports = new BN(Math.floor(amount * LAMPORTS_PER_SOL));
 
-      // PlayerProfile init is no longer needed: the on-chain hooked_fishing
-      // program (which owned the PlayerProfile PDA) was decommissioned in
-      // Phase 6. Player rows now live in MongoDB and are auto-created on
-      // wallet auth — no on-chain pre-instruction required.
       let txSignature: string | undefined;
       try {
         txSignature = await program.methods
@@ -137,8 +128,7 @@ export function DepositScreen() {
           .rpc({ commitment: "confirmed", skipPreflight: false });
       } catch (rpcErr) {
         const msg = rpcErr instanceof Error ? rpcErr.message : String(rpcErr);
-        // "already in use" / "already been processed" mean the prior deposit
-        // already landed on-chain — server recovers state via RoomEntry.
+        // Prior deposit already landed on-chain; server recovers via RoomEntry.
         const recoverable =
           /already in use/i.test(msg) ||
           /already been processed/i.test(msg) ||
@@ -167,7 +157,6 @@ export function DepositScreen() {
   const nextOpensAt =
     activeRoom.data?.status === "closed" ? activeRoom.data.nextOpensAt : null;
 
-  // Tick once per second only while waiting for the next room window.
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     if (!nextOpensAt) return;

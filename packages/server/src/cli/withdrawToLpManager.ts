@@ -12,20 +12,8 @@ import {
 } from "../solana/roomsProgram.js";
 
 /**
- * One-off withdraw of a single room's vault balance to LP_MANAGER.
- *
- * Bypasses the lifecycle cron (which also runs the Meteora deploy) so this
- * tool is safe to use when LP is disabled and you just want the SOL out of
- * the program-controlled room_vault PDA.
- *
- *   pnpm tsx src/cli/withdrawToLpManager.ts <roomId|onChainPoolId>
- *
- * Accepts either the DB roomId (e.g. "R-20260511-09be80") or the on-chain
- * numeric pool ID. With a DB roomId, looks up onChainPoolId from MongoDB.
- *
- * The amount withdrawn is `min(room.deposited_lamports, vault_balance)` so
- * mismatches between DB-tracked deposits and on-chain state don't matter.
- * The program will refuse if amount > deposited_lamports.
+ * Withdraws min(room.deposited_lamports, vault_balance) → LP_MANAGER.
+ * Usage: pnpm tsx src/cli/withdrawToLpManager.ts <roomId|onChainPoolId>
  */
 async function main() {
   const idArg = process.argv[2];
@@ -36,8 +24,6 @@ async function main() {
     process.exit(1);
   }
 
-  // If arg parses cleanly as a number, treat as on-chain pool ID. Otherwise
-  // treat as a DB roomId string and look up the on-chain ID from MongoDB.
   let roomId: bigint;
   const numericArg = /^[0-9]+$/.test(idArg);
   if (numericArg) {
@@ -135,22 +121,16 @@ async function main() {
   const vaultBalance = BigInt(await connection.getBalance(roomVaultPda));
   const deposited = BigInt(room.depositedLamports.toString());
 
-  // Rent-exempt minimum for a 0-byte system-owned account. After the
-  // withdraw, room_vault must either be fully drained (0 lamports →
-  // reaped by runtime) or hold ≥ this amount, otherwise the runtime
-  // rejects with "insufficient funds for rent".
+  // Vault must end at 0 (reaped) or ≥ rentMin, else runtime rejects.
   const rentMin = BigInt(
     await connection.getMinimumBalanceForRentExemption(0),
   );
 
-  // First-pass: withdraw min(deposited, vaultBalance) — capped by the
-  // program's `amount <= room.deposited_lamports` constraint.
   let amount = deposited < vaultBalance ? deposited : vaultBalance;
   let remainder = vaultBalance - amount;
 
-  // If the remainder would be a non-zero amount below rent minimum,
-  // shrink the withdraw so what's left is exactly rent-exempt. The
-  // stray ~rent-min lamports get reclaimed at close_room time.
+  // Shrink withdraw so the remainder is exactly rent-exempt; stray rent
+  // is reclaimed at close_room.
   if (remainder > 0n && remainder < rentMin) {
     amount = vaultBalance - rentMin;
     remainder = rentMin;

@@ -1,26 +1,7 @@
 /**
- * Format a Solana / Anchor error into a single multi-line string with
- * enough context to actually triage from logs alone.
- *
- * Anchor's `AnchorError`, web3.js's `SendTransactionError`, and the
- * various TransactionExpired* errors all hide useful fields behind
- * `.logs`, `.programLogs`, `.transactionMessage`, `.error.errorCode`,
- * etc. Calling `(err as Error).message` only surfaces the top-line —
- * which is how we ended up with the 2026-05-18 watchdog log saying
- * "Simulation failed." with no further detail and a tick-every-15-min
- * mystery to debug.
- *
- * This helper walks the known fields and assembles a flat string. Cheap,
- * defensive, never throws, never assumes structure beyond `typeof` checks
- * so a future @solana/web3.js or @coral-xyz/anchor minor that renames a
- * field just falls back to the next slot.
- *
- * Output shape (each section optional, separator = newline):
- *
- *   <top-line message>
- *   programLogs: [Program ... invoke …, Program log: ..., ...]
- *   anchor: code=AccountNotInitialized (3012) "..."
- *   cause: <recursive format of err.cause>
+ * Walks Solana/Anchor error fields (.logs, .error.errorCode,
+ * .transactionMessage, .cause) into a flat triage-friendly string.
+ * Cheap, defensive, never throws.
  */
 export function formatSolanaError(err: unknown): string {
   if (err === null || err === undefined) return "(no error)";
@@ -43,10 +24,7 @@ export function formatSolanaError(err: unknown): string {
 
   const e = err as Record<string, unknown> & { logs?: unknown };
 
-  // 1. Program logs (SendTransactionError, Anchor's translated errors).
-  //    Both store a `string[]` at `.logs`. Some versions also expose
-  //    `.transactionLogs` or `.programLogs`. Pick the first array we
-  //    find and cap at ~30 lines to avoid log explosions.
+  // Pick the first available log array; cap at 30 lines.
   const logCandidates: unknown[] = [
     e.logs,
     (e as { transactionLogs?: unknown }).transactionLogs,
@@ -61,9 +39,6 @@ export function formatSolanaError(err: unknown): string {
     }
   }
 
-  // 2. Anchor error breakdown — `error: { errorCode: { code, number },
-  //    errorMessage, origin? }`. AnchorError instances expose this; some
-  //    error subclasses also stash `errorLogs`.
   const anchorErr = (e as { error?: unknown }).error;
   if (anchorErr && typeof anchorErr === "object") {
     const a = anchorErr as {
@@ -78,14 +53,11 @@ export function formatSolanaError(err: unknown): string {
     parts.push(`anchor: code=${code} (${num})${origin} "${msg}"`);
   }
 
-  // 3. `transactionMessage` from SendTransactionError — the human-readable
-  //    pre-logs message (sometimes more specific than the top-line).
   const txMsg = (e as { transactionMessage?: unknown }).transactionMessage;
   if (typeof txMsg === "string" && txMsg && txMsg !== top) {
     parts.push(`transactionMessage: ${txMsg}`);
   }
 
-  // 4. signature, if present (helps cross-reference against the explorer).
   const sig =
     (e as { signature?: unknown }).signature ??
     (e as { txid?: unknown }).txid;
@@ -93,9 +65,7 @@ export function formatSolanaError(err: unknown): string {
     parts.push(`signature: ${sig}`);
   }
 
-  // 5. cause chain — recurse once. AnchorError wraps the underlying
-  //    SendTransactionError under .cause; without this the program logs
-  //    only show up if the top-level was the send error itself.
+  // Recurse — AnchorError wraps SendTransactionError under .cause.
   const cause = (e as { cause?: unknown }).cause;
   if (cause && cause !== err) {
     parts.push(`cause: ${formatSolanaError(cause)}`);

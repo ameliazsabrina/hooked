@@ -1,30 +1,17 @@
-/**
- * DB-backed event-config reader. Backs the WS `event_status` broadcast and
- * the cast-flow snapshot at session start. Source of truth: the
- * `FishingEvent` collection, written by the admin event router and the
- * event-lifecycle worker. One active event at a time (enforced by partial
- * unique index on `active: true`).
- *
- * `getEventStatus`/`getActiveEvent` self-heal expired events: if a row has
- * `active: true` but `endsAt < now`, this layer treats it as inactive even
- * before the lifecycle worker flips the flag. Mirrors the original on-chain
- * `initiate_cast` semantics.
- */
+// Self-heals expired events: `active: true` rows past endsAt read as inactive
+// even before the lifecycle worker flips the flag.
 import { ApexFish, FishingEvent } from "../db/schema.js";
 import { env } from "../config/env.js";
 
 export interface ApexFishStatusEntry {
-  /** ApexFish ObjectId, 24-char hex. */
   id: string;
   name: string;
   weightMinKg: number;
   weightMaxKg: number;
-  /** Public asset URL for the dashboard / player client to render. */
   assetUrl: string;
 }
 
 export interface EventStatus {
-  /** Admin-typed event display name (e.g. "Colosseum"). */
   name: string;
   /** Unix seconds. */
   startsAt: number;
@@ -32,13 +19,7 @@ export interface EventStatus {
   endsAt: number;
   /** Basis points (0..5000) redirected from Basic to Apex during the event. */
   apexBp: number;
-  /** Total SOL prize pool announced to players in the HUD. */
   prizePoolSol: number;
-  /**
-   * Apex fish the cast roll picks from when Apex rolls during this event.
-   * Includes assetUrl + name so HUD banners can show fish art without an
-   * extra round-trip.
-   */
   apexFishes: ApexFishStatusEntry[];
 }
 
@@ -65,8 +46,7 @@ function statusEqual(a: EventStatus | null, b: EventStatus | null): boolean {
 }
 
 async function fetchFromDb(): Promise<EventStatus | null> {
-  // Single active event by partial unique index; the time bounds defend
-  // against the lifecycle worker lagging behind reality.
+  // Time bounds defend against lifecycle worker lag.
   const now = new Date();
   const row = await FishingEvent.findOne({
     active: true,
@@ -78,8 +58,7 @@ async function fetchFromDb(): Promise<EventStatus | null> {
     { _id: { $in: row.apexFishIds } },
     { name: 1, weightMinKg: 1, weightMaxKg: 1 },
   ).lean();
-  // Preserve the order admins selected so deterministic apex picks match
-  // (the cast roll uses the snapshot which is built off the same order).
+  // Preserve admin-selected order — cast roll uses the same snapshot.
   const byId = new Map(fishes.map((f) => [String(f._id), f]));
   const apexFishes: ApexFishStatusEntry[] = [];
   for (const id of row.apexFishIds) {
@@ -103,11 +82,7 @@ async function fetchFromDb(): Promise<EventStatus | null> {
   };
 }
 
-/**
- * Fetch the active event status. Cached for 30s to keep the cast-start hot
- * path off Mongo. `force=true` bypasses the cache (used by the admin route
- * after writes and by the lifecycle worker after promote/demote).
- */
+/** 30s cache. `force=true` bypasses (admin writes, lifecycle promote/demote). */
 export async function getEventStatus(force = false): Promise<EventStatus | null> {
   const now = Date.now();
   if (!force && cached && now - cached.fetchedAt < CACHE_TTL_MS) {
@@ -136,10 +111,7 @@ export async function getEventStatus(force = false): Promise<EventStatus | null>
   return inflight;
 }
 
-/**
- * Synchronous read of the cached event. Returns null if the cache hasn't been
- * warmed yet — call `getEventStatus(true)` once at boot.
- */
+/** Sync read of the cache — null until getEventStatus(true) warms it at boot. */
 export function getActiveEvent(): EventStatus | null {
   const value = cached?.value;
   if (!value) return null;
@@ -151,10 +123,7 @@ export function getActiveApexBp(): number {
   return getActiveEvent()?.apexBp ?? 0;
 }
 
-/**
- * Subscribe to event-status transitions. The poller fires the callback only
- * when the cached value differs from the previous fetch.
- */
+/** Fires only on transitions, not on every poll. */
 export function onEventChange(fn: (status: EventStatus | null) => void): () => void {
   listeners.add(fn);
   return () => {
@@ -162,10 +131,7 @@ export function onEventChange(fn: (status: EventStatus | null) => void): () => v
   };
 }
 
-/**
- * Start the periodic poller. Idempotent — first call wires the interval, the
- * gateway calls this once at boot via `ensureEventCacheBound`.
- */
+/** Idempotent. */
 export function startEventPolling(intervalMs = CACHE_TTL_MS): void {
   if (pollTimer) return;
   pollTimer = setInterval(() => {
@@ -175,7 +141,6 @@ export function startEventPolling(intervalMs = CACHE_TTL_MS): void {
   }, intervalMs);
 }
 
-/** Stop the poller. Used by tests and graceful shutdown. */
 export function stopEventPolling(): void {
   if (pollTimer) {
     clearInterval(pollTimer);
@@ -183,7 +148,7 @@ export function stopEventPolling(): void {
   }
 }
 
-/** Test-only: clear the cache so a fresh DB read fires on next call. */
+/** Test-only. */
 export function _resetEventCache(): void {
   cached = null;
   inflight = null;

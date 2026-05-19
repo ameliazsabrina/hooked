@@ -9,8 +9,7 @@ import { playSfx } from "~/utils/audio";
 import { SettingsButton } from "~/components/settings/settings-button";
 import type { RoomLeaderboardSnapshot } from "~/hooks/use-fishing-ws";
 
-// Live updates older than this fall back to the tRPC poll (covers the case
-// where the WS dropped a frame or the player just connected).
+// Older live updates fall back to the tRPC poll.
 const LIVE_LEADERBOARD_MAX_AGE_MS = 60_000;
 
 interface CatchEntry {
@@ -89,8 +88,7 @@ export function RightSidebar({
     { roomId: roomId ?? "" },
     {
       enabled: connected && !!roomId,
-      // WS broadcasts drive freshness; this is the fallback for first paint
-      // and missed frames.
+      // WS broadcasts drive freshness; this is the first-paint fallback.
       refetchInterval: 60000,
     },
   );

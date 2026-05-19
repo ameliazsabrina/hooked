@@ -23,10 +23,7 @@ pub struct ReturnPrincipal<'info> {
     )]
     pub config: Account<'info, ProgramConfig>,
 
-    /// CHECK: Room-owned SOL vault PDA, validated by seeds + room.vault_bump.
-    /// Owned by System Program (created by depositors via system::transfer),
-    /// so lamport withdrawals must go through a system_program::transfer
-    /// CPI with the vault's PDA seeds for invoke_signed.
+    /// CHECK: Room SOL vault PDA. System-owned, so withdrawals must use system::transfer CPI with invoke_signed.
     #[account(
         mut,
         seeds = [ROOM_VAULT_SEED, room.key().as_ref()],

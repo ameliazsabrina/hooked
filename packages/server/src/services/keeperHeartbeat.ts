@@ -1,50 +1,20 @@
 import { KeeperHeartbeat } from "../db/schema.js";
 
-/**
- * Heartbeat plumbing for BullMQ keepers.
- *
- * Every scheduled worker is expected to call `recordKeeperTick` at the
- * end of its work — once for success ("ok"), once for failure ("error").
- * The /healthz/keeper endpoint then queries `getKeeperHealth` and 500s
- * when any required keeper is stale or has too many consecutive errors.
- *
- * The store lives in Mongo, not Redis, because the most likely "keeper
- * is dead" failure mode is Redis itself (BullMQ scheduler key lost on
- * Redis flush / TLS cert rotation / connection storm). Storing the
- * heartbeat in the same store as the trigger would mask that failure.
- *
- * Heartbeat writes are best-effort — a Mongo write failure should not
- * prevent the keeper from completing its actual work. `recordKeeperTick`
- * swallows errors and logs them, so the keeper's own outcome is reported
- * to BullMQ normally.
- */
+// Heartbeat lives in Mongo (not Redis): Redis itself is the most likely
+// "keeper dead" failure mode, so the store would mask the symptom.
 
-/** Known keeper names. Used as the `keeperName` unique key and matched
- *  by the /healthz/keeper endpoint against per-keeper staleness budgets. */
 export type KeeperName = "room-lifecycle" | "event-lifecycle";
 
-/** Maximum age (ms) between ticks before /healthz/keeper considers a
- *  keeper stale. Budget is `(cron interval) × 2 + 60s` to absorb a
- *  single missed tick + Mongo write latency without flapping. */
+/** Budget = (cron interval) × 2 + 60s to absorb a missed tick without flapping. */
 export const KEEPER_STALENESS_MS: Record<KeeperName, number> = {
-  // room-lifecycle cron: every 15 min → stale at 31 min
   "room-lifecycle": 15 * 60 * 1000 * 2 + 60_000,
-  // event-lifecycle cron: every 1 min → stale at 3 min
   "event-lifecycle": 60_000 * 2 + 60_000,
 };
 
-/** Threshold for treating a keeper as "running but broken" — every tick
- *  succeeds in firing but the work itself keeps erroring. Flagged by
- *  the health endpoint even when the last tick is recent. */
+/** "Running but broken" — ticks fire but always error. */
 export const MAX_CONSECUTIVE_ERRORS = 5;
 
-/**
- * Write a heartbeat for the given keeper. Idempotent: the same tick
- * called twice in rapid succession just overwrites. On status="error",
- * `consecutiveErrors` increments via $inc; on status="ok", it's reset.
- *
- * Failures here are swallowed and logged — see file-level docstring.
- */
+/** Best-effort write — failures are logged but don't propagate. */
 export async function recordKeeperTick(
   keeperName: KeeperName,
   status: "ok" | "error",
@@ -81,7 +51,6 @@ export async function recordKeeperTick(
       );
     }
   } catch (err) {
-    // Best-effort: don't let heartbeat write failures mask the real work.
     console.error(
       `[keeperHeartbeat] failed to record ${keeperName}=${status}: ${(err as Error).message}`,
     );
@@ -108,15 +77,8 @@ export type KeeperHealthReport = {
 };
 
 /**
- * Return a per-keeper health report. Reads from Mongo, no side effects.
- * Used by the /healthz/keeper Fastify route to decide 200 vs 500.
- *
- * A keeper is unhealthy when:
- *   1. `consecutiveErrors >= MAX_CONSECUTIVE_ERRORS`, OR
- *   2. `lastTickAt` is older than its `stalenessThresholdMs`, OR
- *   3. no heartbeat row exists at all (keeper never ran since deploy —
- *      treated as stale because we can't distinguish "first boot" from
- *      "totally broken").
+ * Unhealthy when consecutiveErrors >= MAX, lastTickAt > threshold,
+ * or no row exists (treated as stale).
  */
 export async function getKeeperHealth(
   now: Date = new Date(),

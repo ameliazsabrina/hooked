@@ -26,13 +26,8 @@ export async function runRoomLifecycleTick(
     log(`${toActive.modifiedCount} room(s) entry → active`);
   }
 
-  // Continuous-availability watchdog: if no joinable room exists right now,
-  // spin one up. Mirrors the `room.active` query and `isRoomJoinable` so a
-  // room that's full (by SOL or by player count) or missing on-chain backing
-  // also triggers creation. The factory's pause/treasury guards still apply,
-  // so this is a no-op when the program is paused or the treasury keypair is
-  // missing. Runs every tick so a missed cron, server-restart gap, or
-  // filled-up room all self-heal within the lifecycle interval.
+  // Watchdog: spin up a room if none is joinable. Self-heals after missed
+  // crons / restart gaps / filled rooms.
   const joinable = await Room.countDocuments({
     phase: "entry",
     onChainPoolId: { $ne: null },
@@ -56,19 +51,11 @@ export async function runRoomLifecycleTick(
         log(`watchdog: skipped (${result.reason})`);
       }
     } catch (err) {
-      // B8 (post-2026-05-18 incident): surface program logs / anchor
-      // breakdown / cause chain instead of just `err.message`. The
-      // original watchdog logged "Simulation failed." on every tick
-      // for hours with no further context — formatSolanaError walks
-      // the known fields so the next operator sees which instruction
-      // reverted and why.
+      // B8: surface program logs / cause chain, not just err.message.
       log(`watchdog: error ${formatSolanaError(err)}`);
     }
   }
 
-  // LP deploy: rooms freshly transitioned to `active` get their principal
-  // moved into LP_MANAGER and a DLMM position opened. No-ops when LP is
-  // disabled, kill-switched, or the buffer is too low.
   try {
     await deployReadyRoomLp({
       info: (msg) => log(msg),
@@ -78,10 +65,6 @@ export async function runRoomLifecycleTick(
     log(`lpDeploy error: ${(err as Error).message}`);
   }
 
-  // LP exit: rooms within LP_EXIT_HOURS_BEFORE_CLOSE of closes_at have their
-  // position pulled, USDC swapped back to SOL, principal+yield returned to
-  // the room_vault, and `room.lp.realizedYieldLamports` written so the
-  // settlement keeper picks it up.
   try {
     await exitReadyRoomLp({
       info: (msg) => log(msg),
@@ -99,13 +82,7 @@ export async function runRoomLifecycleTick(
     log(`${toSettling.modifiedCount} room(s) active → settling`);
   }
 
-  // Build a Redis client for the duration of this tick. Used by the
-  // settlement keeper's B10 leaderboard-finalize step to read the room's
-  // top-3 before close_room locks the on-chain cache. One client per
-  // tick is fine — settleAllReadyRooms is sequential and short-lived.
-  // Best-effort: if Redis is down the keeper still runs, just without
-  // the score-bridge gap-recovery (settlement falls back to whatever
-  // top-3 is already on chain).
+  // Per-tick Redis client for B10 leaderboard-finalize. Best-effort.
   let tickRedis: ReturnType<typeof buildRedis> | null = null;
   try {
     tickRedis = buildRedis(env.REDIS_URL);
@@ -134,7 +111,6 @@ export async function runRoomLifecycleTick(
     log(`roomKeeper error: ${(err as Error).message}`);
   } finally {
     if (tickRedis) {
-      // Best-effort close; ignore errors (we're done with it either way).
       tickRedis.quit().catch(() => {});
     }
   }
@@ -148,10 +124,7 @@ async function processRoomLifecycle(job: Job) {
     });
     await recordKeeperTick("room-lifecycle", "ok");
   } catch (err) {
-    // Record the failure heartbeat first, then re-throw so BullMQ marks
-    // the job failed and emits the existing failure log. Without this,
-    // /healthz/keeper would only see "stale" once enough ticks were
-    // missed, not "running but every tick errors."
+    // Record before re-throw so /healthz/keeper sees "running-but-erroring".
     await recordKeeperTick(
       "room-lifecycle",
       "error",

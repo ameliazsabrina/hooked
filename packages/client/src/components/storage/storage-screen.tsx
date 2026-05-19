@@ -233,7 +233,6 @@ export function StorageScreen({
       }, 1500);
     } catch (err) {
       setSelling(false);
-      // Surface error inline; the confirm modal stays open so user can retry.
       setResult({
         count: 0,
         total: 0,

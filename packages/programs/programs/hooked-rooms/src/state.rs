@@ -22,8 +22,7 @@ impl TryFrom<u8> for RoomStatus {
     }
 }
 
-/// Account schema versions. Bump when shipping a breaking layout change so
-/// new code can branch on `account.version` and migrate old accounts safely.
+/// Bump on breaking layout changes; reader code branches on `account.version`.
 pub const ROOM_VERSION: u8 = 1;
 pub const ROOM_ENTRY_VERSION: u8 = 1;
 pub const PROGRAM_CONFIG_VERSION: u8 = 1;
@@ -55,9 +54,7 @@ pub struct Room {
     pub third_place_score: u64,
     pub bump: u8,
     pub vault_bump: u8,
-    /// Reserved for forward-compatible field additions. Zeroed at init.
-    /// Adding a field: shrink _reserved by sizeof(field), bump ROOM_VERSION,
-    /// and gate reads on version.
+    /// Forward-compat padding. Shrink by sizeof(field), bump ROOM_VERSION, gate reads on version.
     pub _reserved: [u8; 64],
 }
 
@@ -103,8 +100,7 @@ pub struct RoomEntry {
     pub returned: bool,
     pub returned_at: i64,
     pub bump: u8,
-    /// Reserved for forward-compatible field additions. Per-user account, so
-    /// padding is conservative.
+    /// Forward-compat padding (per-user account, conservative).
     pub _reserved: [u8; 32],
 }
 
@@ -130,10 +126,7 @@ pub struct ProgramConfig {
     pub admin: Pubkey,
     pub treasury: Pubkey,
     pub lp_manager: Pubkey,
-    /// Emergency switch. When true, every state-changing room ix returns
-    /// `RoomError::Paused`. Admin-only ix (set_treasury, set_lp_manager,
-    /// set_paused, gateway registry updates) remain callable so the admin
-    /// can recover, rotate keys, and unpause.
+    /// Emergency switch: state-changing room ix returns `RoomError::Paused`; admin-only ix remain callable.
     pub paused: bool,
     pub bump: u8,
     pub _reserved: [u8; 128],

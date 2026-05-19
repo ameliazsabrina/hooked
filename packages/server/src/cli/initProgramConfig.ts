@@ -7,27 +7,9 @@ import {
 } from "../solana/roomsProgram.js";
 
 /**
- * Initialize the on-chain ProgramConfig PDA. Required ONCE per cluster after
- * deploying a build that includes the H-1/H-2 fix (commit pinning treasury
- * and lp_manager destinations). Idempotent: if the PDA already exists, this
- * prints the current state and exits without sending a tx.
- *
- * Required env vars:
- *   ADMIN_KEYPAIR        — signer of init; becomes the only key authorized
- *                          to call set_treasury / set_lp_manager / set_paused
- *                          later. Must be a different keypair from
- *                          TREASURY_KEYPAIR (the script enforces this) so a
- *                          treasury compromise doesn't double as an admin
- *                          compromise.
- *   TREASURY_KEYPAIR     — its pubkey is recorded as ProgramConfig.treasury.
- *                          close_room and finalize_room will reject any other
- *                          treasury account.
- *   LP_MANAGER_KEYPAIR   — its pubkey is recorded as ProgramConfig.lp_manager.
- *                          withdraw_to_lp_manager will reject any other
- *                          destination.
- *
- * Usage:
- *   pnpm tsx src/cli/initProgramConfig.ts
+ * One-time init of ProgramConfig PDA. Idempotent; ADMIN must be distinct
+ * from TREASURY so a treasury compromise doesn't become admin compromise.
+ * Usage: pnpm tsx src/cli/initProgramConfig.ts
  */
 async function main() {
   const admin = loadAdminKeypair();

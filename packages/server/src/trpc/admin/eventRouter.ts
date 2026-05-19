@@ -13,9 +13,7 @@ const ObjectIdString = z
 
 const STATUS_FILTER = z.enum(["all", "active", "scheduled", "ended"]).default("all");
 
-// MAX_EVENT_APEX_BP — capped at 50% of BPS_SCALE so the rarity distribution
-// stays well-formed even with the maximum apex weight. Mirrors the schema's
-// `apexBp` validator and the pre-Phase-6 on-chain constant.
+/** 50% of BPS_SCALE — caps apex weight to keep the rarity distribution well-formed. */
 const MAX_EVENT_APEX_BP = 5000;
 
 const datePair = z
@@ -28,11 +26,6 @@ const datePair = z
     message: "endsAt must be after startsAt",
   });
 
-/**
- * Validate that every passed id corresponds to an existing ApexFish doc.
- * The DB query runs only when the schema-shape check passes, so the
- * validator stays cheap on most invalid payloads.
- */
 async function assertApexFishIdsExist(ids: string[]): Promise<void> {
   const dedup = Array.from(new Set(ids));
   const found = await ApexFish.find(
@@ -89,9 +82,7 @@ function statusOf(ev: { active: boolean; startsAt: Date; endsAt: Date }, now = n
   return "ended";
 }
 
-// Exported so tRPC can name the inferred output type when consumers (the
-// admin dashboard) compile against the router. Otherwise consumers see
-// `never` for fields downstream of the unnamed type in their inference.
+/** Named so tRPC consumers don't see `never` from inference holes. */
 export interface SerializedFinalRank {
   rank: number;
   walletAddress: string;
@@ -119,9 +110,7 @@ export interface SerializedEvent {
   createdBy: string;
 }
 
-// Loose input type — accepts both mongoose-hydrated docs (`.toObject()`)
-// and lean docs. The mongoose type for finalRanks is optional, so we
-// normalize to `null` here so the wire shape is stable.
+// Accepts hydrated (.toObject()) and lean docs; normalizes finalRanks to null.
 interface RawEventLike {
   _id: unknown;
   name: string;
@@ -166,14 +155,7 @@ function serializeEvent(ev: RawEventLike): SerializedEvent {
   };
 }
 
-/**
- * Admin event management. Routes exposed to the dashboard for CRUD on
- * FishingEvent docs plus winner computation/payout. Read paths use lean
- * queries; write paths conditional updates so concurrent admins resolve
- * cleanly via the partial unique index on `active`.
- */
 export const adminEventRouter = router({
-  /** Paginated list, filterable by lifecycle status. */
   list: adminSessionProcedure
     .input(
       z.object({
@@ -209,7 +191,6 @@ export const adminEventRouter = router({
       };
     }),
 
-  /** Single event detail, including finalRanks if computed. */
   get: adminSessionProcedure
     .input(z.object({ id: ObjectIdString }))
     .query(async ({ input }) => {
@@ -220,26 +201,14 @@ export const adminEventRouter = router({
       return serializeEvent(ev);
     }),
 
-  /**
-   * Apex catalog — DB-backed. Returns every doc in the `ApexFish` collection
-   * with `assetUrl` pointing at the public image route. Source of truth for
-   * "which apex fish the admin can pick during event creation". Cached for
-   * 60s; the `apexFish.{create,update,delete}` mutations invalidate the
-   * cache on write.
-   *
-   * Adding a new apex fish:
-   *   1. Use the admin dashboard's apex-fish page (or the inline form on
-   *      events/new) to upload an image + name + weight range.
-   *   2. Run the migration script if seeding the legacy fish:
-   *      `pnpm --filter @hooked/server tsx src/scripts/migrateApexCatalog.ts`
-   */
+  /** 60s cache; apexFish mutations invalidate on write. */
   apexCatalog: adminSessionProcedure
     .input(z.object({ force: z.boolean().default(false) }).optional())
     .query(async ({ ctx, input }) => {
       return readApexCatalog(ctx.requestOrigin, input?.force ?? false);
     }),
 
-  /** Create a new (inactive) event. Lifecycle worker promotes to active when startsAt arrives. */
+  /** Created inactive; lifecycle worker promotes at startsAt. */
   create: adminSessionProcedure
     .input(createInput)
     .mutation(async ({ ctx, input }) => {
@@ -257,7 +226,7 @@ export const adminEventRouter = router({
       return serializeEvent(ev.toObject());
     }),
 
-  /** Edit a non-active event. Refused while active to keep snapshot semantics honest. */
+  /** Refused while active so session snapshots stay honest. */
   update: adminSessionProcedure
     .input(updateInput)
     .mutation(async ({ input }) => {
@@ -288,7 +257,6 @@ export const adminEventRouter = router({
       return serializeEvent(updated.toObject());
     }),
 
-  /** Manual override: flip the event active. Refuses if another event is already active. */
   activate: adminSessionProcedure
     .input(z.object({ id: ObjectIdString }))
     .mutation(async ({ input }) => {
@@ -323,7 +291,7 @@ export const adminEventRouter = router({
       }
     }),
 
-  /** Force-end an active event. Triggers winners computation. */
+  /** Force-end + trigger winners compute. */
   deactivate: adminSessionProcedure
     .input(z.object({ id: ObjectIdString }))
     .mutation(async ({ input }) => {
@@ -339,8 +307,7 @@ export const adminEventRouter = router({
         });
       }
       await getEventStatus(true).catch(() => {});
-      // Best-effort winners compute; surface a non-fatal warning to the
-      // dashboard via the response.
+      // Best-effort; non-fatal warning surfaces in the response.
       let winnersComputedAt: string | null = null;
       let winnersError: string | null = null;
       try {
@@ -356,7 +323,7 @@ export const adminEventRouter = router({
       };
     }),
 
-  /** Delete an event. Forbidden while active or once finalRanks is populated. */
+  /** Forbidden while active or once finalRanks is populated (audit trail). */
   delete: adminSessionProcedure
     .input(z.object({ id: ObjectIdString }))
     .mutation(async ({ input }) => {
@@ -381,11 +348,7 @@ export const adminEventRouter = router({
       return { ok: true };
     }),
 
-  /**
-   * Run the winners-computation pipeline for an ended event. Idempotent —
-   * pass `force: true` to overwrite an existing finalRanks (e.g. after fixing
-   * a scoring bug).
-   */
+  /** Idempotent; `force: true` overwrites finalRanks. */
   computeWinners: adminSessionProcedure
     .input(z.object({ id: ObjectIdString, force: z.boolean().default(false) }))
     .mutation(async ({ input }) => {
@@ -404,16 +367,7 @@ export const adminEventRouter = router({
       }
     }),
 
-  /**
-   * Pay one winner. Updates the FishingEvent.finalRanks subdoc with paid:
-   * true + signature once the SOL transfer confirms. Reuses the same keeper
-   * keypair the bountySolPayout job uses; transfer logic factored into the
-   * dedicated worker pattern when more payout types arrive.
-   *
-   * For now we mark `paid: true` with a sentinel signature to unblock the
-   * dashboard wire; the actual on-chain transfer integration plugs into the
-   * `bountySolPayout` worker pattern in a follow-up. See plan Phase 7.
-   */
+  /** Stub: marks paid with a sentinel signature pending payout-worker wiring. */
   payWinner: adminSessionProcedure
     .input(z.object({ id: ObjectIdString, rank: z.number().int().min(1) }))
     .mutation(async ({ input }) => {
@@ -427,9 +381,6 @@ export const adminEventRouter = router({
           message: "No unpaid winner with that rank",
         });
       }
-      // Stub the actual transfer for now — dashboard surfaces the row as
-      // paid so the workflow is traversable end-to-end. Real keeper transfer
-      // wiring is the next implementation step (mirrors bountySolPayout).
       const now = new Date();
       const sentinelSig = `pending-payout-${input.rank}-${now.getTime()}`;
       await FishingEvent.updateOne(
@@ -446,7 +397,6 @@ export const adminEventRouter = router({
       return { ok: true, signature: sentinelSig };
     }),
 
-  /** Pay all unpaid winners for an event. Iterates and reuses payWinner. */
   payAllWinners: adminSessionProcedure
     .input(z.object({ id: ObjectIdString }))
     .mutation(async ({ input }) => {

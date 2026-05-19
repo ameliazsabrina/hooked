@@ -49,10 +49,8 @@ export function isRoomJoinable(room: {
   );
 }
 
-// Room creation is phase-aligned with the bait refill schedule. The fishing
-// engine swaps day/night windows at 02:00 UTC and 14:00 UTC (see
-// server/services/fishing/window.ts); a fresh room opens at each boundary so
-// "new bait" and "new room" arrive together.
+// Room boundaries align with bait refill (02:00 / 14:00 UTC) so new bait and new room arrive together.
+// See server/services/fishing/window.ts.
 export function currentRoomWindowStart(now: Date = new Date()): Date {
   const hour = now.getUTCHours();
   const y = now.getUTCFullYear();

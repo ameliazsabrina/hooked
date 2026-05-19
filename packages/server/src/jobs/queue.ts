@@ -26,10 +26,6 @@ export function getQueues() {
 }
 
 export function registerJobs(redisUrl: string) {
-  // TLS handling (Heroku rediss:// self-signed chain) is consolidated in
-  // buildBullMqConnection — see plugins/redisFactory.ts. Don't open-code
-  // the connection object here or the next `new Queue(...)` author will
-  // copy a config that's silently missing the tls flag.
   const connection = buildBullMqConnection(redisUrl);
 
   dailyResetQueue = new Queue("daily-reset", { connection });
@@ -71,17 +67,9 @@ export function registerJobs(redisUrl: string) {
     createRoomLifecycleWorker(connection);
   });
 
-  // session-lifecycle queue removed Phase 6: the legacy keeper job created
-  // on-chain `FishingSession` PDAs and called `issue_bait` at window
-  // rotations. Off-chain v2 creates session rows lazily on first cast via
-  // `executeInitiateCastOffchain`, so no scheduled keeper run is needed.
-
   roomCreateQueue = new Queue("room-create", {
     connection,
-    // Transient RPC failures (devnet hiccups, leader rotation) shouldn't
-    // burn the 02:00 / 14:00 UTC slot — retry a few times so we keep the
-    // window-aligned room. The lifecycle watchdog is the safety net for
-    // anything still missing after these run out.
+    // Retries protect the window-aligned slot from transient RPC blips.
     defaultJobOptions: {
       attempts: 3,
       backoff: { type: "exponential", delay: 30_000 },
@@ -89,8 +77,7 @@ export function registerJobs(redisUrl: string) {
       removeOnFail: 200,
     },
   });
-  // Phase-aligned with bait refills (02:00 / 14:00 UTC) so "new bait" and
-  // "new room" arrive together — see services/fishing/window.ts.
+  // 02:00/14:00 UTC aligns "new bait" with "new room".
   roomCreateQueue.upsertJobScheduler(
     "room-create-window",
     { pattern: "0 2,14 * * *", tz: "UTC" },
@@ -117,18 +104,13 @@ export function registerJobs(redisUrl: string) {
     createBountySolPayoutWorker(connection);
   });
 
-  // Score bridge: pushes off-chain session scores to hooked_rooms. Triggered
-  // per-session by fishingRouter.sessionCommit; no scheduled poller — if a
-  // commit slips through, an admin can re-enqueue manually.
+  // Triggered per-session by sessionCommit; no scheduled poller.
   scoreBridgeQueue = new Queue("score-bridge", { connection });
   import("./scoreBridge.js").then(({ createScoreBridgeWorker }) => {
     createScoreBridgeWorker(connection);
   });
 
-  // Event lifecycle: 1-minute tick promotes scheduled events when their
-  // startsAt arrives and demotes active ones at endsAt (kicks off
-  // computeEventWinners). Race-safe via the partial unique index on
-  // FishingEvent.active.
+  // 1-min tick; race-safe via partial unique index on FishingEvent.active.
   eventLifecycleQueue = new Queue("event-lifecycle", { connection });
   eventLifecycleQueue.upsertJobScheduler(
     "event-lifecycle-tick",
@@ -144,11 +126,7 @@ export function registerJobs(redisUrl: string) {
   );
 }
 
-/**
- * Enqueue a score-bridge job for a committed session. Safe to call from
- * routes — silently no-ops if `registerJobs` hasn't run (test environment).
- * BullMQ dedupes on `jobId = sessionId` so retries / double-commits collapse.
- */
+/** No-op in tests (queue not registered). Dedupes via jobId = sessionId. */
 export async function enqueueScoreBridge(sessionId: string): Promise<void> {
   if (!scoreBridgeQueue) return;
   await scoreBridgeQueue.add(

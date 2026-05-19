@@ -232,13 +232,7 @@ export async function addRoomScore(
   return parseFloat(newScore);
 }
 
-/**
- * Insert a player into the room leaderboard with score 0 if they don't
- * already have an entry. Idempotent: existing scores are preserved (the
- * NX flag is what guarantees that). Called when a player joins a room
- * so they appear on the leaderboard immediately, before their first
- * catch credits any score via `addRoomScore`.
- */
+/** NX-add at score 0; preserves existing scores. */
 export async function seedRoomMember(
   redis: Redis,
   roomId: string,
@@ -249,13 +243,7 @@ export async function seedRoomMember(
   await redis.expire(key, ROOM_LB_TTL);
 }
 
-/**
- * Bulk variant of `seedRoomMember`: NX-add many players in one pipeline.
- * Used by the leaderboard query to self-heal — if any depositor in
- * `room.players[]` is missing from the sorted set (e.g. they joined
- * before per-join seeding shipped, or a Redis hiccup dropped their
- * insert), this brings them back without resetting any existing score.
- */
+/** Bulk NX-seed; used by the leaderboard query to self-heal. */
 export async function seedRoomMembers(
   redis: Redis,
   roomId: string,

@@ -3,14 +3,8 @@ import { Player, PoolTier } from "../db/schema.js";
 import * as lb from "./leaderboard.js";
 import { scheduleLeaderboardBroadcast } from "../ws/gateway.js";
 
-// Numeric rarity index → string. Mirrors the FishRarity enum order in
-// `@hooked/shared`; kept inline so this module doesn't pull the shared
-// package just for a five-element array.
 const RARITY_NAMES = ["basic", "rare", "monster", "legendary", "apex"] as const;
 
-// Daily-tier leaderboard key. POOL_TIERS is `[1]` today; if more tiers are
-// added, this constant should follow whatever tier the cast actually came
-// from (which means threading it through the credit call).
 const DAILY_TIER = 1;
 
 function todayUTC(): string {
@@ -21,12 +15,10 @@ function currentMonth(): string {
   return new Date().toISOString().slice(0, 7);
 }
 
-// Pool docs flip at month boundaries; cache the lookup so we don't hit
-// Mongo on every catch. Cache is keyed by month string so the entry
-// auto-invalidates when the month rolls over.
+// Keyed by month so it auto-invalidates on rollover.
 let activePoolCache: { month: string; poolId: string | null } | null = null;
 
-/** Test-only: drops the cached active pool id so each test starts fresh. */
+/** Test-only. */
 export function __resetActivePoolCacheForTests(): void {
   activePoolCache = null;
 }
@@ -55,14 +47,7 @@ interface CreditCatchInput {
   roomId: string | null;
 }
 
-/**
- * Credit a successful catch to room, daily-tier, and pool leaderboards.
- *
- * Caller must invoke this only after a persisted hit (off-chain submit
- * succeeded) so the LB stays consistent with the Mongo catch rows.
- * Failures are logged and swallowed — a Redis hiccup must never break
- * the WS catch reply.
- */
+/** Caller must only invoke after a persisted hit. Failures are swallowed. */
 export async function creditCatch(input: CreditCatchInput): Promise<void> {
   const { redis, walletAddress, score, weightHg, rarity, speciesName, roomId } =
     input;
@@ -107,10 +92,7 @@ export async function creditCatch(input: CreditCatchInput): Promise<void> {
 
     await Promise.all(ops);
 
-    // Schedule a real-time fan-out to all sockets in this room so other
-    // players see the new score without waiting on the tRPC poll. Debounced
-    // per-room inside the gateway — bursts of catches collapse into one
-    // broadcast.
+    // Per-room debounced fan-out so other players see the score in real time.
     if (roomId) scheduleLeaderboardBroadcast(roomId);
   } catch (err) {
     console.error("[lb] creditCatch failed:", (err as Error).message);

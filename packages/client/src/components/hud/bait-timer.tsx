@@ -1,8 +1,7 @@
 import { useEffect, useState } from "react";
 
 function msUntilNextReset(now: Date): number {
-  // Server refills bait at UTC 02:00 and 14:00 (see sessionLifecycle cron).
-  // Counting down in local time would lie about when refill actually happens.
+  // Server refills at UTC 02:00 / 14:00 (sessionLifecycle cron).
   const next = new Date(now);
   const hour = now.getUTCHours();
   if (hour < 2) {

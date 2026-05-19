@@ -8,10 +8,7 @@ interface State {
   error: Error | null;
 }
 
-// Last-line catch so a render-time throw never leaves the user staring at
-// the body's #000 background. Without this, an uncaught error in any child
-// (e.g. a server response missing a field the client now reads) unmounts
-// the whole tree and looks indistinguishable from the page failing to load.
+/** Last-line catch so a render throw never leaves the user on a blank page. */
 export class ErrorBoundary extends Component<Props, State> {
   state: State = { error: null };
 

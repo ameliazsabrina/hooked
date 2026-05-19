@@ -19,10 +19,6 @@ import {
 import { assignWindow } from "../services/fishing/window.js";
 import { protectedProcedure, publicProcedure, router } from "./trpc.js";
 
-// ---------------------------------------------------------------------------
-// Input/output schemas (Zod, .strict() so unknown keys are rejected outright).
-// ---------------------------------------------------------------------------
-
 const ObjectIdString = z
   .string()
   .regex(/^[0-9a-f]{24}$/i, "Must be a 24-char hex ObjectId");
@@ -112,10 +108,6 @@ const EventsCurrentOutput = z
   })
   .strict();
 
-// ---------------------------------------------------------------------------
-// Authorization helper.
-// ---------------------------------------------------------------------------
-
 async function assertOwnedSession(
   sessionId: string,
   walletAddress: string,
@@ -131,11 +123,7 @@ async function assertOwnedSession(
   }
 }
 
-/**
- * Find the deposit that funds the player's current session. Picks the most
- * recent un-returned deposit. Mirrors the on-chain semantics where one
- * deposit funds one session per (date, window).
- */
+/** Picks the most recent un-returned deposit (1 deposit per (date, window)). */
 async function deriveBaitForWallet(
   walletAddress: string,
 ): Promise<{ baitInitial: number; tier: number; roomId: string }> {
@@ -161,20 +149,13 @@ async function deriveBaitForWallet(
       message: `Invalid deposit for bait derivation: ${(err as Error).message}`,
     });
   }
-  // Tier mirrors on-chain `tier: u8` — derived from deposit in 0.5 SOL steps.
+  // Tier derived from deposit in 0.5 SOL steps.
   const tier = Math.min(4, Math.max(1, Math.round(active.amount / 0.5)));
   return { baitInitial, tier, roomId: active.poolId };
 }
 
-// ---------------------------------------------------------------------------
-// Router
-// ---------------------------------------------------------------------------
-
 export const fishingRouter = router({
-  /**
-   * Start a fishing session for the current (UTC) window. Idempotent —
-   * calling twice in the same window returns the existing session.
-   */
+  /** Idempotent within (player, UTC window). */
   sessionStart: protectedProcedure
     .output(SessionStartOutput)
     .mutation(async ({ ctx }) => {
@@ -221,10 +202,7 @@ export const fishingRouter = router({
       }
     }),
 
-  /**
-   * Read the player's session for the current window, if any. Used by the
-   * client on reconnect to restore HUD state.
-   */
+  /** Used on reconnect to restore HUD state. */
   sessionCurrent: protectedProcedure
     .output(SessionStartOutput.nullable())
     .query(async ({ ctx }) => {
@@ -249,11 +227,7 @@ export const fishingRouter = router({
       };
     }),
 
-  /**
-   * Commit the active session: lock score, compute audit digest, bump
-   * player aggregates. Phase 3 keeper picks committed sessions off a queue
-   * to push the score on-chain.
-   */
+  /** Score push to chain is async via the scoreBridge keeper. */
   sessionCommit: protectedProcedure
     .input(SessionCommitInput)
     .output(SessionCommitOutput)
@@ -261,9 +235,7 @@ export const fishingRouter = router({
       try {
         await assertOwnedSession(input.sessionId, ctx.walletAddress);
         const result = await commitSession({ sessionId: input.sessionId });
-        // Enqueue the keeper bridge so the score lands on hooked_rooms.
-        // No-op in tests (queue not registered). BullMQ dedupes on sessionId
-        // so a second commit for an already-bridged session is a noop too.
+        // BullMQ dedupes on sessionId; no-op when queue not registered (tests).
         await enqueueScoreBridge(result.sessionId).catch((err) => {
           console.error(
             `[fishingRouter] enqueue scoreBridge failed for ${result.sessionId}: ${(err as Error).message}`,
@@ -283,10 +255,7 @@ export const fishingRouter = router({
       }
     }),
 
-  /**
-   * Initiate a cast. Decrements bait, rolls the catch with HMAC-SHA256(daily
-   * seed, session+cast+pity+wallet), persists pendingCast on the session.
-   */
+  /** Decrement bait, roll catch via HMAC-SHA256, persist pendingCast. */
   castInitiate: protectedProcedure
     .input(CastInitiateInput)
     .output(CastInitiateOutput)
@@ -312,10 +281,7 @@ export const fishingRouter = router({
       }
     }),
 
-  /**
-   * Cancel an in-flight cast within the 8s grace window. Refunds bait but
-   * keeps `castCount` monotonic so the cast slot can't be re-rolled.
-   */
+  /** 8s grace. Refunds bait; castCount stays monotonic to prevent re-rolls. */
   castCancel: protectedProcedure
     .input(CastCancelInput)
     .output(CastCancelOutput)
@@ -329,10 +295,6 @@ export const fishingRouter = router({
       }
     }),
 
-  /**
-   * Resolve the pending cast (hit/miss). On hit, writes a Catch record,
-   * updates score, applies pity rules. Always clears pendingCast.
-   */
   castSubmit: protectedProcedure
     .input(CastSubmitInput)
     .output(CastSubmitOutput)
@@ -350,11 +312,6 @@ export const fishingRouter = router({
       }
     }),
 
-  /**
-   * Current event status (Apex / Colosseum gating). Public read. v1 reads
-   * from the legacy on-chain EventConfig via `eventConfig.ts`; Phase 6 will
-   * swap to a DB-backed source after the on-chain program is decommissioned.
-   */
   eventsCurrent: publicProcedure
     .output(EventsCurrentOutput)
     .query(async () => {

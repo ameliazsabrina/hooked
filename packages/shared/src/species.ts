@@ -34,16 +34,14 @@ export const FISH_SPECIES: FishSpecies[] = [
   { name: "Mosasaurus", rarity: FishRarity.Legendary, zone: FishingZone.Abyss, weightMin: 35.0, weightMax: 50.0, asset: "FishMosasaurus.png" },
   { name: "Colossal Squid", rarity: FishRarity.Legendary, zone: FishingZone.Abyss, weightMin: 20.0, weightMax: 35.0, asset: "FishGiant-Octopus.png" },
 
-  // Apex (Colosseum event) — gated server-side by the EventConfig PDA.
+  // Apex tier — gated server-side by the EventConfig PDA.
   { name: "Anh Lucerna", rarity: FishRarity.Apex, zone: FishingZone.Abyss, weightMin: 30.0, weightMax: 50.0, asset: "apex/Anh-Lucerna.png" },
   { name: "Mattus Aureus", rarity: FishRarity.Apex, zone: FishingZone.Abyss, weightMin: 50.0, weightMax: 80.0, asset: "apex/Mattus-Aureus.png" },
   { name: "Maximus Tridens", rarity: FishRarity.Apex, zone: FishingZone.Abyss, weightMin: 70.0, weightMax: 100.0, asset: "apex/Maximus-Tridens.png" },
 ];
 
-// Mirror of on-chain weights — source of truth is
-// packages/programs/crates/hooked-common/src/constants.rs. Keep in sync.
-// Apex baseline is 0; gated by EventConfig (e.g. Colosseum). When an event is
-// active, `eventApexBp` is taken from Basic — see `applyEventApexBp`.
+// Mirror of on-chain weights — source of truth is packages/programs/crates/hooked-common/src/constants.rs.
+// Apex baseline 0; when event active, `eventApexBp` is taken from Basic (see `applyEventApexBp`).
 const DAY_RARITY_WEIGHTS: [FishRarity, number][] = [
   [FishRarity.Basic, 0.7604],
   [FishRarity.Rare, 0.1980],
@@ -70,8 +68,7 @@ function weightedRandom<T>(items: [T, number][], rand: () => number = Math.rando
   return items[items.length - 1][0];
 }
 
-// Mirror of `effective_rarity_weights` in initiate_cast.rs: take from Basic,
-// give to Apex. apex_bp is in basis points (0..5000) to match on-chain units.
+// Mirrors `effective_rarity_weights` in initiate_cast.rs. apex_bp in basis points (0..5000).
 function applyEventApexBp(
   base: [FishRarity, number][],
   apexBp: number,
@@ -94,7 +91,7 @@ export function rollRarity(
   return weightedRandom(applyEventApexBp(base, eventApexBp), rand);
 }
 
-// Lucky Lure: takes from Basic, distributes to Monster + Legendary.
+// Lucky Lure: takes from Basic, distributes 70/30 to Monster/Legendary.
 function shiftWeights(
   base: [FishRarity, number][],
   rarityBonus: number,

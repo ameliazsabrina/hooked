@@ -1,4 +1,3 @@
-/* === Bite Indicator === */
 .bite-indicator {
   position: absolute;
   top: 18%;
@@ -43,7 +42,6 @@
   }
 }
 
-/* Full-screen tap capture for fishing mechanics */
 .stardew-tap-zone,
 .circular-tap-tap-zone {
   position: fixed;
@@ -58,7 +56,6 @@
   background: rgba(0, 0, 0, 0.3);
 }
 
-/* === Stardew Valley-style fishing bar === */
 .stardew-container {
   position: absolute;
   top: 50%;
@@ -394,7 +391,6 @@
   pointer-events: none;
 }
 
-/* === Catch Popup === */
 .catch-popup-overlay {
   position: fixed;
   inset: 0;
@@ -506,7 +502,6 @@
   background: rgba(42, 122, 138, 0.5);
 }
 
-/* === Warning State === */
 .warning-overlay {
   position: fixed;
   inset: 0;
@@ -656,7 +651,6 @@
     var(--jersey-glow);
 }
 
-/* === Circular Tap === */
 .circular-tap-tap-zone {
   background: rgba(0, 0, 0, 0.35);
 }
@@ -765,7 +759,6 @@
   }
 }
 
-/* === Mobile adjustments === */
 @media (max-width: 767px) {
   .stardew-container {
     margin-left: 0;
@@ -813,7 +806,6 @@
   }
 }
 
-/* === Miss Popup === */
 .miss-overlay {
   background: rgba(80, 0, 0, 0.35);
 }
@@ -845,7 +837,6 @@
   letter-spacing: 4px;
 }
 
-/* === Tap-to-hook prompt === */
 /* Non-interactive: taps fall through to the global listener attached in
    use-fishing-ws.ts during nibble_window. */
 .tap-to-hook-overlay {

@@ -8,7 +8,7 @@ interface CircularTapProps {
   missesAllowed: number;
   speedMultiplier: number;
   onResult: (tapResults: TapResult[]) => void;
-  // When present, overrides legacy arcSize/tapsRequired/missesAllowed/speedMultiplier.
+  /** Overrides the legacy arcSize/tapsRequired/missesAllowed/speedMultiplier props. */
   profile?: CircularProfile;
   seed?: number;
   onTensionChange?: (tension: number) => void;
@@ -42,8 +42,7 @@ function shortestAngularDistance(a: number, b: number): number {
   return diff > Math.PI ? 2 * Math.PI - diff : diff;
 }
 
-// All patterns average the same net speed — difficulty comes from
-// predictability, not raw pace.
+// All patterns average the same net speed — difficulty is predictability.
 function angleForPattern(
   pattern: RotationPattern,
   speedRadPerSec: number,
@@ -55,15 +54,14 @@ function angleForPattern(
     case "linear":
       return (speedRadPerSec * t) % (2 * Math.PI);
     case "reversing": {
-      // Flip direction every tap, with a small per-tap angular offset so the
-      // first frame of a new tap isn't always at 0.
+      // Flip direction each tap with a small offset so frame 0 isn't always at 0.
       const dir = tapIndex % 2 === 0 ? 1 : -1;
       const raw = dir * speedRadPerSec * t + tapIndex * 0.7;
       const mod = raw % (2 * Math.PI);
       return mod < 0 ? mod + 2 * Math.PI : mod;
     }
     case "burst": {
-      // Integral of (1 + sin(2πt/period)) = t - (period/2π)·cos(2πt/period)+const
+      // Integral of (1 + sin(2πt/period)).
       const period = 0.6;
       const k = (2 * Math.PI) / period;
       const integral = t - Math.cos(k * t) / k + 1 / k;
@@ -180,16 +178,8 @@ export function CircularTap({
 
       const angularDist = shortestAngularDistance(indicatorAngleRef.current, target);
       const isHit = !autoMiss && angularDist <= effectiveArcHalf;
-      // Per-tap-local elapsed time at the moment of tap. The server replay
-      // (`validateCircularTapTaps`) needs this to recompute the indicator
-      // angle and decide the hit independently — without it, server-side
-      // resolution is impossible. -1 marks the auto-miss path so the server
-      // short-circuits to `reason: "auto_miss"` rather than potentially
-      // computing the indicator at an exact-revolution boundary and falsely
-      // crediting a hit (the renderer triggers autoMiss precisely when the
-      // indicator has completed AUTO_MISS_REVOLUTIONS full turns, which for
-      // linear patterns wraps back to angle 0 — and target[0] is at 0 too
-      // for castCount=0).
+      // Server replays this elapsed time to recompute the hit. -1 marks
+      // auto-miss so the server doesn't falsely credit a revolution-boundary hit.
       const msSinceTapStart = autoMiss
         ? -1
         : performance.now() - tapStartTime.current;

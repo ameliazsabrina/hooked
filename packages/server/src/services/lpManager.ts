@@ -10,9 +10,8 @@ import {
   getAssociatedTokenAddressSync,
   TOKEN_PROGRAM_ID,
 } from "@solana/spl-token";
-// NOTE: @meteora-ag/dlmm has malformed ESM/CJS interop and breaks pure-ESM
-// resolution at module load time. We load it lazily inside the functions
-// that actually need it so dry-run mode and tests never touch the SDK.
+// @meteora-ag/dlmm has malformed ESM/CJS interop — import lazily inside
+// functions so dry-run and tests never touch the SDK.
 import { env } from "../config/env.js";
 import {
   loadLpManagerKeypair,
@@ -28,19 +27,8 @@ import {
 const PLACEHOLDER_POOL = "ARwi1S4DaiTG5DX7S4M4ZsrXqpMD1MrTmbu9ue2tpmEq";
 
 /**
- * Wrap a Jupiter swap call so a `send_failed` outcome (no signature was
- * ever issued — RPC rejected the submission, blockhash expired, sim
- * failed) triggers a bounded retry. `confirm_failed` is NOT retried here
- * because that path means a signature DID get returned and may have
- * landed; the caller would need to verify on-chain status before re-doing
- * the swap, which is out of scope.
- *
- * The inner `lpJupiterSwap.executeSwap` already retries HTTP-level
- * failures (quote / build); this layer adds the missing piece for the
- * single-attempt on-chain send step. Each outer attempt re-runs quote +
- * build + sign + send from scratch, so each attempt gets a fresh
- * blockhash and a fresh quote — exactly what's needed when a blockhash-
- * expired error caused the previous send to fail.
+ * Retry only `send_failed` (no signature issued) — re-running quote+build+send
+ * is safe. `confirm_failed` is NOT retried: tx may have landed.
  */
 async function swapWithSendRetry(
   call: () => Promise<SwapResult>,
@@ -94,10 +82,7 @@ export type ExitResult = {
   exitedLamports: bigint;
   /** Original deploy amount, echoed for clarity. */
   deployedLamports: bigint;
-  /**
-   * `exitedLamports - deployedLamports`, clamped to 0 on net loss.
-   * Buffer top-up (if any) is reflected separately in `bufferTopUpLamports`.
-   */
+  /** Clamped to 0 on net loss; deficit is in bufferTopUpLamports. */
   realizedYieldLamports: bigint;
   /** Lamports the LP_MANAGER buffer had to cover when exit < deploy. */
   bufferTopUpLamports: bigint;
@@ -124,10 +109,9 @@ function isPlaceholderPool(): boolean {
 }
 
 /**
- * Returns null with a reason string when the LP cycle should be skipped
- * (kill switch flipped, missing keypair, placeholder pool, buffer too low).
- * Caller (room-lifecycle tick) should mark `room.lp.status = "skipped"` and
- * leave `realizedYieldLamports = 0` so settlement still works.
+ * Returns reason string when LP cycle should be skipped (kill switch,
+ * missing keypair, placeholder pool, low buffer). Caller marks
+ * `room.lp.status = "skipped"` with `realizedYieldLamports = 0`.
  */
 export function checkLpReady(_opts: {
   requiredBufferLamports: bigint;
@@ -159,9 +143,6 @@ async function deployToDlmm(opts: {
   signer: Keypair;
   totalSolLamports: bigint;
 }): Promise<DeployResult> {
-  // Resolve SDK enum at runtime (the import is dynamic — see top-of-file
-  // note about @meteora-ag/dlmm ESM/CJS interop). Reject typo'd env values
-  // with a clear, listing-all-options error rather than `undefined`-cast.
   const { default: DLMM, StrategyType } = await import("@meteora-ag/dlmm");
   const strategyType =
     StrategyType[env.LP_STRATEGY_TYPE as keyof typeof StrategyType];
@@ -175,17 +156,11 @@ async function deployToDlmm(opts: {
     );
   }
 
-  // Split SOL between the SOL leg of the position and the portion that's
-  // swapped into USDC. LP_SOL_USDC_SPLIT_BPS = 5000 reproduces the prior
-  // 50/50 behavior; lowering keeps more SOL exposure and reduces the
-  // amount routed through Jupiter (less swap slippage).
   const solSideBps = BigInt(env.LP_SOL_USDC_SPLIT_BPS);
   const solSide = (opts.totalSolLamports * solSideBps) / 10_000n;
   const usdcSide = opts.totalSolLamports - solSide;
 
-  // 1) Swap the USDC portion of the SOL into USDC. Skip when the whole
-  //    deposit is the SOL leg (LP_SOL_USDC_SPLIT_BPS=10000) — saves a
-  //    Jupiter round-trip and avoids a 0-amount swap revert.
+  // Skip when all SOL (SPLIT_BPS=10000) — avoids 0-amount swap revert.
   let swap: SwapResult;
   if (usdcSide > 0n) {
     swap = await swapWithSendRetry(
@@ -206,9 +181,6 @@ async function deployToDlmm(opts: {
     };
   }
 
-  // 2) Open a DLMM position with the SOL/USDC balances. Strategy + range
-  //    + deposit slippage are env-driven so they can be tuned per pool
-  //    without a redeploy. See env.ts comments for trade-offs.
   const poolAddress = new PublicKey(env.METEORA_POOL_ADDRESS);
   const dlmmPool = await DLMM.create(opts.connection, poolAddress);
   const activeBin = await dlmmPool.getActiveBin();
@@ -237,8 +209,7 @@ async function deployToDlmm(opts: {
   });
   await opts.connection.confirmTransaction(initSig, "confirmed");
 
-  // Drop the swap sig from the tx list / signature field when no swap ran
-  // (LP_SOL_USDC_SPLIT_BPS=10000). Avoids exposing "" as a confirmed tx.
+  // Avoids exposing "" as a confirmed tx when no swap ran.
   const didSwap = swap.signature !== "";
 
   return {
@@ -303,9 +274,7 @@ async function exitFromDlmm(opts: {
     removeSigs.push(sig);
   }
 
-  // Swap any USDC dust back to SOL. We assume LP_MANAGER's USDC balance came
-  // entirely from this room's exit (no other USDC sources). For multi-room
-  // safety, callers should serialize exits.
+  // Assumes LP_MANAGER's USDC is from this room only. Serialize multi-room exits.
   const usdcAta = getAssociatedTokenAddressSync(
     new PublicKey(env.USDC_MINT_ADDRESS),
     opts.signer.publicKey,
@@ -337,7 +306,7 @@ async function exitFromDlmm(opts: {
       swapBackSolOut = swap.outLamports;
     }
   } catch {
-    // ATA does not exist (no USDC was received) — nothing to swap back.
+    // ATA missing — no USDC received, nothing to swap.
   }
 
   const balanceAfterSol = BigInt(
@@ -358,10 +327,7 @@ async function exitFromDlmm(opts: {
       ? opts.deployedLamports - exitedLamports
       : 0n;
 
-  // The SOL leg returned by removeLiquidity is approximated as
-  // (balanceAfter - balanceBefore) - swapBackOut, since the swap-back happens
-  // between the two balance reads. Best-effort; DLMM SDK doesn't expose
-  // per-tx amounts cleanly.
+  // Approximation — DLMM SDK doesn't expose per-tx amounts cleanly.
   const removedSol =
     exitedLamports > swapBackSolOut ? exitedLamports - swapBackSolOut : 0n;
 
@@ -370,7 +336,7 @@ async function exitFromDlmm(opts: {
     deployedLamports: opts.deployedLamports,
     realizedYieldLamports: realizedYield,
     bufferTopUpLamports: bufferTopUp,
-    feesLamports: realizedYield, // approximation; full breakdown needs DLMM telemetry
+    feesLamports: realizedYield,
     swapSlippageLamports: swapBackSlippage,
     signatures: swapBackSig ? [...removeSigs, swapBackSig] : removeSigs,
     removeLiquidityTxSignature: removeSigs[removeSigs.length - 1] ?? null,
@@ -385,10 +351,8 @@ async function exitFromDlmm(opts: {
 }
 
 /**
- * Deploy a room's principal into a DLMM position (dry-run synthesizes a fake
- * positionPubkey and skips the SDK calls). Caller is responsible for first
- * calling the on-chain `withdraw_to_lp_manager` so the SOL has actually
- * arrived in LP_MANAGER's wallet.
+ * Caller must first invoke on-chain `withdraw_to_lp_manager` so SOL has
+ * actually arrived in LP_MANAGER's wallet.
  */
 export async function deployRoomLiquidity(opts: {
   roomPdaStr: string;
@@ -423,10 +387,8 @@ export async function deployRoomLiquidity(opts: {
 }
 
 /**
- * Exit a room's DLMM position, return SOL into the room_vault, and report
- * realized yield. In dry-run mode synthesizes the configured fake yield and
- * still performs the on-chain transfer back to the vault so the rest of the
- * settlement flow exercises end-to-end.
+ * Exits the position, returns SOL to room_vault, reports yield. Dry-run
+ * synthesizes yield but still transfers so settlement runs end-to-end.
  */
 export async function exitRoomLiquidity(opts: {
   roomPdaStr: string;
@@ -470,8 +432,7 @@ export async function exitRoomLiquidity(opts: {
     });
   }
 
-  // Send (deployed + realized_yield) back to the room vault. On loss this
-  // takes the missing piece from the LP_MANAGER buffer.
+  // On loss the deficit comes from the LP_MANAGER buffer.
   const sendBack = opts.deployedLamports + exit.realizedYieldLamports;
   const tx = new Transaction().add(
     SystemProgram.transfer({

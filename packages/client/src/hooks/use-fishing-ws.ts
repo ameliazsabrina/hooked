@@ -28,15 +28,10 @@ import {
 
 export type FishingState =
   | "idle"
-  // Cast tap fired; waiting for the server to ack with cast_accepted.
   | "casting"
-  // Cast acked; cast animation window before nibble timer starts.
   | "cast_animating"
-  // Cast settled — server is silently holding the nibble timer.
   | "idle_waiting"
-  // Nibble fired; player must tap anywhere within 2s.
   | "nibble_window"
-  // Player tapped successfully; brief hook-yank anim before biting kicks in.
   | "hooking"
   | "biting"
   | "warning"
@@ -202,10 +197,6 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
   const [discoveredSpecies, setDiscoveredSpecies] = useState<Set<string>>(
     () => new Set(),
   );
-  // Apex fish the player has caught at any point. Driven by the server's
-  // `discoveredApexFish` (joined against the admin-managed ApexFish catalog),
-  // so the Fish Index's apex tier can render slots for fish that aren't in
-  // the currently-active event pool.
   const [discoveredApexFish, setDiscoveredApexFish] = useState<
     Array<{
       id: string;
@@ -250,16 +241,9 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
     progress: number;
     tickIndex: number;
   } | null>(null);
-  // Bumped each time the server pushes a `desync_correction` (NOT on routine
-  // `fishing_state` snapshots). The TimingBar watches this prop and force-
-  // snaps its local stateRef to the latest serverSnapshot when it changes —
-  // routine snapshots only update the soft cap, but a desync_correction is
-  // a load-bearing reconcile signal and the visual should align with what
-  // the server actually has.
+  // Bumped on `desync_correction` only (not routine `fishing_state` snapshots);
+  // TimingBar uses this as a load-bearing reconcile signal to snap local state.
   const [reconcileVersion, setReconcileVersion] = useState(0);
-  // Live leaderboard pushed by the server after every credited catch in the
-  // player's room. Replaces the 15s tRPC poll as the freshness source; the
-  // tRPC query stays as a fallback for first paint and missed frames.
   const [roomLeaderboard, setRoomLeaderboard] =
     useState<RoomLeaderboardSnapshot | null>(null);
 
@@ -271,9 +255,6 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
   const nibbleWindowTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
     null,
   );
-  // Server-supplied timestamp from the most recent nibble_event. Captured so
-  // a player tap can be sent with the matching server reference (the server
-  // re-derives reaction time from its own clock; this is for parity logging).
   const nibbleServerTsRef = useRef<number | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const authedRef = useRef(false);
@@ -297,11 +278,9 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
   useEffect(() => {
     const data = sessionStateQuery.data;
     if (!data) return;
-    // Hydrate bait once per (wallet, date, window). Reconnecting with the same
-    // wallet *inside the same window* keeps local state (optimistic decrements
-    // in catch_resolved are authoritative). A wallet switch or a server
-    // window rotation (date/window change) re-hydrates from on-chain state so
-    // the player sees the fresh bait amount after sessionLifecycle's issue_bait.
+    // Hydrate bait once per (wallet, date, window) — same-window reconnects
+    // preserve local optimistic decrements; wallet switch or window rotation
+    // re-hydrates from on-chain state.
     const baitKey = walletStr ? `${walletStr}:${data.date}:${data.window}` : null;
     if (baitKey && baitHydratedForWalletRef.current !== baitKey) {
       baitHydratedForWalletRef.current = baitKey;
@@ -325,11 +304,8 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
     });
     setCatches(hydrated);
     setScore(data.score);
-    // `discoveredSpeciesIds` was added to the sessionState response in the
-    // same release as this hook. Tolerate an older server (or a stale tRPC
-    // cache from before the deploy) returning the response without it —
-    // unguarded `.map` would throw inside this effect, unmount GameLayout,
-    // and leave the user staring at the body's #000 background.
+    // Tolerate older server / stale tRPC cache missing `discoveredSpeciesIds`;
+    // an unguarded `.map` would throw and unmount GameLayout.
     setDiscoveredSpecies(
       new Set(
         (data.discoveredSpeciesIds ?? []).map(
@@ -340,8 +316,7 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
     setDiscoveredApexFish(data.discoveredApexFish ?? []);
   }, [sessionStateQuery.data]);
 
-  // Reset catch/score hydration gate on wallet change. Bait uses its own
-  // per-wallet ref above so same-wallet reconnects preserve local state.
+  // Reset hydration gate on wallet change; bait uses its own per-wallet ref.
   useEffect(() => {
     hydratedRef.current = false;
     setDiscoveredSpecies(new Set());
@@ -351,9 +326,7 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
   const connect = useCallback(async () => {
     if (!walletStr) return;
     if (wsRef.current || connectingRef.current) return;
-    // SessionAuthProvider owns the single signMessage prompt and persists
-    // the delegation. The WS layer just reads it — never signs — so the
-    // user only sees one wallet popup per delegation lifetime.
+    // SessionAuthProvider owns the signMessage prompt; WS only reads delegation.
     if (!authReady) return;
     connectingRef.current = true;
 
@@ -411,11 +384,8 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
         wsRef.current = null;
         authedRef.current = false;
         setAuthed(false);
-        // Clear in-flight cast bookkeeping so a reconnect doesn't carry a
-        // stale gate forward. Without this, a mid-reel drop leaves heldRef
-        // stuck and biteTimer pending — the next cast's first press silently
-        // no-ops in setHeld and the cast button stays disabled because
-        // React state is wedged at "reeling".
+        // Clear cast bookkeeping; otherwise a mid-reel drop wedges heldRef and
+        // setHeld silently no-ops the next cast's first press.
         heldRef.current = false;
         activeCastIdRef.current = null;
         if (biteTimerRef.current) {
@@ -497,9 +467,7 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
         return;
       }
       case "bait_refilled": {
-        // Server-authoritative push fired by sessionLifecycle.issueBait after
-        // a window rotation. Adopt the fresh count and align the composite
-        // hydration key so a subsequent sessionStateQuery doesn't clobber it.
+        // Align hydration key so a subsequent sessionStateQuery can't clobber.
         setBait(msg.bait);
         if (walletStr) {
           baitHydratedForWalletRef.current =
@@ -515,8 +483,7 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
         if (castAnimTimerRef.current) clearTimeout(castAnimTimerRef.current);
         castAnimTimerRef.current = setTimeout(() => {
           castAnimTimerRef.current = null;
-          // Only advance if we're still on the same cast (not a server
-          // race that already moved us to nibble_window).
+          // Only advance if a server race hasn't already moved us forward.
           setState((prev) => (prev === "cast_animating" ? "idle_waiting" : prev));
         }, CAST_ANIMATION_MS);
         return;
@@ -525,16 +492,13 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
         if (activeCastIdRef.current !== msg.clientCastId) return;
         nibbleServerTsRef.current = msg.serverTs;
         playSfx("nibbleBite");
-        // Escalating triple-pulse: two short jolts + one strong sustain so
-        // the nibble registers physically even through a pocket / case.
+        // Triple-pulse so the nibble registers through a pocket/case.
         vibrate([140, 60, 140, 60, 260]);
         setState("nibble_window");
         if (nibbleWindowTimerRef.current) {
           clearTimeout(nibbleWindowTimerRef.current);
         }
-        // UI-side fallback: if the server's escape message is delayed by
-        // network jitter, snap the visible state out of nibble_window so
-        // the prompt doesn't linger past the window.
+        // Fallback in case the server's escape message is delayed.
         nibbleWindowTimerRef.current = setTimeout(() => {
           nibbleWindowTimerRef.current = null;
           setState((prev) => (prev === "nibble_window" ? "idle_waiting" : prev));
@@ -551,13 +515,8 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
         setState("missed");
         playSfx("fishGotAway");
         heldRef.current = false;
-        // Bait decrement is owned exclusively by the catch_resolved handler
-        // (which the server always sends after fish_escaped via
-        // handleReactionTimeout → resolveCatch). Earlier this handler also
-        // decremented bait, causing every nibble-miss to debit two locally
-        // while the server only debited one — local count drifted below the
-        // server's, and the cast button looked disabled even though bait was
-        // actually available.
+        // Bait decrement is owned by catch_resolved only; debiting here too
+        // would double-debit locally vs server.
         return;
       }
       case "fish_hooked": {
@@ -568,10 +527,7 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
         const onChainMechanic = getInteractionMechanic(rarity);
         setFishRarity(rarity);
         setMechanic(onChainMechanic);
-        // For apex casts the catalog lives in MongoDB, not FISH_SPECIES — use
-        // the server-supplied name + URL directly. Non-apex casts keep the
-        // FISH_SPECIES lookup so existing assets (rod-icon mapping, etc.)
-        // continue to resolve.
+        // Apex catalog lives in MongoDB, not FISH_SPECIES.
         if (msg.apexFishId && msg.apexAssetUrl) {
           setSpecies({
             name: msg.speciesName,
@@ -608,11 +564,7 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
             ? buildLegendaryVerticalProfile(rarity, diffSeed, diffMods)
             : null;
 
-        // Server holds physics until it gets our first hold sample, so this
-        // delay no longer drains the progress meter. The new nibble flow
-        // already provided the anticipation that the bite slam used to
-        // carry, so the 450ms gate is now mostly a buffer for the hook-yank
-        // anim to land before the input mechanic mounts.
+        // 450ms gate is a buffer for the hook-yank anim before the mechanic mounts.
         setState("biting");
         gameRef.current?.events.emit("fishBite");
         biteTimerRef.current = setTimeout(() => {
@@ -642,9 +594,6 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
           progress: msg.progress,
           tickIndex: msg.tickIndex,
         });
-        // Increment the reconcile counter; TimingBar's useEffect on this
-        // prop will snap its local state to the snapshot above instead of
-        // letting client physics keep drifting away from server.
         setReconcileVersion((v) => v + 1);
         return;
       }
@@ -703,13 +652,8 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
           entries: msg.entries,
           updatedAt: Date.now(),
         });
-        // The HUD score is authoritative iff it matches what Redis has for
-        // this player. The optimistic +N on catch_resolved gives instant
-        // feedback, but a subsequent sessionState refetch can clobber it
-        // with a stale Mongo aggregate (catch row not yet visible). The
-        // leaderboard broadcast carries the post-credit Redis value, so
-        // sync from there whenever our wallet is present — eventually
-        // consistent with the authoritative source within ~250ms.
+        // Leaderboard broadcast carries post-credit Redis value; sessionState
+        // refetch can return stale Mongo aggregate, so prefer this for sync.
         const myWallet = walletStrRef.current;
         if (myWallet) {
           const mine = msg.entries.find((e) => e.wallet === myWallet);
@@ -731,24 +675,14 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
       }
       case "error": {
         console.warn("[ws] server error:", msg.code, msg.message);
-        // "no_active_cast" during an active catch phase is typically a race:
-        // the server already resolved the cast and cleared its slot, but a
-        // keep-alive sample was already in-flight. The real verdict is coming
-        // via catch_resolved. If we prematurely clear castId here, the timing
-        // bar's onTimingBarResolve callback can't send its final sample, and
-        // the catch hangs permanently. Likewise, resetting state to "idle"
-        // would unmount the timing bar so it can never fire.
+        // "no_active_cast" is a race: server resolved the cast and cleared the
+        // slot while a keep-alive sample was in-flight. Ignore — catch_resolved
+        // is on its way; clearing castId here would strand onTimingBarResolve.
         if (msg.code === "no_active_cast") {
-          // Log and ignore — catch_resolved will arrive shortly and set the
-          // correct terminal state. If it never arrives (WS drop) the cast
-          // will hang, but that's a reconnect problem, not this error path.
           return;
         }
         activeCastIdRef.current = null;
-        // Reset the input gate so the next cast's first press isn't silently
-        // dropped by the `heldRef.current === held` short-circuit in setHeld.
-        // Without this, an error mid-reel leaves heldRef stuck at true and
-        // the player's first press on the next cast never reaches the wire.
+        // Reset gate; stale heldRef would drop the next cast's first press.
         heldRef.current = false;
         if (biteTimerRef.current) {
           clearTimeout(biteTimerRef.current);
@@ -806,25 +740,18 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
     };
   }, [connect]);
 
-  // Global tap-to-hook listener: any pointerdown / touchstart anywhere on
-  // the page during the nibble window registers as a hook attempt. Mounted
-  // only while in nibble_window so resting state taps (e.g. opening the
-  // shop) don't accidentally consume the hook.
+  // Global tap-to-hook listener, mounted only during nibble_window so resting
+  // taps (e.g. opening the shop) don't consume the hook.
   useEffect(() => {
     if (state !== "nibble_window") return;
     const ws = wsRef.current;
     if (!ws) return;
 
     const handleTap = (ev: Event) => {
-      // The overlay is non-interactive; this fires on the underlying
-      // viewport. preventDefault stops mobile double-tap zoom + text
-      // selection without breaking actual UI buttons (which we exit
-      // nibble_window before they can be tapped, since this listener
-      // unmounts on state change).
+      // preventDefault stops mobile double-tap zoom + text selection.
       try {
         ev.preventDefault();
       } catch {
-        // Some events ship with passive listeners — ignore.
       }
       const castId = activeCastIdRef.current;
       if (!castId) return;
@@ -839,9 +766,7 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
       );
       setState("hooking");
       if (hookAnimTimerRef.current) clearTimeout(hookAnimTimerRef.current);
-      // No timer-driven transition out of `hooking` — the server's
-      // fish_hooked broadcast is what advances us into `biting`. The timer
-      // ref only exists for cleanup if a connection drop strands us here.
+      // Timer exists only for cleanup; fish_hooked is what advances state.
       hookAnimTimerRef.current = setTimeout(() => {
         hookAnimTimerRef.current = null;
       }, HOOK_ANIMATION_MS);
@@ -888,10 +813,6 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
       const ws = wsRef.current;
       const castId = activeCastIdRef.current;
       if (!ws || ws.readyState !== WebSocket.OPEN || !castId) return;
-      // `input_samples` is now purely an input-timeline channel: every
-      // sample is a snapshot of the player's `held` state at a given
-      // wall time. Verdict claims (the old `final: true` overload) moved
-      // to the dedicated `cast_finalize` message — see sendCastFinalize.
       ws.send(
         JSON.stringify({
           type: "input_samples",
@@ -904,10 +825,7 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
     [sessionId],
   );
 
-  /** Ask the server to resolve the current timing-bar cast as a catch if
-   *  its server-side progress is at/above CLIENT_FINAL_FLOOR. Idempotent —
-   *  retries are deduped server-side via the rejection counter, and
-   *  whatever the server thinks about progress is canonical. */
+  /** Idempotent finalize; server decides catch vs miss using its own progress. */
   const sendCastFinalize = useCallback(() => {
     const ws = wsRef.current;
     const castId = activeCastIdRef.current;
@@ -923,9 +841,8 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
 
   const holdIndexRef = useRef(0);
   const heldRef = useRef(false);
-  // Legendary/Apex chain a TimingBar phase after the circular tap. Built at
-  // fish_hooked alongside the circular profile so the second phase can mount
-  // instantly when the taps clear, without another server round-trip.
+  // Built alongside the circular profile so the chained TimingBar phase for
+  // Legendary/Apex can mount instantly without another server round-trip.
   const legendaryVerticalProfileRef = useRef<ReturnType<
     typeof buildLegendaryVerticalProfile
   > | null>(null);
@@ -934,20 +851,15 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
     (held: boolean, tNow?: number) => {
       if (heldRef.current === held) return;
       heldRef.current = held;
-      // Caller (TimingBar) passes the same `tNow` it used to push to its
-      // own inputHistoryRef so client and server end up with bit-identical
-      // simTimeS for each transition. Without this, TimingBar's local push
-      // and the hook's sample-send each call `Date.now()` separately —
-      // they can differ by 1ms due to ms-resolution granularity, which
-      // misaligns when each side applies the transition.
+      // Caller passes `tNow` so its local inputHistoryRef and this send share
+      // an identical timestamp; separate Date.now() calls can drift by 1ms.
       const t_ms = tNow ?? Date.now();
       sendInputSamples([{ held, index: holdIndexRef.current++, t_ms }]);
     },
     [sendInputSamples],
   );
 
-  // Keep-alive: re-send the current hold state periodically so the server
-  // doesn't starve if no transitions occur mid-catch.
+  // Keep-alive so the server doesn't starve when no transitions occur.
   useEffect(() => {
     if (state !== "reeling") return;
     const id = window.setInterval(() => {
@@ -972,14 +884,8 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
       const seed = difficulty?.seed ?? 1;
       const mods = difficulty?.mods;
 
-      // Both pass and fail paths now go through `circular_tap_complete`.
-      // The server replays per-tap timestamps through its own copy of the
-      // spinner physics via `validateCircularTapTaps` — that's the only
-      // authoritative path. The renderer captures `msSinceTapStart` via
-      // `performance.now()` at each tap; the server feeds the same value
-      // into the same `angleForPattern` to compute the indicator angle
-      // and validate the hit — so a client-side hit replays to a server-
-      // side hit bit-for-bit.
+      // Both pass and fail go through `circular_tap_complete`; server replays
+      // per-tap timestamps for authoritative validation.
       const taps = tapResults.map((r, i) => ({
         tapIndex: i,
         msSinceTapStart: r.msSinceTapStart,
@@ -997,32 +903,20 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
         );
       }
 
-      // If our local prediction is allHit + we have a secondary profile,
-      // optimistically transition to the timing-bar UI so the player sees
-      // the second phase mount immediately. The server is doing its own
-      // validation in parallel; if it disagrees the verdict we receive on
-      // catch_resolved will be hit=false and the UI will surface the miss.
+      // Optimistically mount phase two; server's catch_resolved is canonical.
       if (allHit && secondary && mods) {
         setMechanic("timing_bar");
         setDifficulty({ seed, mods, profile: secondary });
         setState("reeling");
       }
-      // If we predicted a miss locally, we keep waiting for catch_resolved
-      // (which the server will send after its own validation).
     },
     [difficulty, sessionId],
   );
 
   const onTimingBarResolve = useCallback(
     (outcome: "caught" | "escaped") => {
-      // Verdict claim is a dedicated channel now (`cast_finalize`) — it
-      // cannot pollute the input timeline by design, so the "phantom press
-      // injected into server's inputHistory" class of bug is no longer
-      // possible. The server runs `advancePhysics` once and checks its own
-      // progress against CLIENT_FINAL_FLOOR; a forged finalize can at most
-      // skip ~1.6s of fill rate, never produce a catch from nothing. Force-
-      // escape from a client-side outcome is NEVER honoured; misses are
-      // decided by the server's terminalState / safety / desync paths.
+      // Server decides catch vs miss via its own progress floor; client outcome
+      // is never honoured for force-escape.
       void outcome;
       sendCastFinalize();
     },

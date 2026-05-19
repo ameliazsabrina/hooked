@@ -1,9 +1,5 @@
-// Use namespace imports throughout. @coral-xyz/anchor and @solana/web3.js
-// publish CommonJS, so under Node 22+'s native TypeScript stripping (which
-// runs the file as ESM) named imports like `{ BN, Program }` fail with
-// "Named export not found". Namespace imports + value-level destructuring
-// work in both CJS-via-ts-node and ESM-from-Node modes; the destructured
-// classes (PublicKey, Keypair, BN, Program) double as their own types.
+// Namespace imports: @coral-xyz/anchor + @solana/web3.js are CJS, so named
+// imports break under Node 22+ ESM stripping with "Named export not found".
 import * as anchor from "@coral-xyz/anchor";
 import * as web3 from "@solana/web3.js";
 import { expect } from "chai";
@@ -12,7 +8,6 @@ import type { HookedRooms } from "../target/types/hooked_rooms";
 const { Program, BN } = anchor;
 const { PublicKey, Keypair, LAMPORTS_PER_SOL } = web3;
 
-// PRD v2.2 — weekly SOL rooms
 describe("room lifecycle", () => {
   const provider = anchor.AnchorProvider.env();
   anchor.setProvider(provider);
@@ -31,8 +26,6 @@ describe("room lifecycle", () => {
 
   const treasury = Keypair.generate();
   const lpManager = Keypair.generate();
-
-  // ─── PDA helpers ─────────────────────────────────────────────────────
 
   function roomPda(roomId: BN): PublicKey {
     return PublicKey.findProgramAddressSync(
@@ -72,9 +65,7 @@ describe("room lifecycle", () => {
     };
     await Promise.all([fund(player1, 5), fund(player2, 5), fund(treasury, 1)]);
 
-    // Bootstrap ProgramConfig. Every state-changing ix (create_room,
-    // deposit_room, close_room, …) requires this account to exist and reads
-    // `paused` from it. Idempotent: if a previous run left it behind, skip.
+    // Idempotent bootstrap — every state-changing ix requires ProgramConfig.
     const config = programConfigPda();
     const existing = await provider.connection.getAccountInfo(config);
     if (!existing) {
@@ -84,10 +75,6 @@ describe("room lifecycle", () => {
         .rpc();
     }
   });
-
-  // =====================================================================
-  // create_room
-  // =====================================================================
 
   it("creates a room with a native-SOL vault", async () => {
     const room = roomPda(ROOM_ID);
@@ -109,7 +96,6 @@ describe("room lifecycle", () => {
     );
     expect(acc.status).to.equal(0); // Entry
 
-    // entry_closes_at = created_at + 24h, closes_at = created_at + 7d
     const oneDay = 24 * 60 * 60;
     const sevenDays = 7 * oneDay;
     expect(acc.entryClosesAt.toNumber() - acc.createdAt.toNumber()).to.equal(
@@ -119,16 +105,10 @@ describe("room lifecycle", () => {
       sevenDays,
     );
 
-    // Vault exists (system-owned PDA, rent-exempt 0 lamports OK — no data).
+    // Vault PDA is created on first transfer; before deposit it may be null.
     const vaultInfo = await provider.connection.getAccountInfo(vault);
-    // vault PDA is created on first transfer; before deposit it may be null.
-    // create_room does not pre-create the vault account (no data). Accept null.
     expect(vaultInfo === null || vaultInfo.lamports >= 0).to.equal(true);
   });
-
-  // =====================================================================
-  // deposit_room
-  // =====================================================================
 
   it("player1 deposits 1 SOL", async () => {
     const room = roomPda(ROOM_ID);
@@ -169,7 +149,7 @@ describe("room lifecycle", () => {
 
     try {
       await program.methods
-        .depositRoom(new BN(LAMPORTS_PER_SOL / 10)) // 0.1 SOL
+        .depositRoom(new BN(LAMPORTS_PER_SOL / 10))
         .accounts({
           room,
           authority: player2.publicKey,
@@ -255,10 +235,6 @@ describe("room lifecycle", () => {
     }
   });
 
-  // =====================================================================
-  // close_room (must fail before closes_at)
-  // =====================================================================
-
   it("rejects close before closes_at", async () => {
     const room = roomPda(ROOM_ID);
 
@@ -301,12 +277,6 @@ describe("room lifecycle", () => {
     }
   });
 
-  // =====================================================================
-  // return_principal + finalize_room — status must be Settling.
-  // Without clock warp we can't legitimately close here, so we document the
-  // expected flow and test the error paths.
-  // =====================================================================
-
   it("rejects return_principal while room is not Settling", async () => {
     const room = roomPda(ROOM_ID);
 
@@ -343,17 +313,8 @@ describe("room lifecycle", () => {
     }
   });
 
-  // NOTE: The full happy-path close + auto-return flow requires advancing the
-  // validator clock past `room.closes_at` (7 days). Exercised in integration
-  // environments via `solana-test-validator --warp-slot` — documented here
-  // rather than tested automatically.
-
-  // =====================================================================
-  // withdraw_to_lp_manager — failure paths only.
-  // The success path requires `now >= lp_deploy_at` (created_at + 24h),
-  // which we can't fast-forward on a live validator. Exercised via the
-  // server-side dry-run integration tests + manual mainnet canary.
-  // =====================================================================
+  // Happy-path close + auto-return requires advancing the validator clock past
+  // closes_at (7 days); exercised under surfpool/--warp-slot, not here.
 
   it("rejects withdraw_to_lp_manager before lp_deploy_at", async () => {
     const room = roomPda(ROOM_ID);
@@ -363,9 +324,7 @@ describe("room lifecycle", () => {
         .withdrawToLpManager(ONE_SOL)
         .accounts({
           room,
-          // Must be the canonical lp_manager pinned in ProgramConfig — a
-          // random key would trigger LpManagerMismatch first and mask the
-          // window-not-open assertion this test is actually checking.
+          // Canonical lp_manager — a random key would trigger LpManagerMismatch first and mask this assertion.
           lpManager: lpManager.publicKey,
           admin: admin.publicKey,
         } as any)
@@ -414,18 +373,13 @@ describe("room lifecycle", () => {
         .rpc();
       expect.fail("should throw — zero amount or window-not-open");
     } catch (err: any) {
-      // Either error is acceptable: time guard fires before zero-amount guard
-      // when the room is still pre-lp_deploy_at, so we accept either.
+      // Time guard fires before zero-amount guard pre-lp_deploy_at; accept either.
       const s = err.toString();
       expect(
         s.includes("LpAmountZero") || s.includes("LpDeployWindowNotOpen"),
       ).to.equal(true);
     }
   });
-
-  // =====================================================================
-  // Phase 2 — GatewayRegistry + update_room_entry_score
-  // =====================================================================
 
   const keeper = Keypair.generate();
   const rogue = Keypair.generate();
@@ -519,7 +473,6 @@ describe("room lifecycle", () => {
     const room = roomPda(ROOM_ID);
     const entry2 = roomEntryPda(room, player2.publicKey);
 
-    // player2 scores 400 — 2nd place
     await program.methods
       .updateRoomEntryScore(new BN(400))
       .accounts({
@@ -540,7 +493,6 @@ describe("room lifecycle", () => {
     );
     expect(roomAcc.secondPlaceScore.toNumber()).to.equal(400);
 
-    // player2 adds 1000 — total 1400, displaces player1
     await program.methods
       .updateRoomEntryScore(new BN(1000))
       .accounts({
@@ -577,7 +529,6 @@ describe("room lifecycle", () => {
       second.publicKey.toBase58(),
     );
 
-    // Duplicate add rejected
     try {
       await program.methods
         .addGatewayKey(second.publicKey)
@@ -588,7 +539,6 @@ describe("room lifecycle", () => {
       expect(err.toString()).to.contain("GatewayKeyAlreadyPresent");
     }
 
-    // Non-admin cannot modify
     try {
       await program.methods
         .addGatewayKey(Keypair.generate().publicKey)
@@ -601,7 +551,6 @@ describe("room lifecycle", () => {
       expect(s.includes("Unauthorized") || s.includes("2012")).to.equal(true);
     }
 
-    // Remove
     await program.methods
       .removeGatewayKey(second.publicKey)
       .accounts({ admin: admin.publicKey } as any)
@@ -610,15 +559,6 @@ describe("room lifecycle", () => {
     reg = await program.account.gatewayRegistry.fetch(registry);
     expect(reg.keyCount).to.equal(1);
   });
-
-  // =====================================================================
-  // Pause switch — emergency kill-switch on ProgramConfig.
-  //
-  // Before mainnet ship: `set_paused(true)` must block every state-changing
-  // ix until admin flips it back. Using deposit_room as the canary because
-  // it's the highest-volume user-facing path; if pause works there it works
-  // everywhere (the gate is identical).
-  // =====================================================================
 
   describe("pause switch", () => {
     const pausePlayer = Keypair.generate();
@@ -631,8 +571,6 @@ describe("room lifecycle", () => {
       );
       await provider.connection.confirmTransaction(sig);
 
-      // Fresh room for this block so we don't collide with the lifecycle
-      // suite's shared room state.
       await program.methods
         .createRoom(pauseRoomId)
         .accounts({ admin: admin.publicKey } as any)
@@ -640,15 +578,13 @@ describe("room lifecycle", () => {
     });
 
     afterEach(async () => {
-      // Belt-and-suspenders: never leave the program paused between tests.
+      // Never leave the program paused between tests.
       try {
         await program.methods
           .setPaused(false)
           .accounts({ admin: admin.publicKey } as any)
           .rpc();
-      } catch {
-        // Ignore — config may already be unpaused.
-      }
+      } catch {}
     });
 
     it("admin can flip paused on and off", async () => {
@@ -690,13 +626,11 @@ describe("room lifecycle", () => {
     it("blocks deposit_room while paused, succeeds after unpause", async () => {
       const room = roomPda(pauseRoomId);
 
-      // Pause.
       await program.methods
         .setPaused(true)
         .accounts({ admin: admin.publicKey } as any)
         .rpc();
 
-      // Deposit must fail with Paused.
       try {
         await program.methods
           .depositRoom(ONE_SOL)
@@ -711,13 +645,11 @@ describe("room lifecycle", () => {
         expect(err.toString()).to.contain("Paused");
       }
 
-      // Unpause.
       await program.methods
         .setPaused(false)
         .accounts({ admin: admin.publicKey } as any)
         .rpc();
 
-      // Same deposit now succeeds.
       await program.methods
         .depositRoom(ONE_SOL)
         .accounts({
@@ -734,8 +666,6 @@ describe("room lifecycle", () => {
   });
 
   it("rejects update for an entry belonging to a different room", async () => {
-    // Create a second room with its own entry, then try to call
-    // update_room_entry_score passing the first room but entry from the second.
     const otherRoomId = new BN(1_002);
     const otherRoom = roomPda(otherRoomId);
     const otherPlayer = Keypair.generate();
@@ -776,7 +706,6 @@ describe("room lifecycle", () => {
       expect.fail("should reject cross-room entry");
     } catch (err: any) {
       const s = err.toString();
-      // Seeds mismatch surfaces as ConstraintSeeds on room_entry lookup.
       expect(
         s.includes("EntryRoomMismatch") ||
           s.includes("ConstraintSeeds") ||
@@ -785,12 +714,8 @@ describe("room lifecycle", () => {
     }
   });
 
-  // =====================================================================
-  // withdraw_to_lp_manager — happy path (requires surfpool clock warp).
-  // =====================================================================
-
   it("withdraws principal to lp_manager after lp_deploy_at (CPI happy path)", async function () {
-    // this test only meaningful under surfpool.
+    // Only meaningful under surfpool — skip otherwise.
     const rpcUrl = (provider.connection as any)._rpcEndpoint as string;
     const probeRes = await fetch(rpcUrl, {
       method: "POST",
@@ -821,7 +746,6 @@ describe("room lifecycle", () => {
     );
     await provider.connection.confirmTransaction(sig);
 
-    // Fresh room so we know created_at and can warp predictably.
     await program.methods
       .createRoom(LP_ROOM_ID)
       .accounts({ admin: admin.publicKey } as any)
@@ -832,7 +756,6 @@ describe("room lifecycle", () => {
     const lpDeployAt = roomAccBefore.lpDeployAt.toNumber();
     const closesAt = roomAccBefore.closesAt.toNumber();
 
-    // Deposit while still inside the entry window (no warp yet).
     await program.methods
       .depositRoom(ONE_SOL)
       .accounts({ room, authority: lpPlayer.publicKey } as any)
@@ -845,11 +768,7 @@ describe("room lifecycle", () => {
       (await provider.connection.getAccountInfo(lpManager.publicKey))
         ?.lamports ?? 0;
 
-    // Jump the network clock to lp_deploy_at + 60s. Inside the LP window
-    // (which closes at closes_at = created_at + 7d), so the require!(now >=
-    // lp_deploy_at && now < closes_at) gate passes.
-    // surfnet_timeTravel takes absoluteTimestamp in MILLISECONDS, even though
-    // the on-chain Clock::unix_timestamp the program reads is seconds.
+    // surfnet_timeTravel takes absoluteTimestamp in MILLISECONDS (on-chain Clock is seconds).
     const warpToSec = lpDeployAt + 60;
     expect(warpToSec).to.be.lessThan(closesAt);
     const warpRes = await fetch(rpcUrl, {
@@ -868,9 +787,6 @@ describe("room lifecycle", () => {
       `timeTravel failed: ${JSON.stringify(warpJson)}`,
     ).to.equal(undefined);
 
-    // Now call the previously-broken instruction. With the fix it should
-    // succeed; with the old direct-lamport-mutation code it would fail with
-    // "instruction spent from the balance of an account it does not own".
     await program.methods
       .withdrawToLpManager(ONE_SOL)
       .accounts({
@@ -880,9 +796,7 @@ describe("room lifecycle", () => {
       } as any)
       .rpc();
 
-    // Vault is system-owned with no data. After draining to 0 lamports the
-    // runtime garbage-collects it, so getAccountInfo returns null. Treat
-    // null as 0 lamports for the delta check.
+    // Vault is system-owned with no data; drained to 0 → runtime GCs it → getAccountInfo returns null.
     const vaultAfter =
       (await provider.connection.getAccountInfo(vault))?.lamports ?? 0;
     const managerAfter = (await provider.connection.getAccountInfo(

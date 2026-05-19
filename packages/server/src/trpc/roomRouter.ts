@@ -27,19 +27,7 @@ import * as lb from "../services/leaderboard.js";
 import { assignWindow } from "../services/fishing/window.js";
 import { bindWalletToRoom } from "../ws/gateway.js";
 
-/**
- * Abandon any active FishingSession the player has for the current
- * (dateKey, window) that belongs to a different room. Called on every
- * successful `recoverEntry` so that depositing into a new room mid-window
- * doesn't reuse the prior session's bait counter / castCount / pity /
- * merkle root. The fresh session is lazy-created on first cast by
- * `ensureActiveSession` (services/fishing/wsExecutor.ts) and tagged with
- * the new roomId.
- *
- * Idempotent for same-room re-recovery (page reloads): the
- * `roomId: { $ne }` filter makes it a no-op when the player is already
- * tied to this room.
- */
+/** Abandons same-window sessions tied to other rooms. */
 async function markPriorSessionAbandoned(
   walletAddress: string,
   roomId: string,
@@ -47,8 +35,7 @@ async function markPriorSessionAbandoned(
   const player = await Player.findOne({ walletAddress }, { _id: 1 }).lean();
   if (!player) return;
   const { dateKey, window } = assignWindow(new Date());
-  // updateMany rather than updateOne — defense against any historical
-  // duplicates that pre-date the partial unique index.
+  // updateMany — defense against pre-index duplicates.
   await FishingSession.updateMany(
     {
       playerId: player._id,
@@ -156,7 +143,6 @@ export const roomRouter = router({
 
   active: publicProcedure.query(async () => {
     const now = new Date();
-    // Open = entry phase, on-chain backed, not full, entry window not expired.
     const room = await Room.findOne({
       phase: "entry",
       onChainPoolId: { $ne: null },
@@ -177,10 +163,7 @@ export const roomRouter = router({
       };
     }
 
-    // After a program-ID rotation, pre-rotation Room docs still satisfy
-    // the Mongo filter above, but their PDA derives to a fresh,
-    // uninitialized address under the new program. Returning such a room
-    // would cause AnchorError 3012 (AccountNotInitialized) on deposit.
+    // Post-rotation: pre-rotation Room docs derive to uninitialized PDAs.
     const loaded = getRoomsProgram();
     if (loaded) {
       const pda = getRoomPda(BigInt(room.onChainPoolId));
@@ -234,11 +217,7 @@ export const roomRouter = router({
         throw new TRPCError({ code: "NOT_FOUND", message: "Room not found" });
       }
 
-      // Show the player on the room leaderboard the moment they join, with
-      // score 0 until their first catch. NX-flagged so a re-recovery never
-      // resets an already-credited score. Doing this for both branches below
-      // (alreadyRecorded and new-deposit) ensures historical depositors who
-      // joined before this code shipped also self-heal onto the LB.
+      // NX-flagged seed; self-heals depositors who joined pre-seeding.
       const playerIdStr = player._id.toString();
       await lb
         .seedRoomMember(ctx.redis, roomDoc.roomId, playerIdStr)
@@ -246,15 +225,9 @@ export const roomRouter = router({
           console.error("[lb] seedRoomMember failed:", (err as Error).message),
         );
 
-      // Active = SOL still on-chain (keeper hasn't run `return_principal`).
-      // Window expiry is tracked separately via `expiresAt` and must NOT
-      // short-circuit this lookup.
       const active = player.deposits?.find((d) => !d.returned);
       if (active) {
         await markPriorSessionAbandoned(ctx.walletAddress, roomDoc.roomId);
-        // Bind any open WS sockets for this wallet to the room so room-
-        // scoped broadcasts (leaderboard updates) reach them without a
-        // reconnect. Safe no-op if no sockets are open.
         bindWalletToRoom(ctx.walletAddress, roomDoc.roomId);
         return {
           depositAmount: active.amount,
@@ -277,8 +250,7 @@ export const roomRouter = router({
 
       let entryAccount =
         await loaded.program.account.roomEntry.fetchNullable(entryPda);
-      // Client may call us right after deposit tx lands at 'processed' — our
-      // RPC may not yet see it at 'confirmed', so poll briefly.
+      // Brief poll for the 'processed' → 'confirmed' gap.
       for (let i = 0; i < 6 && !entryAccount; i++) {
         await new Promise((r) => setTimeout(r, 500));
         entryAccount =
@@ -326,12 +298,8 @@ export const roomRouter = router({
         },
       );
 
-      // Atomic room update: refuse if the room is no longer in entry phase,
-      // if this wallet is already recorded, if the deposit would exceed
-      // capacity, or if max players has been reached. The on-chain program is
-      // the source of truth for capacity, but we enforce here so DB state
-      // can't drift past the invariant even under concurrent recoverEntry
-      // calls or manual data fixes.
+      // Enforce capacity invariants here too so DB can't drift under concurrent
+      // recoveries or manual data fixes (on-chain remains source of truth).
       const roomUpdate = await Room.updateOne(
         {
           roomId: roomDoc.roomId,
@@ -356,10 +324,7 @@ export const roomRouter = router({
 
       await markPriorSessionAbandoned(ctx.walletAddress, roomDoc.roomId);
 
-      // Bind any open WS sockets for this wallet to the new room. The auth-
-      // time hydration only runs once per connection; players who deposit
-      // mid-session need this to start receiving room broadcasts without a
-      // reconnect.
+      // Mid-session depositors need this; auth-time hydration only runs once.
       bindWalletToRoom(ctx.walletAddress, roomDoc.roomId);
 
       try {
@@ -388,8 +353,6 @@ export const roomRouter = router({
       if (!player) {
         throw new TRPCError({ code: "NOT_FOUND", message: "Player not found" });
       }
-      // Match the rest of the codebase: a deposit is active while SOL is
-      // still on-chain (`!returned`). Window expiry is informational only.
       const active = player.deposits?.find((d) => !d.returned);
       if (!active) {
         throw new TRPCError({
@@ -448,10 +411,7 @@ export const roomRouter = router({
       }),
     )
     .query(async ({ ctx, input }) => {
-      // Self-heal: reflect every depositor in `room.players[]` into the
-      // Redis sorted set with score 0 (NX-flagged so existing scores are
-      // preserved). Covers depositors who joined before per-join seeding
-      // shipped and any case where a Redis hiccup dropped the seed write.
+      // Self-heal: NX-flag seed every depositor with score 0.
       const roomDoc = await Room.findOne(
         { roomId: input.roomId },
         { players: 1 },

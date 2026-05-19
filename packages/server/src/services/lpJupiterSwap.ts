@@ -6,7 +6,6 @@ import {
 } from "@solana/web3.js";
 import { env } from "../config/env.js";
 
-// Native SOL mint placeholder used by Jupiter for SOL swaps.
 const SOL_MINT = "So11111111111111111111111111111111111111112";
 
 type JupiterQuote = {
@@ -25,12 +24,7 @@ type JupiterSwapResponse = {
   swapTransaction: string;
 };
 
-/**
- * Classification taxonomy for Jupiter / on-chain swap failures. Each value
- * is mapped to `retryable: boolean` by `isRetryableKind`. New kinds belong
- * in this enum so retry policy stays decision-table style — not scattered
- * if/else.
- */
+/** Add new kinds here so isRetryableKind stays a decision table. */
 export type JupiterSwapErrorKind =
   | "http_rate_limit" //   429
   | "http_server_error" // 5xx
@@ -51,9 +45,7 @@ export class JupiterSwapError extends Error {
   public readonly attempt: number;
   public readonly body: string | undefined;
 
-  /** Underlying cause when chained from a fetch/RPC error. Set on the
-   *  instance rather than via Error.cause because some downstream TS
-   *  consumer libs target older `lib` settings without Error.cause. */
+  /** Instance field (not Error.cause) for compat with pre-ES2022 consumers. */
   public readonly cause?: unknown;
 
   constructor(opts: {
@@ -101,22 +93,12 @@ function classifyHttpStatus(status: number): JupiterSwapErrorKind {
   return "http_other_4xx";
 }
 
-/**
- * Classify a thrown error from `fetch`. Node's undici / global fetch wraps
- * the underlying socket error in a `cause` chain; we walk both messages.
- * AbortController-triggered aborts become "timeout", everything else with
- * recognizable transient signatures becomes "network".
- */
 function classifyFetchError(err: unknown): JupiterSwapErrorKind {
   if (!(err instanceof Error)) return "network";
   const name = err.name?.toLowerCase() ?? "";
   if (name === "aborterror" || name === "timeouterror") return "timeout";
   const msg = (err.message ?? "").toLowerCase();
-  // Walk the cause chain defensively without relying on Error.cause being
-  // typed in lib < ES2022. node-fetch / undici typically stack the socket
-  // error message into the top-level message anyway, so reading just
-  // `err.message` catches ~all real cases. The `(err as ...).cause` cast
-  // pulls it in when present without forcing ES2022.
+  // Walk cause chain without forcing ES2022 lib.
   const rawCause = (err as Error & { cause?: unknown }).cause;
   const causeMsg =
     rawCause instanceof Error ? (rawCause.message ?? "").toLowerCase() : "";
@@ -135,14 +117,7 @@ function classifyFetchError(err: unknown): JupiterSwapErrorKind {
   return "network";
 }
 
-/**
- * Generic retry helper. Retries only when the thrown error is a
- * `JupiterSwapError` with `retryable: true`. Other errors propagate
- * immediately so caller-side bugs aren't silently retried.
- *
- * Exponential backoff with ±jitter: delay = clamp(base × 2^(n−1), maxDelay)
- * shaken by (1 ± jitterPct × rand). Honors LP_JUPITER_RETRY_* env vars.
- */
+/** Retries only JupiterSwapError with retryable=true; exponential backoff with jitter. */
 async function withRetry<T>(
   op: (attempt: number) => Promise<T>,
 ): Promise<T> {
@@ -169,8 +144,6 @@ async function withRetry<T>(
   throw lastErr;
 }
 
-/** Wrap fetch in an AbortController-driven timeout so a stalled Jupiter
- *  response can't pin a swap indefinitely. */
 async function fetchWithTimeout(
   url: string | URL,
   init: RequestInit,
@@ -349,12 +322,8 @@ async function executeSwap(opts: {
   });
   tx.sign([opts.signer]);
 
-  // SEND + CONFIRM are intentionally single-attempt. If sendRawTransaction
-  // returns a signature, the tx may have landed even when confirmation
-  // times out — retrying with a freshly-built tx would risk double-spend.
-  // Callers that need higher-level retry should classify on the thrown
-  // JupiterSwapError.kind (`send_failed` vs `confirm_failed`) and re-run
-  // executeSwap only when no signature was returned.
+  // Single-attempt: re-sending after a signature is issued risks double-spend.
+  // Callers retry only `send_failed` (no signature returned).
   let signature: string;
   try {
     signature = await opts.connection.sendRawTransaction(tx.serialize(), {

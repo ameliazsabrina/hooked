@@ -23,7 +23,7 @@ pub struct WithdrawToLpManager<'info> {
     )]
     pub config: Account<'info, ProgramConfig>,
 
-    /// CHECK: Room-owned SOL vault PDA, validated by seeds + room.vault_bump.
+    /// CHECK: Room SOL vault PDA, validated by seeds + room.vault_bump.
     #[account(
         mut,
         seeds = [ROOM_VAULT_SEED, room.key().as_ref()],
@@ -31,7 +31,7 @@ pub struct WithdrawToLpManager<'info> {
     )]
     pub room_vault: UncheckedAccount<'info>,
 
-    /// CHECK: Off-chain LP manager wallet that will hold principal during the
+    /// CHECK: Off-chain LP manager wallet, pinned to `config.lp_manager`.
     #[account(
         mut,
         constraint = lp_manager.key() == config.lp_manager @ RoomError::LpManagerMismatch,

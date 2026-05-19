@@ -66,8 +66,8 @@ export function SessionAuthProvider({ children }: { children: ReactNode }) {
       setError(null);
 
       try {
-        // Reuse a still-valid delegation if present so a tRPC token loss
-        // doesn't force the user back to the wallet popup.
+        // Reuse a still-valid delegation so a tRPC token loss doesn't force a
+        // fresh wallet popup.
         let bundle = loadDelegation(wallet);
         setState("signing");
         if (!bundle) {
@@ -92,9 +92,7 @@ export function SessionAuthProvider({ children }: { children: ReactNode }) {
       } catch (err) {
         if (attempt !== attemptRef.current) return;
         sessionTokenStore.set(null);
-        // A failed exchange means the cached delegation is unusable
-        // (already-bound, expired, or signature mismatch). Drop it so
-        // retry() prompts for a fresh signature instead of looping.
+        // Cached delegation is unusable; drop it so retry() prompts fresh.
         clearDelegation(wallet);
         setError(err instanceof Error ? err.message : "Authentication failed");
         setState("error");
@@ -118,7 +116,6 @@ export function SessionAuthProvider({ children }: { children: ReactNode }) {
 
     wasConnectedRef.current = true;
 
-    // Only attempt once per wallet; retry() resets this.
     if (attemptedWalletRef.current === walletAddress) return;
     attemptedWalletRef.current = walletAddress;
 
@@ -149,7 +146,6 @@ export function SessionAuthProvider({ children }: { children: ReactNode }) {
     try {
       await utils.client.auth.logout.mutate();
     } catch {
-      // best-effort server-side revoke
     }
     clearSession(walletAddress);
     clearDelegation(walletAddress);

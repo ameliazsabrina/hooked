@@ -13,7 +13,7 @@ export class MainScene extends Phaser.Scene {
   private isFishing = false;
   private mode: "day" | "night" = "day";
 
-  // fishing.gif natural duration: 9 frames × 200ms.
+  // 9 frames × 200ms.
   private static readonly FISHING_GIF_DURATION_MS = 1800;
 
   constructor() {
@@ -91,8 +91,7 @@ export class MainScene extends Phaser.Scene {
     this.ship.setOrigin(0.5, 0.5);
     this.ship.play("ship-idle");
 
-    // Match ship's frameRate (1.5, no yoyo) so check frames swap in lockstep
-    // with ship frames.
+    // Match ship's frameRate so check frames swap in lockstep with ship frames.
     this.anims.create({
       key: "character-idle",
       frames: [{ key: "check-2" }, { key: "check-1" }],
@@ -104,8 +103,7 @@ export class MainScene extends Phaser.Scene {
     this.characterSprite.setOrigin(0.5, 0.5);
     this.characterSprite.play("character-idle");
 
-    // DOM <img> overlays because Phaser textures only decode the first frame
-    // of an animated GIF.
+    // DOM overlays — Phaser textures only decode the first frame of a GIF.
     const makeGifOverlay = (src: string) => {
       const img = document.createElement("img");
       img.decoding = "sync";
@@ -169,8 +167,7 @@ export class MainScene extends Phaser.Scene {
     if (this.isFishing) return;
     this.isFishing = true;
 
-    // Let the idle cycle finish once before the cast animation kicks in,
-    // so the pose doesn't snap mid-frame.
+    // Let the idle cycle finish so the pose doesn't snap mid-frame.
     this.characterSprite.once(
       Phaser.Animations.Events.ANIMATION_REPEAT,
       this.playFishingClip,
@@ -181,7 +178,7 @@ export class MainScene extends Phaser.Scene {
   private onFishBite() {
     if (!this.isFishing) return;
 
-    // If bite fires before the idle cycle completed, skip the wait and swap now.
+    // Skip the idle-cycle wait if bite already fired.
     this.characterSprite.off(
       Phaser.Animations.Events.ANIMATION_REPEAT,
       this.playFishingClip,
@@ -193,7 +190,6 @@ export class MainScene extends Phaser.Scene {
   private playFishingClip() {
     if (!this.isFishing) return;
 
-    // Clear any prior timer so this clip's follow-up waiting swap wins.
     if (this.castTimer) {
       this.castTimer.remove(false);
       this.castTimer = null;
@@ -218,7 +214,6 @@ export class MainScene extends Phaser.Scene {
     if (!this.isFishing) return;
     this.isFishing = false;
 
-    // Cancel pending swap if player dismissed before the idle cycle finished.
     this.characterSprite.off(
       Phaser.Animations.Events.ANIMATION_REPEAT,
       this.playFishingClip,
@@ -247,9 +242,8 @@ export class MainScene extends Phaser.Scene {
     const waterScale = Math.max(width / 3413, height / 1920) * 1.05;
     this.water.setScale(waterScale);
 
-    // Canvas spans full viewport but play area is inside .game-viewport
-    // (between sidebars, above bottom panels). Read its DOM rect so the ship
-    // centers on the water the player sees, not the hidden-behind-UI midpoint.
+    // Center ship on the visible play area (.game-viewport), not the canvas
+    // midpoint hidden behind sidebars/panels.
     const viewportEl = document.querySelector(
       ".game-viewport",
     ) as HTMLElement | null;
@@ -301,8 +295,7 @@ export class MainScene extends Phaser.Scene {
       loop: -1,
     });
 
-    // Rock the ship sprite only — rocking shipGroup would swing the captain
-    // through an arc and desync him from the ship's bob.
+    // Rock the ship only; rocking shipGroup swings the captain through an arc.
     this.rockTween = this.tweens.add({
       targets: this.ship,
       angle: { from: -1.5, to: 1.5 },

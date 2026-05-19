@@ -5,36 +5,24 @@ import {
   type RotationPattern,
 } from "./difficulty.js";
 
-// ----------------------------------------------------------------------------
-// Spinner physics — single source of truth shared by the client renderer
-// (`packages/client/src/components/fishing/circular-tap.tsx`) and the server
-// replay validator (`validateCircularTapTaps`). Anything that changes how the
-// indicator moves or where targets sit MUST land here so client and server
-// stay bit-identical; otherwise honest players will get false misses on the
-// server side.
-// ----------------------------------------------------------------------------
+// Spinner physics — single source of truth shared by the client renderer and the
+// server replay validator. Changes to indicator motion or target layout MUST land
+// here, or honest players get false misses server-side.
 
 export const BASE_ORBIT_MS = 1200;
 export const AUTO_MISS_REVOLUTIONS = 2.0;
 export const PHASE_ESCALATION_STEP = 0.08;
 
 /**
- * Generate the per-tap target angles for a circular-tap encounter. Currently
- * deterministic from `(rarity, taps)` only — `castCount` is a plumbing knob
- * the renderer always passes 0, kept here so we can re-introduce per-cast
- * variation without changing the call shape.
+ * Per-tap target angles for a circular-tap encounter. Deterministic from
+ * `(castCount, taps)`; `_rarity` is reserved for future per-rarity variation.
+ * Golden-angle 137.5° between casts, 72° between taps within a cast.
  */
 export function buildCircularTapTargets(
-  // Reserved for future per-rarity layout variation; currently the layout is
-  // determined by `(castCount, taps)` only.
   _rarity: FishRarity,
   castCount: number,
   taps: number,
 ): number[] {
-  // Match the legacy CIRCULAR_TAP_CONFIG shape: deterministic angular layout
-  // around the ring keyed off the cast index + tap index. Golden-angle 137.5°
-  // spreads adjacent casts; 72° between taps within a cast keeps them visually
-  // distinct around the ring.
   const targets: number[] = [];
   for (let i = 0; i < taps; i++) {
     const angle = ((castCount * 137.5 + i * 72.0) % 360) * (Math.PI / 180);
@@ -49,8 +37,8 @@ export function shortestAngularDistance(a: number, b: number): number {
 }
 
 /**
- * Indicator angle at `elapsedMs` into the current tap. All patterns average
- * the same net speed — difficulty comes from predictability, not raw pace.
+ * Indicator angle at `elapsedMs` into the current tap. All patterns average the
+ * same net speed — difficulty comes from predictability, not raw pace.
  */
 export function angleForPattern(
   pattern: RotationPattern,
@@ -79,10 +67,8 @@ export function angleForPattern(
 }
 
 /**
- * The "effective" spinner state for a given tap. The renderer recomputes
- * this per-tap because `phaseEscalation` mutates speed and arc width after
- * each successful tap; the server replay does the same so its indicator
- * angle and arc match the client's exactly at the moment of tap.
+ * "Effective" spinner state for a given tap — `phaseEscalation` mutates speed
+ * and arc after each successful tap. Server replay must compute this identically.
  */
 export interface EffectiveCircularState {
   speedRadPerSec: number;
@@ -116,9 +102,7 @@ export function computeEffectiveCircularState(
   };
 }
 
-/** One tap as reported by the client. `msSinceTapStart` is the per-tap-local
- *  elapsed time at the moment the player tapped (resets to 0 each time the
- *  spinner advances to the next tap). */
+/** `msSinceTapStart` is per-tap-local elapsed time, resetting each time the spinner advances. */
 export interface CircularTapInput {
   tapIndex: number;
   msSinceTapStart: number;
@@ -137,17 +121,14 @@ export interface ValidateCircularTapTapsArgs {
   profile: CircularProfile;
   targets: number[];
   taps: CircularTapInput[];
-  /** Extra slack added to the per-tap timing window to absorb network jitter
-   *  and client RAF granularity. Tunable; default 60ms covers a typical
-   *  60Hz frame plus a single round-trip. */
+  /** Slack added to per-tap timing window for network jitter + RAF granularity. Default 60ms. */
   jitterSlackMs?: number;
 }
 
 export interface ValidateCircularTapTapsResult {
   hits: number;
   misses: number;
-  /** True when the client cleared the encounter under the rules: enough hits
-   *  to satisfy `tapsRequired` AND `misses <= missesAllowed`. */
+  /** Cleared the encounter: hits satisfy `tapsRequired` AND `misses <= missesAllowed`. */
   passed: boolean;
   perTap: CircularTapOutcome[];
 }
@@ -155,16 +136,10 @@ export interface ValidateCircularTapTapsResult {
 const DEFAULT_JITTER_SLACK_MS = 60;
 
 /**
- * Replay each reported tap through the server's copy of the spinner physics
- * and decide pass/fail. The contract:
- *   - taps are processed in submission order; the validator does NOT trust
- *     `tapIndex` for ordering, only for cross-checking against expected.
- *   - a tap whose `msSinceTapStart` exceeds `autoMissMs + jitterSlackMs` for
- *     its tap is treated as auto_miss (the renderer would have force-missed
- *     it locally; an attacker can't claim a hit past the spinner timeout).
- *   - escalation: after each *hit*, `escalationStep` increments when the
- *     profile has `phaseEscalation: true`. Subsequent taps replay against
- *     the updated effective state, matching the renderer.
+ * Replay each reported tap through the server's spinner physics. Contract:
+ *   - Taps processed in submission order; `tapIndex` is only cross-checked, not trusted for order.
+ *   - `msSinceTapStart` > `autoMissMs + jitterSlackMs` → auto_miss (renderer would have force-missed).
+ *   - After each hit, escalation step increments when `phaseEscalation: true`.
  */
 export function validateCircularTapTaps(
   args: ValidateCircularTapTapsArgs,
@@ -175,8 +150,6 @@ export function validateCircularTapTaps(
   let misses = 0;
   let escalationStep = 0;
 
-  // Use the unescalated profile to read tapsRequired / missesAllowed, since
-  // those don't change with escalation.
   const baseTapsRequired = args.profile.tapsRequired;
   const baseMissesAllowed = args.profile.missesAllowed;
 
@@ -185,8 +158,6 @@ export function validateCircularTapTaps(
     const expectedIndex = i;
     const eff = computeEffectiveCircularState(args.profile, escalationStep);
 
-    // Out-of-order or out-of-range tapIndex: treat as miss with a distinct
-    // reason so the gateway can log/telemetry it.
     if (tap.tapIndex !== expectedIndex || tap.tapIndex >= baseTapsRequired) {
       misses++;
       perTap.push({
@@ -214,9 +185,6 @@ export function validateCircularTapTaps(
       continue;
     }
 
-    // Negative or implausibly-future timestamps are auto_miss. We allow up to
-    // autoMissMs + slack: anything past that, the renderer would have
-    // force-missed itself.
     if (
       tap.msSinceTapStart < 0 ||
       tap.msSinceTapStart > eff.autoMissMs + slack
@@ -277,13 +245,7 @@ export function validateCircularTapTaps(
   return { hits, misses, passed, perTap };
 }
 
-/**
- * Convenience: build the canonical circular state needed by the gateway at
- * fish_hooked time. Returns the rarity's CIRCULAR_BASE profile (the renderer
- * uses this same source) plus the deterministic targets array.
- *
- * Throws if rarity is not a circular tier — caller should gate on mechanic.
- */
+/** Canonical circular state for fish_hooked: CIRCULAR_BASE profile + targets. Throws if rarity is not a circular tier. */
 export function buildCircularTapState(
   rarity: FishRarity,
   castCount: number,

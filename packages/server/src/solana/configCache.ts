@@ -4,18 +4,8 @@ import {
   loadAdminKeypair,
 } from "./roomsProgram.js";
 
-/**
- * Tiny TTL cache around `ProgramConfig`. Used by keeper/lifecycle services
- * to skip work when the program is paused, without hammering the RPC.
- *
- * 5-second TTL is the smallest window that meaningfully reduces RPC load
- * (a busy keeper fires multiple times per slot) while still letting an
- * emergency `set_paused(true)` propagate within seconds.
- *
- * The cache is module-global on purpose: every service should observe the
- * same paused state in any given window, so a single shared cache also
- * doubles as a coherence guarantee.
- */
+// 5s TTL: lets emergency `set_paused(true)` propagate quickly while
+// absorbing busy-keeper RPC traffic. Module-global for coherence.
 type CachedConfig = {
   paused: boolean;
   admin: string;
@@ -28,30 +18,17 @@ let cached: CachedConfig | null = null;
 let cachedAt = 0;
 const TTL_MS = 5_000;
 
-/**
- * Force the next call to refetch. Use after sending a `set_paused` tx so
- * the next preflight sees the new state without waiting for TTL.
- */
 export function invalidateConfigCache(): void {
   cached = null;
   cachedAt = 0;
 }
 
-/**
- * Returns the current ProgramConfig snapshot, fetching at most once per
- * TTL_MS. Returns null if the program signer is not available (no
- * ADMIN_KEYPAIR / TREASURY_KEYPAIR set) — in that case there's no useful
- * preflight to do anyway, since the caller can't sign.
- *
- * Read-only: never mutates on-chain state. Safe to call before each ix.
- */
+/** Null when no signer is configured — caller can't sign anyway. */
 export async function getProgramConfigCached(): Promise<CachedConfig | null> {
   const now = Date.now();
   if (cached && now - cachedAt < TTL_MS) return cached;
 
-  // Anchor's Program needs a wallet; we never sign here, so any keypair
-  // works. Prefer ADMIN since it's the role most likely to be wired up
-  // in environments where this code runs.
+  // Anchor needs a wallet; we never sign here. ADMIN is the most-wired role.
   const signer = loadAdminKeypair();
   const loaded = signer ? getRoomsProgram(signer) : getRoomsProgram();
   if (!loaded) return null;
@@ -60,9 +37,7 @@ export async function getProgramConfigCached(): Promise<CachedConfig | null> {
     getProgramConfigPda(),
   );
   if (!acct) {
-    // Config isn't initialized yet — treat as "not paused" so the caller
-    // doesn't block on a missing account. Other ix will fail with a clear
-    // error if they actually need config.
+    // Uninitialized config reads as "not paused" — other ix will fail clearly.
     return null;
   }
 
@@ -77,11 +52,7 @@ export async function getProgramConfigCached(): Promise<CachedConfig | null> {
   return cached;
 }
 
-/**
- * Convenience: returns true if the program is currently paused.
- * Returns false on cache miss / config-not-initialized — i.e. fail-open
- * for read paths, fail-closed (via on-chain enforcement) for writes.
- */
+/** Fail-open on cache miss; writes still fail-closed via on-chain enforcement. */
 export async function isProgramPaused(): Promise<boolean> {
   const cfg = await getProgramConfigCached();
   return cfg?.paused === true;

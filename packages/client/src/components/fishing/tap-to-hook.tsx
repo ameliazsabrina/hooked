@@ -1,6 +1,4 @@
-// Fullscreen non-interactive prompt rendered during the 2s reaction window.
-// Taps go through to the global listener installed by use-fishing-ws.ts so
-// the entire screen is the hook target.
+/** Non-interactive overlay; taps pass through to the global listener in use-fishing-ws. */
 export function TapToHook() {
   return (
     <div className="tap-to-hook-overlay" aria-hidden>

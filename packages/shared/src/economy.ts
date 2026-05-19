@@ -16,23 +16,16 @@ export const PLATFORM_FEE_RATE = 0.3;
 /** @deprecated Use YIELD_SPLIT from scoring.ts */
 export const PLAYER_POOL_RATE = 0.7;
 
-// Used by the legacy monthly-pool router (poolRouter.ts, poolLifecycle.ts,
-// dailyReset.ts) for projected-yield UI — *not* by the weekly-room flow,
-// which uses realized yield from the LP cycle instead.
+// Legacy monthly-pool router only (projected-yield UI); weekly-room flow uses realized LP yield.
 export const DEPOSIT_APY_ESTIMATE = 0.064;
 
-// Weekly-room LP integration (Meteora DLMM SOL/USDC). These constants are
-// targets/SLOs for monitoring; realized yield is whatever the cycle nets.
-//
-// The 5%/wk number from the original spec is a stretch goal — realistic
-// SOL/USDC weekly fee yield on top Meteora pools is 1–4% in normal markets.
-// We commit to "best-effort, realized fees only" — no guaranteed minimum.
+// Weekly-room LP targets (Meteora DLMM SOL/USDC). Monitoring SLOs only — realized yield is whatever the cycle nets.
+// 5%/wk is a stretch goal; realistic top-pool fee yield is 1–4%. No guaranteed minimum.
 export const LP_WEEKLY_YIELD_STRETCH_TARGET = 0.05;
 export const LP_WEEKLY_YIELD_REALISTIC_BAND = { min: 0.01, max: 0.04 } as const;
 
-// LP_MANAGER buffer wallet must hold at least this fraction of the largest
-// active room's principal to absorb impermanent loss without dipping into
-// player principal. Sized for ~10% SOL price move on a ±10-bin Spot position.
+// LP_MANAGER buffer must cover ~10% SOL price move on a ±10-bin Spot position
+// against the largest active room's principal, to absorb IL without touching player principal.
 export const LP_IL_BUFFER_PCT = 0.05;
 
 export const POOL_DURATION_DAYS = 30;

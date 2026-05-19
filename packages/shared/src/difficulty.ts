@@ -2,9 +2,8 @@ import { FishRarity } from "./fish.js";
 
 export type RotationPattern = "linear" | "reversing" | "burst";
 
-// PRD §6.4 — per-species vertical behavior patterns. Until `FishSpecies` carries
-// a pattern field, `buildDifficultyProfile` picks one deterministically from a
-// rarity-indexed pool using the cast seed.
+// PRD §6.4. Until `FishSpecies` carries a pattern field, `buildDifficultyProfile`
+// picks one deterministically from a rarity-indexed pool using the cast seed.
 export type FishPattern = "mixed" | "dart" | "smooth" | "sinker" | "floater";
 
 export interface VerticalProfile {
@@ -14,7 +13,7 @@ export interface VerticalProfile {
   directionChangeHz: number;
   fakeOutChance: number;
   fakeOutMagnitude: number;
-  // Max target offset from current position per dir-change, in simulation units.
+  /** Max target offset from current position per dir-change, in simulation units. */
   oscillationMagnitude: number;
   pattern: FishPattern;
   catchZoneWidth: number;
@@ -22,7 +21,7 @@ export interface VerticalProfile {
   drainPerTickMiss: number;
   inertia: number;
   durationMs: number;
-  // PRD §6.3 — base green-bar height in px (pre rod-bonus); 60–140px per rarity.
+  /** PRD §6.3 — base green-bar height in px (pre rod-bonus); 60–140px per rarity. */
   greenBarHeightBase: number;
 }
 
@@ -46,9 +45,7 @@ export type DifficultyProfile = VerticalProfile | CircularProfile;
 export type VerticalTier = FishRarity.Basic | FishRarity.Rare | FishRarity.Monster;
 export type CircularTier = FishRarity.Legendary | FishRarity.Apex;
 
-// Baseline values keyed to the playtest table (Basic 0.5× / Rare 1.0× / Monster 1.5×
-// of a 42-unit/sec reference). Direction-change frequency and oscillation magnitude
-// follow the PM's difficulty-scaling table.
+// Baseline values keyed to playtest table: Basic 0.5× / Rare 1.0× / Monster 1.5× of a 42-unit/sec reference.
 export const VERTICAL_BASE: Record<VerticalTier, VerticalProfile> = {
   [FishRarity.Basic]: {
     kind: "vertical",
@@ -106,10 +103,8 @@ const VERTICAL_PATTERN_POOL: Record<VerticalTier, FishPattern[]> = {
   [FishRarity.Monster]: ["dart", "mixed"],
 };
 
-// Secondary timing-bar phase that follows a successful circular tap on
-// legendary/apex hooks. Difficulty is calibrated to extend the encounter
-// without doubling the failure rate — green bar is generous and movement is
-// closer to monster-tier so the player feels rewarded for clearing the taps.
+// Secondary timing-bar phase following a successful circular tap on legendary/apex hooks.
+// Calibrated to extend the encounter without doubling failure rate.
 export const LEGENDARY_VERTICAL_BASE: Record<CircularTier, VerticalProfile> = {
   [FishRarity.Legendary]: {
     kind: "vertical",
@@ -245,8 +240,7 @@ export function buildDifficultyProfile(
 
   if (isVerticalTier(rarity)) {
     const b = VERTICAL_BASE[rarity];
-    // XOR with a constant so pattern selection is independent of the variance
-    // draw (which also consumes `seed`) and stays deterministic per cast.
+    // XOR constant keeps pattern selection independent of the variance draw on the same seed.
     const patternRng = mulberry32((seed >>> 0) ^ 0xa5a5a5a5);
     const pool = VERTICAL_PATTERN_POOL[rarity];
     const pattern = pool[Math.floor(patternRng() * pool.length)];
@@ -312,12 +306,9 @@ export interface TapResult {
   tapAngle: number;
   hit: boolean;
   /**
-   * Per-tap-local elapsed time (ms since the renderer started rotating this
-   * tap's indicator). Required for server-side replay validation via
-   * `validateCircularTapTaps` — the server feeds this exact value into the
-   * same `angleForPattern` the client used, so a hit on the client replays
-   * to a hit on the server bit-for-bit. Use `performance.now()` deltas
-   * rather than `Date.now()` for sub-ms resolution.
+   * Per-tap-local elapsed time (ms since the renderer started rotating this tap's indicator).
+   * Required for server-side replay validation via `validateCircularTapTaps` — must use
+   * `performance.now()` deltas, not `Date.now()`, for bit-for-bit replay parity.
    */
   msSinceTapStart: number;
 }

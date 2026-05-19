@@ -569,7 +569,6 @@
   letter-spacing: 0.02em;
 }
 
-/* Confirm modal — game-themed sell confirmation */
 .sell-confirm-backdrop {
   position: fixed;
   inset: 0;

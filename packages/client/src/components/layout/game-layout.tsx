@@ -45,8 +45,7 @@ interface GameLayoutProps {
 }
 
 function getModeForNow(): "day" | "night" {
-  // Match the server's bait-window boundaries so day/night visuals flip at
-  // the same instant bait refills (UTC 02:00 / 14:00 in sessionLifecycle).
+  // Mirror sessionLifecycle bait-window boundaries (UTC 02:00 / 14:00).
   const hour = new Date().getUTCHours();
   return hour >= 2 && hour < 14 ? "day" : "night";
 }

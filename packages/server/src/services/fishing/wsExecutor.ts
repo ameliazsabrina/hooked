@@ -1,17 +1,3 @@
-/**
- * Off-chain executor for the WS gateway. Implements the same surface that
- * the legacy `initiateCastOnEr` / `submitResolveOnEr` / `cancelCastOnDisconnect`
- * functions in `ws/gateway.ts` do, but routes through the off-chain engine
- * (services/fishing/castEngine + sessionEngine) instead of CPI'ing into the
- * on-chain hooked_fishing program.
- *
- * The shapes returned here are deliberately string-typed for `sessionId` so
- * the gateway's existing `ctx.sessionPda: string | null` field accepts either
- * a base58 PublicKey (legacy) or a Mongo ObjectId (off-chain) without
- * touching the rest of the gateway. Phase 6 will collapse the field name to
- * `sessionId` once the legacy path is removed.
- */
-
 import type { PublicKey } from "@solana/web3.js";
 import { FishRarity } from "@hooked/shared";
 
@@ -30,10 +16,6 @@ import { CastEngineError } from "./errors.js";
 import { dailySeedDateFor, loadDailySeed } from "./dailySeed.js";
 import { startSession } from "./sessionEngine.js";
 
-/** Mirrors the on-chain executor's RolledCast shape so the gateway doesn't need
- *  to know which path produced the roll. Apex casts surface `apexFishId` +
- *  `apexAssetUrl` + `speciesName` so the WS broadcast can render the rolled
- *  fish without a follow-up query. */
 export interface RolledCast {
   /** SPECIES_TABLE index for non-apex casts; -1 when apex rolled. */
   speciesId: number;
@@ -44,8 +26,7 @@ export interface RolledCast {
   rarityEnum: FishRarity;
   mechanic: number;
   weightHg: number;
-  /** Server-side seed for replayable physics. Independent of the cast roll
-   *  bytes so the legacy path's hash-of-seed semantics carry over. */
+  /** Server-side seed for replayable physics. */
   rngSeed: number;
 }
 
@@ -57,7 +38,6 @@ const RARITY_ORDER: FishRarity[] = [
   FishRarity.Apex,
 ];
 
-/** Hash a buffer to a u32 for the `rngSeed` field of `RolledCast`. */
 function rngSeedFromBytes(buf: Buffer): number {
   let h = 0;
   for (let i = 0; i < Math.min(buf.length, 16); i++) {
@@ -66,12 +46,7 @@ function rngSeedFromBytes(buf: Buffer): number {
   return (h ^ 0x9e3779b9) >>> 0;
 }
 
-/**
- * Ensure a FishingSession exists for the player in the current window and
- * return its id. Mirrors the legacy keeper-driven init_session flow but is
- * done lazily on first cast so the WS gateway doesn't need to coordinate
- * with the keeper job for off-chain players.
- */
+/** Lazily ensures a FishingSession for the current window. */
 async function ensureActiveSession(walletBase58: string): Promise<string> {
   const player = await Player.findOne(
     { walletAddress: walletBase58 },
@@ -93,21 +68,9 @@ async function ensureActiveSession(walletBase58: string): Promise<string> {
     );
   }
 
-  // Defense-in-depth: the only previous gate was `deposits[].returned`,
-  // which only flips when the settlement keeper successfully runs
-  // `return_principal`. If the keeper is wedged (insufficient vault, paused
-  // program, dead Redis scheduler), `returned` stays false and players can
-  // keep casting on a window that's effectively closed — which is exactly
-  // the symptom of the 2026-05-18 incident. Check the room state directly
-  // here so the cast path fails closed regardless of keeper health.
-  //
-  // Phases:
-  //   "entry"    — deposits open, casting allowed
-  //   "active"   — deposits closed, casting allowed (the gameplay window)
-  //   "settling" — closesAt has passed, settlement in progress
-  //   "closed"   — settlement complete, room terminal
-  // We allow only entry+active. `closesAt <= now` catches the rare gap
-  // where the lifecycle tick hasn't run yet but the wall clock has passed.
+  // Fail closed regardless of keeper health: check room state directly
+  // (deposits[].returned only flips when keeper succeeds, which can stall).
+  // Only "entry" and "active" phases allow casting.
   const room = await Room.findOne(
     { roomId: active.poolId },
     { phase: 1, closesAt: 1 },
@@ -140,8 +103,7 @@ async function ensureActiveSession(walletBase58: string): Promise<string> {
           active: true,
           name: event.name,
           apexBp: event.apexBp,
-          // Convert kg → hg (×10) once at snapshot time so the cast roll
-          // keeps integer math.
+          // kg → hg (×10) for integer math.
           apexFishes: event.apexFishes.map((f) => ({
             apexFishId: f.id,
             name: f.name,
@@ -154,13 +116,8 @@ async function ensureActiveSession(walletBase58: string): Promise<string> {
     now,
   });
 
-  // Self-heal stale pendingCast: a cast whose castAt is older than the
-  // 30s "should have resolved by now" threshold means the player either
-  // dropped the connection mid-cast or never tapped, and the bait was
-  // already debited at initiate time. Without this, the next cast hits
-  // CAST_PENDING in initiateCast and the timing-bar / circular-tap UI
-  // never appears. No bait refund — the cast was abandoned, not cancelled
-  // within the 8s grace window.
+  // Stale pendingCast (>30s) blocks the next cast on CAST_PENDING. Clear
+  // without refund — past the 8s cancel grace, the bait counts as spent.
   const STALE_CAST_MS = 30_000;
   await FishingSession.updateOne(
     {
@@ -174,11 +131,7 @@ async function ensureActiveSession(walletBase58: string): Promise<string> {
   return result.sessionId;
 }
 
-/**
- * Roll a cast off-chain and return the same `{ rolled, sessionId }` shape the
- * legacy on-chain executor produces. Auto-creates a session for the wallet
- * if one doesn't exist for the current window (idempotent).
- */
+/** Idempotently creates a session for the current window then rolls. */
 export async function executeInitiateCastOffchain(
   wallet: PublicKey,
   _clientCastId: string,
@@ -209,10 +162,7 @@ export async function executeInitiateCastOffchain(
   };
 }
 
-/**
- * Resolve a pending cast off-chain. The score returned here lets the gateway
- * push `catch_resolved` to the client without re-querying the DB.
- */
+/** Returns score so the gateway can push catch_resolved without a DB requery. */
 export async function executeSubmitResolveOffchain(
   sessionId: string,
   hit: boolean,
@@ -222,23 +172,17 @@ export async function executeSubmitResolveOffchain(
     if (!result.hit) {
       return { score: 0, weightHg: 0 };
     }
-    // For weightHg, re-read the catch we just wrote — but submitInputSamples
-    // already persisted the canonical weight, so the gateway's caller-side
-    // weight from the rolled cast is fine. Return the score we just locked in.
     return { score: result.score, weightHg: 0 };
   } catch (err) {
     if (err instanceof CastEngineError && err.code === "NO_CAST_TO_RESOLVE") {
-      // Cast was already resolved (race) — gateway falls back to its own scoring.
+      // Race — gateway falls back to its own scoring.
       return null;
     }
     throw err;
   }
 }
 
-/**
- * Refund bait for a cast abandoned mid-flight (player disconnected before
- * tapping). Same 8s grace as the on-chain path.
- */
+/** Pre-tap disconnect refund (8s grace). */
 export async function executeCancelOnDisconnectOffchain(
   sessionId: string,
 ): Promise<void> {
@@ -246,8 +190,6 @@ export async function executeCancelOnDisconnectOffchain(
     await cancelCast({ sessionId });
   } catch (err) {
     if (err instanceof CastEngineError) {
-      // CANCEL_GRACE_EXPIRED, NO_CAST_TO_RESOLVE — both are normal in the
-      // disconnect flow and don't warrant a stack trace.
       console.warn(
         `[wsExecutor] cancel skipped (${err.code}): ${err.message}`,
       );
@@ -257,12 +199,7 @@ export async function executeCancelOnDisconnectOffchain(
   }
 }
 
-/**
- * Refund bait for a cast abandoned mid-flight, broader than `cancelCast` —
- * covers post-nibble disconnects within `ABANDON_CAST_GRACE_SECS`. Returns
- * whether a refund actually happened so the gateway can record the right
- * reaction-log outcome (`cancelled` vs leaving the cast to the stale-sweep).
- */
+/** Post-tap disconnect refund (ABANDON_CAST_GRACE_SECS). */
 export async function executeAbandonOnDisconnectOffchain(
   sessionId: string,
 ): Promise<{ refunded: boolean }> {

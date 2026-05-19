@@ -21,11 +21,7 @@ import {
   type CastRoll,
 } from "./types.js";
 
-/**
- * Per-cast 32-byte seed derived from a daily secret + cast-identifying inputs.
- * The daily secret rotates each UTC day; its sha256 is committed publicly
- * before the day starts so revealed seeds can be verified at audit time.
- */
+/** HMAC-SHA256 of cast identity under the daily secret. */
 export function seedForCast(input: {
   dailySeed: Buffer;
   sessionId: string;
@@ -40,21 +36,14 @@ export function seedForCast(input: {
   return createHmac("sha256", input.dailySeed).update(message).digest();
 }
 
-/** Day or night rarity table with apex_bp redistributed from Basic. */
+/** apex_bp redistributed from Basic so sum stays at BPS_SCALE. */
 function effectiveRarityWeights(window: Window, apexBp: number): readonly [number, number, number, number, number] {
   const base = window === Window.Day ? DAY_RARITY_WEIGHTS : NIGHT_RARITY_WEIGHTS;
-  // apex_bp is taken from Basic so the sum stays at BPS_SCALE. set_event caps
-  // apex_bp well under Basic's floor; the Math.max is defense-in-depth.
   const basic = Math.max(0, base[0] - apexBp);
   return [basic, base[1], base[2], base[3], apexBp];
 }
 
-/**
- * Roll a rarity tier from the seed's first 4 bytes. Mirrors the Rust
- * `roll_rarity` distribution: u32 mod BPS_SCALE, walk cumulative weights.
- *
- * Note: drawing from u32 (vs u16) keeps the partial-final-cycle bias under 2e-6.
- */
+/** u32 (not u16) keeps partial-final-cycle bias under 2e-6. */
 export function rollRarity(seedBytes: Buffer, window: Window, apexBp: number): Rarity {
   const weights = effectiveRarityWeights(window, apexBp);
   const u32 = seedBytes.readUInt32LE(0);
@@ -67,21 +56,13 @@ export function rollRarity(seedBytes: Buffer, window: Window, apexBp: number): R
   return (weights.length - 1) as Rarity;
 }
 
-/** Returns true if this cast should bump rarity 0 → 1 due to pity. */
 export function shouldForceRare(castCount: number, pity: number): boolean {
   return (castCount === 10 || castCount === 13) && pity >= PITY_THRESHOLD;
 }
 
 /**
- * Full cast roll: rarity → species → weight → green-zone position → mechanic.
- * Pure function of inputs — no IO, no Date.now. Caller is responsible for
- * pity bookkeeping and persisting the result.
- *
- * Apex casts pick uniformly from `apexFishes` (the session-start snapshot of
- * the active event's `ApexFish` pool) and use the entry's weight range
- * directly — the apex catalog lives in MongoDB and isn't part of
- * SPECIES_TABLE. When apex rolls and the snapshot is empty, the function
- * throws (the session shouldn't have allowed an apex roll without an event).
+ * Pure: rarity → species → weight → green-zone → mechanic. Apex picks from
+ * `apexFishes` (session-start snapshot); throws if apex rolls without one.
  */
 export function rollCast(input: {
   seedBytes: Buffer;

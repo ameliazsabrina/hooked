@@ -12,11 +12,6 @@ import {
   type CircularTapClientConfig,
 } from "@hooked/shared";
 
-// hooked_fishing program client and PDA helpers were retired in Phase 6:
-// the program no longer exists on-chain and all fishing flows run through
-// the off-chain tRPC API + WS gateway. The deposit screen and any future
-// rooms interactions still need the rooms program below.
-
 export const HOOKED_ROOMS_PROGRAM_ID = new PublicKey(
   import.meta.env.VITE_HOOKED_ROOMS_PROGRAM_ID ?? roomsIdlJson.address
 );
@@ -31,17 +26,8 @@ export function getRoomsProgram(
   return new Program<HookedRooms>(roomsIdlJson as HookedRooms, provider);
 }
 
-/**
- * Read-only Program client. Used for fetching on-chain state without
- * needing the user to connect a wallet — e.g. polling `ProgramConfig.paused`
- * to gate the deposit UI before the user taps "Connect Wallet".
- *
- * The dummy wallet is intentional: AnchorProvider requires a wallet, but
- * read-only calls (`program.account.*.fetch()`) never invoke `signTransaction`.
- * If anything ever does try to sign through this provider it'll throw —
- * that's the safety net so we don't accidentally send a tx without the
- * user's actual wallet.
- */
+/** Read-only Program client for fetching on-chain state pre-wallet-connect.
+ * Dummy wallet throws on sign as a safety net against accidental tx sends. */
 export function getRoomsProgramReadonly(
   connection: Connection
 ): Program<HookedRooms> {

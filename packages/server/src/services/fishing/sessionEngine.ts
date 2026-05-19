@@ -6,33 +6,16 @@ import { CastEngineError } from "./errors.js";
 import { assignWindow } from "./window.js";
 
 /**
- * Start a fishing session for a player. Idempotent within (player, dateKey,
- * window) — calling twice returns the existing session, matching the on-chain
- * `init_session` PDA semantics where the seeds enforce one session per slot.
- *
- * The event config is captured by value at session start so an admin can't
- * retroactively change Apex availability for an already-rolled session. The
- * caller (tRPC route in Phase 2) is responsible for fetching the current
- * event status and passing the snapshot in here.
+ * Idempotent within (player, dateKey, window) on the active session.
+ * Event config is captured by value so admin edits don't retroactively
+ * change Apex availability for an already-rolled session.
  */
 export interface StartSessionInput {
   walletAddress: string;
-  /** Room this session is funded by — persisted on the session doc so a
-   *  new deposit into a different room within the same (dateKey, window)
-   *  abandons the prior session instead of reusing its bait. */
   roomId: string;
-  /** SOL deposit on the room — used to derive baitInitial. */
   baitInitial: number;
-  /** Bait deposit tier (0 = none, 1+ = derived from deposit). */
   tier: number;
-  /**
-   * Snapshot of the active FishingEvent at session start. Captured by value
-   * so an admin can't retroactively change Apex availability or fish choice
-   * for an already-rolled session. `apexFishes` pins the apex pool + weight
-   * ranges (in hg) used when Apex is rolled — see rng.ts:rollCast. The
-   * `apexFishId`/`name` fields are baked in so a later edit/delete on the
-   * underlying ApexFish doc doesn't change anything mid-session.
-   */
+  /** apexFishes pins the apex pool + weight ranges (hg) used by rollCast. */
   event?: {
     active: true;
     name: string;
@@ -71,9 +54,8 @@ export async function startSession(input: StartSessionInput): Promise<StartSessi
     throw new CastEngineError("SESSION_NOT_FOUND", `No player for wallet ${input.walletAddress}`);
   }
 
-  // Idempotent within (player, slot) for the *active* session only —
-  // committed/abandoned sessions for the same slot are deliberately
-  // ignored so a fresh deposit can lazy-create a new active session.
+  // Active-only — committed/abandoned at same slot are ignored so a
+  // fresh deposit can lazy-create a new active session.
   const existing = await FishingSession.findOne({
     playerId: player._id,
     dateKey,
@@ -130,17 +112,9 @@ export async function startSession(input: StartSessionInput): Promise<StartSessi
 }
 
 /**
- * Compute the canonical session digest used for audit. v1: sha256 over the
- * concatenation of canonical catch leaves sorted by castIndex. Phase 5 will
- * upgrade this to a true Merkle tree if per-catch inclusion proofs are
- * needed; the leaf encoding here stays stable so the upgrade is additive.
- *
- * Leaf encoding (per catch, big-endian):
- *   castIndex (u32) || speciesId (u8) || rarity (u8) || weightHg (u16) || score (u32)
- *   if rarity == Apex (4):
- *     || apexFishId (12 raw ObjectId bytes)
- *   The speciesId byte is 0xFF for apex catches (sentinel — apex isn't
- *   represented in SPECIES_TABLE).
+ * sha256 over canonical catch leaves sorted by castIndex.
+ * Leaf BE: castIndex u32 || speciesId u8 (0xFF for apex) || rarity u8 ||
+ *          weightHg u16 || score u32 || (if apex) 12-byte ObjectId.
  */
 export function computeSessionDigest(catches: ReadonlyArray<{
   castIndex: number;
@@ -152,8 +126,7 @@ export function computeSessionDigest(catches: ReadonlyArray<{
 }>): Buffer {
   const sorted = [...catches].sort((a, b) => a.castIndex - b.castIndex);
   const hasher = createHash("sha256");
-  // Domain-separation prefix so a 0-catch digest is non-empty and can never
-  // collide with an arbitrary external sha256 of empty bytes.
+  // Domain-separation prefix so a 0-catch digest can't collide with sha256("").
   hasher.update("hooked:session:v1\n");
   for (const c of sorted) {
     const isApex = c.rarity === 4;
@@ -166,8 +139,7 @@ export function computeSessionDigest(catches: ReadonlyArray<{
     buf.writeUInt32BE(c.score, 8);
     hasher.update(buf);
     if (isApex) {
-      // 12 raw ObjectId bytes — zero-filled when apexFishId is missing
-      // (defensive; the cast-engine path always populates it for apex).
+      // Zero-filled defensively if apexFishId is missing.
       const idBuf = Buffer.alloc(12);
       if (c.apexFishId && /^[0-9a-f]{24}$/i.test(c.apexFishId)) {
         Buffer.from(c.apexFishId, "hex").copy(idBuf);
@@ -201,16 +173,7 @@ const RARITY_NAME_TO_INT: Record<string, number> = {
   apex: 4,
 };
 
-/**
- * Commit a session: lock score in, compute the audit digest, bump the
- * player's lifetime aggregates. Idempotent — calling twice returns the
- * existing committed result without changing state.
- *
- * Note: this does NOT push the score to chain. That's Phase 3
- * (jobs/scoreBridge.ts) — the keeper consumes a queue of committed
- * sessionIds and calls hooked_rooms.update_room_entry_score with the
- * merkle root in the tx memo.
- */
+/** Idempotent. Score push to chain happens in jobs/scoreBridge.ts. */
 export async function commitSession(input: CommitSessionInput): Promise<CommitSessionResult> {
   const session = await FishingSession.findById(input.sessionId);
   if (!session) throw new CastEngineError("SESSION_NOT_FOUND", "Session not found");
@@ -230,9 +193,7 @@ export async function commitSession(input: CommitSessionInput): Promise<CommitSe
     throw new CastEngineError("SESSION_NOT_ACTIVE", `Cannot commit ${session.status} session`);
   }
 
-  // Compute digest from persisted catches (NOT from session.sessionScore — we
-  // want a content-addressed value that an auditor can re-derive from the
-  // public catch records).
+  // Content-addressed digest — auditors can re-derive from public catch records.
   const catches = await Catch.find({ sessionId: session._id })
     .sort({ castIndex: 1 })
     .lean();
@@ -242,7 +203,6 @@ export async function commitSession(input: CommitSessionInput): Promise<CommitSe
       speciesId: c.speciesId ?? null,
       apexFishId: c.apexFishId ? String(c.apexFishId) : null,
       rarity: RARITY_NAME_TO_INT[c.rarity] ?? 0,
-      // weightKg → weightHg (× 10) to match the leaf encoding domain.
       weightHg: Math.round(c.weightKg * 10),
       score: c.score,
     })),
@@ -251,7 +211,7 @@ export async function commitSession(input: CommitSessionInput): Promise<CommitSe
   const committedAt = input.now ?? new Date();
   const baitUnused = session.baitRemaining;
 
-  // Conditional update so a parallel committer doesn't double-bump player aggregates.
+  // Conditional update prevents double-bump on parallel commits.
   const updated = await FishingSession.findOneAndUpdate(
     { _id: session._id, status: "active" },
     {
@@ -266,8 +226,7 @@ export async function commitSession(input: CommitSessionInput): Promise<CommitSe
     { new: true },
   );
   if (!updated) {
-    // Lost the race — the session was committed by another caller between
-    // the read and update. Fall through to read-and-return the result.
+    // Lost race — re-read the concurrently-committed result.
     const reread = await FishingSession.findById(session._id);
     if (reread?.status === "committed") {
       return {
@@ -283,9 +242,7 @@ export async function commitSession(input: CommitSessionInput): Promise<CommitSe
     throw new CastEngineError("CAST_RACE", "Concurrent commit detected, retry");
   }
 
-  // Bump player lifetime aggregates. Independent operation — failure here
-  // shouldn't unwind the commit (the score is already locked in on the
-  // session document; aggregates are derivative).
+  // Aggregates are derivative — failure here doesn't unwind the commit.
   await Player.updateOne(
     { _id: session.playerId },
     { $inc: { totalScore: updated.sessionScore, totalCatches: updated.catchCount } },

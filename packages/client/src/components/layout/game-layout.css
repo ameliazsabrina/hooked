@@ -1,5 +1,3 @@
-/* === Three-Column Responsive Layout === */
-
 .game-layout {
   display: flex;
   flex-direction: column;
@@ -13,10 +11,7 @@
   position: relative;
 }
 
-/* Phaser canvas is a full-size background layer inside .game-layout.
-   The left/right sidebar PNGs render on top of it, so water shows
-   through any transparent pixels in those assets (gaps between pipes,
-   around coral decorations, etc.). */
+/* Sidebar PNGs render on top; water shows through transparent pixels. */
 #phaser-container {
   position: absolute;
   inset: 0;
@@ -33,14 +28,10 @@
   z-index: 1;
 }
 
-/* --- Overlay greeting / wallet on top of the sidebar PNGs.
-   Absolutely positioned so they float above the grid without
-   pushing any painted frame down. --- */
 .sidebar-greeting {
   position: absolute;
   top: 8px;
-  /* Align with the Bounties frame interior: 8% sidebar col gutter
-     + 12px .sidebar-section padding. */
+  /* Align with Bounties frame interior (8% gutter + 12px padding). */
   left: calc(8% + 12px);
   right: calc(12% + 12px);
   font-family: "Jersey 10", sans-serif;
@@ -164,18 +155,14 @@
   background: rgba(0, 0, 0, 0.4) !important;
 }
 
-/* --- Main Row (sidebars + center) --- */
 .main-row {
   display: flex;
   flex: 1;
   min-height: 0;
 }
 
-/* --- Sidebars ---
-   Sidebar width is derived from the PNG aspect ratio + available height,
-   so the pixel-art frame never stretches. Inside, we use CSS Grid with
-   fr units so content zones scale with the sidebar's own size (percent
-   padding would resolve against the parent row width, which breaks). */
+/* Width derived from PNG aspect ratio so the frame never stretches; grid fr
+   units scale content zones to the sidebar's own size. */
 .sidebar {
   position: relative;
   z-index: 2;
@@ -190,14 +177,11 @@
 }
 
 .sidebar-left {
-  /* left.png is 416 × 1536 */
+  /* left.png is 416 × 1536; rows/cols mirror PNG geometry. */
   aspect-ratio: 416 / 1536;
   background-image: url("/assets/ui/left.png");
   display: grid;
-  /* Rows mirror y-coordinates on the PNG (as % of 1536 height):
-     top margin | bounties frame | gap | streak frame | pipes/gauges */
   grid-template-rows: 5fr 22fr 0fr 17fr 54fr;
-  /* Columns: left frame edge | content | right frame edge (of 416 width) */
   grid-template-columns: 8fr 80fr 12fr;
 }
 
@@ -207,10 +191,7 @@
 }
 
 .sidebar-left > .sidebar-section-streak {
-  /* Absolutely positioned over the painted streak frame in left.png,
-     same pattern as the collectibles section on the right sidebar.
-     This lets us align with the PNG pixel region without being tied
-     to the grid track heights. */
+  /* Absolutely positioned over the painted streak frame in left.png. */
   position: absolute;
   top: 25%;
   left: 8%;
@@ -219,20 +200,18 @@
 }
 
 .sidebar-right {
-  /* right.png is 449 × 1536 */
+  /* right.png is 449 × 1536; rows/cols mirror PNG geometry. */
   aspect-ratio: 449 / 1536;
   background-image: url("/assets/ui/right.png");
   display: grid;
-  /* top | collectibles frame | gap | leaderboard frame | coral/pipe */
   grid-template-rows: 6fr 24fr 6fr 17fr 47fr;
-  /* left frame edge | content | coral decoration (of 449 width) */
   grid-template-columns: 18fr 60fr 22fr;
   position: relative;
   overflow: visible;
 }
 
 .sidebar-right > .sidebar-section-collectibles {
-  /* Position absolutely over the painted 3×3 grid in right.png (449×1536) */
+  /* Absolutely positioned over the painted 3×3 grid in right.png. */
   position: absolute;
   top: 7.5%;
   left: 12%;
@@ -246,8 +225,7 @@
 }
 
 .sidebar-section {
-  /* Frame comes from the background PNG, so no border/fill here.
-     Small inner padding pulls text off the painted frame edge. */
+  /* Frame from background PNG; padding keeps text off the painted edge. */
   padding: 10px 12px;
   min-width: 40px;
   min-height: 40px;
@@ -257,8 +235,7 @@
   justify-content: center;
 }
 
-/* The top frame on right.png IS the 3×3 collectibles grid — there's no
-   room for a separate title inside it. Hide that one title. */
+/* right.png's top frame IS the 3×3 grid; no room for a separate title. */
 .sidebar-section-collectibles .sidebar-section-title {
   display: none;
 }
@@ -560,7 +537,6 @@
   object-fit: contain;
 }
 
-/* --- Sell Confirmation Popup --- */
 .sell-confirm-backdrop {
   position: fixed;
   inset: 0;
@@ -785,7 +761,6 @@
   color: #4fd4d4;
 }
 
-/* --- Center Column --- */
 .center-column {
   flex: 1;
   display: flex;
@@ -800,10 +775,6 @@
   min-height: 0;
 }
 
-/* #phaser-container is now position: fixed at the top of this file
-   so the canvas fills the viewport behind all UI layers. */
-
-/* --- HUD Overlay --- */
 .hud-overlay {
   position: absolute;
   top: 0;
@@ -876,8 +847,7 @@
   }
 }
 
-/* HUD-center "live now" banner — pops once on event activation, auto-dismisses
-   after 6s. Sits above the persistent top-pill EventAlert. */
+/* Live-now banner, auto-dismisses after 6s; sits above the top-pill EventAlert. */
 .hud-event-banner {
   position: absolute;
   top: 68%;
@@ -1226,7 +1196,6 @@
   }
 }
 
-/* --- Stats + Controls Row --- */
 .bottom-panels {
   display: flex;
   flex-shrink: 0;
@@ -1266,7 +1235,6 @@
   opacity: 0.8;
 }
 
-/* --- Cast Row (icon + cast + icon) --- */
 .cast-row {
   display: flex;
   align-items: center;
@@ -1345,7 +1313,6 @@
   color: #f5e6d0;
 }
 
-/* --- Bottom Nav --- */
 .bottom-nav {
   display: flex;
   height: 48px;
@@ -1379,7 +1346,6 @@
   border-left: 1px solid #2a7a8a;
 }
 
-/* --- Mobile Header (greeting + login streak) --- */
 .mobile-header {
   display: none;
   position: relative;
@@ -1519,7 +1485,6 @@
   transition: width 0.3s ease;
 }
 
-/* --- Mobile Icon Buttons (Bounties / Leaderboard) --- */
 .mobile-tab-btn {
   display: none;
   align-items: center;
@@ -1549,7 +1514,6 @@
   border-color: rgba(79, 212, 212, 0.6);
 }
 
-/* --- Popup Panel Content --- */
 .popup-panel {
   padding: 4px 0;
 }
@@ -1590,7 +1554,6 @@
   height: 22px;
 }
 
-/* --- Sidebar Popup (Mobile) --- */
 .sidebar-popup-overlay {
   position: fixed;
   inset: 0;
@@ -1639,7 +1602,6 @@
   gap: 4px;
 }
 
-/* === Responsive: Mobile (<768px) === */
 @media (max-width: 767px) {
   .main-row > .sidebar {
     display: none;
@@ -1653,9 +1615,7 @@
     display: flex;
   }
 
-  /* Drop the painted-PNG aspect-ratio lock on mobile — at narrow widths
-     it collapses the panel to ~60px tall, clipping the stat values and
-     the CURRENCY column. Let the panel size to its content instead. */
+  /* Drop the aspect-ratio lock on mobile to keep stat values from clipping. */
   .bottom-panels {
     aspect-ratio: auto;
     max-height: none;
@@ -1782,7 +1742,6 @@
   image-rendering: pixelated;
 }
 
-/* === Settings Button === */
 .settings-btn {
   display: inline-flex;
   align-items: center;
@@ -1818,13 +1777,11 @@
   pointer-events: none;
 }
 
-/* Mobile: flex item inside .mobile-header next to .mobile-wallet */
 .mobile-settings-btn {
   width: 30px;
   height: 30px;
 }
 
-/* === Settings Modal === */
 .settings-overlay {
   position: fixed;
   inset: 0;

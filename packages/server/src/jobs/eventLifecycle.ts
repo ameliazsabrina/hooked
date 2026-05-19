@@ -15,23 +15,7 @@ export interface EventLifecycleOutcome {
   errors: Record<string, string>;
 }
 
-/**
- * Process one tick of the event-lifecycle worker. Pure of BullMQ — tests call
- * directly. Idempotent: running twice in the same minute is a no-op the second
- * time.
- *
- * Transitions:
- *   - Promote: an event with `active: false, startsAt <= now < endsAt` becomes
- *     active when no other event is active. Mongo's partial unique index on
- *     `active: true` makes the update race-safe across replicas — only one
- *     transition wins.
- *   - Demote: an event with `active: true, endsAt <= now` flips to inactive
- *     and we kick off `computeEventWinners` (best-effort; failure logs but
- *     doesn't block the demotion).
- *
- * After any transition, refresh the in-process eventConfig cache so the
- * gateway broadcast and any in-flight session starts pick up the new state.
- */
+/** Idempotent tick. Partial unique index on active makes flips race-safe. */
 export async function processEventLifecycleTick(
   options: { now?: Date } = {},
 ): Promise<EventLifecycleOutcome> {
@@ -43,9 +27,8 @@ export async function processEventLifecycleTick(
     errors: {},
   };
 
-  // 1. Demote events whose endsAt has passed. Order matters: demote before
-  // promote so a window where two events transition simultaneously (one
-  // ending, one starting) doesn't deadlock the partial unique index.
+  // Demote before promote — overlapping transitions would otherwise
+  // deadlock the partial unique index.
   const expiring = await FishingEvent.find({
     active: true,
     endsAt: { $lte: now },
@@ -70,10 +53,7 @@ export async function processEventLifecycleTick(
     }
   }
 
-  // 2. Promote the most recently-created scheduled event in window if none
-  // is currently active. We oldest-first by startsAt: if multiple events
-  // overlap their windows, the one that started first wins. The partial
-  // unique index makes the actual flip race-safe.
+  // Oldest startsAt wins when multiple events overlap.
   const active = await FishingEvent.findOne({ active: true });
   if (!active) {
     const candidate = await FishingEvent.findOne({
@@ -94,7 +74,7 @@ export async function processEventLifecycleTick(
       } catch (err) {
         const code = (err as { code?: number }).code;
         if (code === 11000) {
-          // Another worker / replica won the race. Not an error.
+          // Another worker won the race.
         } else {
           outcome.errors[String(candidate._id)] = `promote: ${(err as Error).message}`;
         }
@@ -102,9 +82,7 @@ export async function processEventLifecycleTick(
     }
   }
 
-  // 3. Force a cache refresh so the next gateway broadcast and session-start
-  // call see the new state immediately, instead of waiting up to 30s for
-  // the cache TTL.
+  // Skip the 30s cache TTL.
   if (outcome.promoted.length > 0 || outcome.demoted.length > 0) {
     await getEventStatus(true).catch(() => {});
   }
@@ -127,9 +105,7 @@ export function createEventLifecycleWorker(connection: ConnectionOptions): Worke
         const errCount = Object.keys(outcome.errors).length;
         if (errCount > 0) {
           job.log(`errors: ${JSON.stringify(outcome.errors)}`);
-          // Per-event errors don't fail the tick (the transitions are
-          // independent), but they're worth surfacing as a degraded
-          // heartbeat so /healthz/keeper can flag persistent issues.
+          // Surface as degraded heartbeat without failing the tick.
           await recordKeeperTick(
             "event-lifecycle",
             "error",

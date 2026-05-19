@@ -71,10 +71,7 @@ async function markReturnedInDb(opts: {
 }
 
 export interface SettleDeps {
-  /** Redis client used for the B10 finalizeRoomLeaderboardOnChain step.
-   *  Pass null to skip the on-chain top-3 patch — settlement still
-   *  proceeds (yield distribution falls back to whatever top-3 was
-   *  populated by score-bridge per session commits). */
+  /** Null skips on-chain top-3 patch; settlement still proceeds. */
   redis?: Redis | null;
 }
 
@@ -124,9 +121,7 @@ export async function settleRoom(
   }
   const { program, signer } = loaded;
 
-  // settle_room calls close + return + finalize, all gated by paused.
-  // Skip the whole batch if paused so we don't fire 1-N principal returns
-  // and have them all fail mid-loop with stale on-chain state.
+  // Skip when paused — avoids mid-loop failures on stale on-chain state.
   if (await isProgramPaused()) {
     logger.info(`settleRoom skipped — program paused (room=${roomId})`);
     return { roomId, status: "skipped", message: "program paused" };
@@ -144,44 +139,25 @@ export async function settleRoom(
 
   const status = onChainRoom.status;
 
-  // Yield comes from the off-chain LP cycle (lpExit job writes
-  // `room.lp.realizedYieldLamports` when it's done). When LP is disabled or
-  // the cycle hasn't completed, this is 0 and the keeper degrades gracefully
-  // to "principal-only return" — exactly the prior behavior.
+  // 0 when LP disabled or cycle incomplete — degrades to principal-only return.
   const realizedYieldLamports = BigInt(
     doc.lp?.realizedYieldLamports ?? 0,
   );
 
-  // RoomEntry layout: [8 disc][1 version][32 room]…  so the room pubkey
-  // sits at byte 9, not 8. Filtering at offset 8 was matching the version
-  // byte against the first byte of roomPda, which never hits.
-  //
-  // We fetch entries BEFORE close_room so the precondition check below
-  // can sum unreturned principal against the live vault balance. Entries
-  // are immutable across close_room — close_room only mutates the room
-  // status and protocol-share transfer, not the entry accounts — so the
-  // single fetch is correct for the whole tick.
+  // RoomEntry layout: [8 disc][1 version][32 room]… room pubkey at byte 9.
+  // Fetched BEFORE close_room so the precondition below can sum unreturned
+  // principal; entries are immutable across close_room.
   const entries = await program.account.roomEntry.all([
     {
       memcmp: { offset: 9, bytes: roomPda.toBase58() },
     },
   ]);
 
-  // B2 precondition (post-2026-05-18 incident): refuse to advance past
-  // close_room if the vault doesn't hold enough lamports to cover every
-  // unreturned entry. The chain's `finalize_room` closes the vault
-  // permanently, so if we run close_room → return_principal × N on a
-  // drained vault, every return_principal reverts with VaultInsufficientFunds,
-  // then B1's finalize gate would skip finalize (good) — but if any prior
-  // bug or admin action let finalize through, the vault is gone forever
-  // and recovery requires manual out-of-band transfers (what the incident
-  // forced). Failing closed at the close_room step keeps the room in
-  // `settling` indefinitely, recoverable by refunding the vault.
-  //
-  // Required balance: sum of unreturned depositLamports + full yield (the
-  // 30% protocol share leaves the vault during close_room; the remaining
-  // 70% is distributed by return_principal per top-3 share) + rent-exempt
-  // floor for the vault SystemAccount.
+  // B2 precondition: refuse close_room if vault can't cover every unreturned
+  // entry + yield + rent-exempt. finalize_room closes the vault permanently,
+  // so a drained vault past finalize is unrecoverable. Required = unreturned
+  // deposits + full yield (30% protocol share leaves at close, 70% distributed
+  // via return_principal) + rent-exempt.
   const connection = program.provider.connection;
   const unreturnedPrincipal = entries
     .filter(({ account }) => !account.returned)
@@ -219,15 +195,9 @@ export async function settleRoom(
       };
     }
 
-    // B10 (post-2026-05-18 incident): patch the on-chain top-3 cache
-    // from Redis BEFORE close_room reads it. Without this, a silently
-    // broken score-bridge worker (KEEPER_KEYPAIR missing in env, queue
-    // backed up, etc.) leaves first/second/thirdPlace as default pubkey
-    // — close_room then locks in zero yield share for everyone. This
-    // step is idempotent + best-effort: when redis is missing or the
-    // top-3 is already current, it no-ops. The keeper keypair is
-    // optional; if absent the function logs the degradation and
-    // settlement continues with whatever top-3 was already on chain.
+    // B10: patch on-chain top-3 from Redis before close_room reads it.
+    // Without this, a broken score-bridge worker leaves top-3 default and
+    // locks in zero yield share. Idempotent + best-effort.
     try {
       const finalizeResult = await finalizeRoomLeaderboardOnChain({
         redis: deps.redis ?? null,
@@ -250,18 +220,14 @@ export async function settleRoom(
         );
       }
     } catch (err) {
-      // Treat as soft-failure: log loudly, let close_room proceed.
-      // Falling back to default top-3 is still better than blocking
-      // settlement on a Redis blip.
+      // Soft-failure: better than blocking settlement on a Redis blip.
       logger.error(
         `room=${roomId} finalizeRoomLeaderboardOnChain threw: ${formatSolanaError(err)}`,
       );
     }
 
-    // close_room reads the on-chain top-3 cache (populated by
-    // update_room_entry_score). It extracts 30% × yield as protocol share
-    // to `treasury` and stores `yield_lamports` on the room for downstream
-    // return_principal calls to read.
+    // close_room transfers 30% protocol share to treasury and stores yield
+    // on the room for downstream return_principal calls.
     const closeTxSig = await program.methods
       .closeRoom(new BN(realizedYieldLamports.toString()))
       .accounts({
@@ -276,8 +242,7 @@ export async function settleRoom(
     await Room.updateOne({ roomId }, { $set: { closeTxSignature: closeTxSig } });
   }
 
-  // Re-fetch after close_room so we have the canonical on-chain leaderboard
-  // even if the local copy was stale.
+  // Re-fetch for canonical on-chain leaderboard after close_room.
   const settledRoom = await program.account.room.fetch(roomPda);
   const topThree = {
     first: settledRoom.firstPlace as PublicKey,
@@ -296,9 +261,7 @@ export async function settleRoom(
     const recipient = account.authority;
     const recipientStr = recipient.toBase58();
 
-    // Self-healing: on-chain says returned but DB might be lagging from a
-    // prior partial failure (RPC succeeded, Mongo write failed). Idempotent
-    // reflow heals both collections.
+    // Self-healing: on-chain returned but DB stale from prior partial failure.
     if (account.returned) {
       try {
         await markReturnedInDb({
@@ -349,8 +312,7 @@ export async function settleRoom(
           `room=${roomId} returned ${recipientStr} tx=${txSig}`,
         );
       } catch (dbErr) {
-        // On-chain succeeded but DB write failed — flag loudly. The next
-        // settleRoom pass will hit the reconciliation branch above and heal.
+        // Next pass will reconcile via the branch above.
         failed += 1;
         logger.error(
           `room=${roomId} on-chain returned ${recipientStr} tx=${txSig} but DB write failed: ${(dbErr as Error).message}`,
@@ -358,9 +320,7 @@ export async function settleRoom(
       }
     } catch (rpcErr) {
       failed += 1;
-      // B8: include program logs / anchor breakdown so the cause of a
-      // VaultInsufficientFunds (or any other revert) is visible without
-      // a separate explorer round-trip.
+      // B8: include program logs so reverts are visible without explorer.
       logger.error(
         `room=${roomId} return_principal RPC failed for ${recipientStr}: ${formatSolanaError(rpcErr)}`,
       );
@@ -373,26 +333,10 @@ export async function settleRoom(
 
   const latest = await program.account.room.fetch(roomPda);
 
-  // B1 finalize gate (post-2026-05-18 incident): `finalize_room` closes
-  // the vault account on-chain, which is irreversible — after that,
-  // `return_principal` reverts with "vault not initialized" forever and
-  // any remaining unpaid players have to be reimbursed manually. The OLD
-  // code finalized as soon as `status === 2`, regardless of whether a
-  // single return_principal succeeded; that's exactly how the incident
-  // turned a recoverable "vault is empty, retry next tick" into an
-  // unrecoverable "vault is closed, manual payout required" state.
-  //
-  // Only finalize when every entry has been settled. Specifically:
-  //   - `failed === 0`: no return_principal failures THIS tick.
-  //   - `returned + reconciled === humanCount`: every on-chain entry is
-  //     marked returned, either from a fresh transfer or the reconcile
-  //     path that heals stale DB writes.
-  //
-  // When the gate doesn't open, the room stays in `phase: "settling"`.
-  // The next lifecycle tick re-runs settleAllReadyRooms; transient
-  // failures (RPC blips, blockhash expiry) retry automatically, and the
-  // operator has time to investigate persistent failures before the
-  // vault disappears.
+  // B1 finalize gate: finalize_room closes the vault permanently. Only
+  // finalize when every entry has been settled (failed === 0 and
+  // returned + reconciled === humanCount). Otherwise the room stays in
+  // 'settling' so transient failures retry next tick.
   const allSettled = failed === 0 && returned + reconciled === humanCount;
   if (latest.status === 2 && allSettled) {
     try {
@@ -429,9 +373,7 @@ export async function settleRoom(
         `before the next tick or vault state may degrade.`,
     );
   } else if (latest.status === 3) {
-    // Status already 3 means a previous tick (or out-of-band action)
-    // already finalized — sync the DB so the room exits the settling
-    // query on the next tick.
+    // Already finalized — sync DB so the room exits the settling query.
     await Room.updateOne({ roomId }, { $set: { phase: "closed" } });
   }
 

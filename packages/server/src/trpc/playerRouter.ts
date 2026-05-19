@@ -83,41 +83,21 @@ export const playerRouter = router({
       return { exists: false as const };
     }
 
-    // Active = SOL still locked on-chain. The keeper sets `returned=true`
-    // exactly when `return_principal` lands, so that flag is the canonical
-    // signal. `expiresAt` tracks the room window (informational, surfaced as
-    // the Window Timer) and must NOT gate this predicate — otherwise users
-    // get prompted to redeposit between window-end and keeper return, even
-    // though their SOL is still on-chain.
+    // Active = SOL still on-chain. `returned` flips exactly when keeper's
+    // return_principal lands. expiresAt is informational; gating on it
+    // would prompt redeposits before SOL has actually returned.
     const activeDeposit =
       player.deposits?.find((d) => !d.returned) ?? null;
 
     const lpEnabled = env.FEATURES_LP_ENABLED;
 
-    // Derive an authoritative `windowState` from the room's actual phase
-    // (post-2026-05-18 incident — B4 of the bug catalog). The previous
-    // client-side "Closed if expiresAt - now <= 0" was pure clock math
-    // and would say "Closed" the millisecond closesAt passed, regardless
-    // of whether the settlement keeper had actually paid the player.
-    // That created a UI/state mismatch where the badge said "Closed" but
-    // casting still worked, which was the most visible symptom of the
-    // incident. Driving the state from `room.phase` + `closesAt` here
-    // means the client can render exactly what's true.
-    //
-    // States:
-    //   "deposit"  — no active deposit at all (client should show DepositScreen).
-    //   "active"   — room.phase in {entry, active} and closesAt in future:
-    //                gameplay live, cast button enabled.
-    //   "closing"  — room.phase active but closesAt <= now: window timed out
-    //                but lifecycle tick hasn't run yet; cast gate blocks via
-    //                WINDOW_CLOSED, UI should reflect "Window closing soon".
-    //   "settling" — room.phase === "settling": close_room may have run, SOL
-    //                being returned; UI should say "Returning SOL…".
-    //   "closed"   — room.phase === "closed" but deposit not yet flipped to
-    //                returned (rare race between phase update and per-player
-    //                return_principal). UI: same as "settling".
-    //   "missing"  — deposit references a room that no longer exists in DB.
-    //                Defensive; treated as effectively closed.
+    // States driven from room.phase + closesAt (B4):
+    //   "deposit"  — no active deposit
+    //   "active"   — entry/active + closesAt future; cast enabled
+    //   "closing"  — closesAt passed, lifecycle tick hasn't run
+    //   "settling" — close_room may have run, SOL returning
+    //   "closed"   — finalized but deposit.returned race not flipped
+    //   "missing"  — deposit references a deleted room (defensive)
     let windowState:
       | "deposit"
       | "active"
@@ -146,9 +126,7 @@ export const playerRouter = router({
       depositedAt: activeDeposit?.depositedAt?.toISOString() ?? null,
       roomId: activeDeposit?.poolId ?? null,
       activeMonth: lpEnabled ? activeDeposit?.activeMonth ?? null : null,
-      // Kept for backwards compatibility with any client still using clock
-      // math — but `windowState` (below) is the new source of truth.
-      // expiresAt is the room's `closesAt` frozen at deposit time.
+      // Backwards-compat clock math; windowState is the source of truth.
       expiresAt: activeDeposit?.expiresAt?.toISOString() ?? null,
       windowState,
       shellBalance: player.shellBalance,
@@ -177,9 +155,7 @@ export const playerRouter = router({
       const limit = input?.limit ?? 200;
       const now = new Date();
       const { window, dateKey } = assignWindow(now);
-      // Wire field stays as the legacy `date` name so clients with cached
-      // tRPC responses don't crash on the rename; the value is now the full
-      // dateKey (no `% 65_536` truncation) since off-chain has no u16 limit.
+      // Legacy wire name `date`; value is now the full dateKey.
       const date = dateKey;
 
       const player = await Player.findOne({
@@ -198,14 +174,10 @@ export const playerRouter = router({
         };
       }
 
-      // See playerRouter.me — active = SOL still on-chain (`!returned`).
       const activeDeposit = player.deposits?.find((d) => !d.returned);
 
-      // Bait: prefer the live session if one exists for this window. Fall
-      // back to the deposit-projected amount when the session hasn't been
-      // lazy-created yet (otherwise the cast button would gate on bait>0
-      // and prevent the first cast from ever firing — see
-      // services/fishing/wsExecutor.ts:ensureActiveSession).
+      // Fall back to deposit-projected bait so the first cast can fire
+      // before ensureActiveSession lazy-creates the session row.
       let bait = 0;
       try {
         const session = await FishingSession.findOne(
@@ -223,13 +195,12 @@ export const playerRouter = router({
           bait = baitAmountForDeposit(activeDeposit.amount);
         }
       } catch {
-        // Defensive: never let bait math break the rest of the query.
+        // Defensive.
       }
       const activeRoom = activeDeposit
         ? await Room.findOne({ roomId: activeDeposit.poolId }).lean()
         : null;
 
-      // Fallback to current window if the player has no active room yet.
       const windowStart = activeRoom
         ? activeRoom.createdAt
         : currentSessionStart(now);
@@ -237,13 +208,8 @@ export const playerRouter = router({
 
       const playerId = player._id as Types.ObjectId;
 
-      // Score is room-scoped: the source of truth is the Redis room
-      // leaderboard sorted set (lb:room:<roomId>), populated by
-      // creditCatch on every successful hit. Reading it here means a
-      // fresh deposit into a new room shows score=0 immediately, instead
-      // of the prior aggregation-by-time-window approach which would
-      // include catches from a previous room whose [createdAt, closesAt]
-      // overlapped the new room's window.
+      // Room-scoped score from Redis sorted set lb:room:<roomId>. New rooms
+      // show 0 immediately rather than leaking score from a prior overlapping room.
       let score = 0;
       if (activeRoom) {
         try {
@@ -254,15 +220,11 @@ export const playerRouter = router({
           );
           score = roomScore ?? 0;
         } catch {
-          // Defensive: never let score lookup break the rest of the query.
+          // Defensive.
         }
       }
 
-      // Inventory: most-recent un-released catches, capped at `limit`.
-      // Apex catches are excluded — they're surfaced through `discoveredApexFish`
-      // (resolved against the admin-managed ApexFish catalog) and rendered by
-      // the Fish Index's apex tier separately. Apex aren't sellable, so they
-      // don't belong in the regular sell-able inventory list.
+      // Apex excluded (not sellable) — surfaced via discoveredApexFish.
       const inventory = await Catch.find({
         playerId,
         caughtAt: { $gte: windowStart, $lte: windowEnd },
@@ -273,11 +235,7 @@ export const playerRouter = router({
         .limit(limit)
         .lean();
 
-      // Lifetime-discovered (non-apex) species: distinct numeric speciesId
-      // across every catch this player has ever made, ignoring window + released.
-      // Filtering `speciesId >= 0` excludes apex (rng stores -1) and any legacy
-      // null rows. The Fish Index uses this so unlock state survives selling
-      // and room rotation.
+      // Lifetime Fish-Index unlock state — survives selling and room rotation.
       const discoveredSpeciesIds = (
         (await Catch.distinct("speciesId", {
           playerId,
@@ -285,10 +243,6 @@ export const playerRouter = router({
         })) as number[]
       ).filter((id): id is number => typeof id === "number");
 
-      // Lifetime-discovered apex fish: join distinct apexFishIds from this
-      // player's catches against the admin-managed ApexFish catalog so the
-      // client can render apex slots with name + assetUrl. Skip the lookup
-      // when no apex catches exist (the common case) to avoid the join.
       const apexIds = (await Catch.distinct("apexFishId", {
         playerId,
         apexFishId: { $ne: null },
@@ -408,7 +362,6 @@ export const playerRouter = router({
         throw new TRPCError({ code: "BAD_REQUEST", message: "Complete onboarding first" });
       }
 
-      // Block stacking deposits while SOL is still locked on-chain.
       const activeDeposit = existing.deposits?.find((d) => !d.returned);
       if (activeDeposit) {
         throw new TRPCError({ code: "BAD_REQUEST", message: "Already deposited" });

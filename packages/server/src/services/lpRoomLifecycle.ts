@@ -24,11 +24,7 @@ type LpLogger = {
 
 const noopLogger: LpLogger = { info: () => {}, error: () => {} };
 
-/**
- * Find rooms that just transitioned to `active` and don't yet have an LP
- * position deployed, withdraw their principal into LP_MANAGER, and open the
- * DLMM position. Idempotent: re-running on already-deployed rooms is a no-op.
- */
+/** Idempotent — re-running on already-deployed rooms is a no-op. */
 export async function deployReadyRoomLp(logger: LpLogger = noopLogger) {
   if (!env.FEATURES_LP_ENABLED) return;
 
@@ -54,7 +50,7 @@ export async function deployReadyRoomLp(logger: LpLogger = noopLogger) {
   }
   const { program, signer: treasury } = loaded;
   const lpManager = loadLpManagerKeypair();
-  if (!lpManager) return; // already validated by checkLpReady, but appeases TS
+  if (!lpManager) return;
 
   if (await isProgramPaused()) {
     logger.info("lpDeploy skipped — program paused");
@@ -69,9 +65,7 @@ export async function deployReadyRoomLp(logger: LpLogger = noopLogger) {
       const onChainRoom = await program.account.room.fetchNullable(roomPda);
       if (!onChainRoom) continue;
 
-      // Already deployed on-chain (e.g. previous run crashed mid-flight after
-      // the withdraw tx confirmed but before DB write). Skip the on-chain
-      // call; the deploy step below is what we want to retry.
+      // Crash-recovery: withdraw already landed before the prior DB write.
       const alreadyOnChain =
         BigInt(onChainRoom.lpDeployedLamports.toString()) > 0n;
 
@@ -101,7 +95,6 @@ export async function deployReadyRoomLp(logger: LpLogger = noopLogger) {
         );
       }
 
-      // 2) Open the DLMM position (or synthesize in dry-run).
       const deploy = await deployRoomLiquidity({
         roomPdaStr: roomPda.toBase58(),
         lamports: principal,
@@ -136,9 +129,7 @@ export async function deployReadyRoomLp(logger: LpLogger = noopLogger) {
         {
           $set: {
             "lp.status": "failed",
-            // Store the detailed multi-line variant so admin dashboards
-            // (and the depositYieldFromLpManager CLI's dry-run output)
-            // show the program logs without re-running.
+            // Multi-line so admin dashboards see program logs without re-running.
             "lp.lastError": detailed.slice(0, 4000),
           },
         },
@@ -147,12 +138,7 @@ export async function deployReadyRoomLp(logger: LpLogger = noopLogger) {
   }
 }
 
-/**
- * Find rooms whose closes_at is within LP_EXIT_HOURS_BEFORE_CLOSE and have
- * an outstanding deployed LP position; exit the position, swap back, return
- * principal+yield to room_vault, write realizedYieldLamports to the DB.
- * The settlement keeper picks up this value when it runs close_room.
- */
+/** settleRoom reads realizedYieldLamports when it runs close_room. */
 export async function exitReadyRoomLp(logger: LpLogger = noopLogger) {
   if (!env.FEATURES_LP_ENABLED) return;
 

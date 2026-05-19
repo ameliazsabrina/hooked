@@ -24,61 +24,32 @@ interface TimingBarProps {
   baitSlug?: string;
   species?: FishSpecies | null;
   castStartedAtMs?: number | null;
-  // Second argument carries the SAME `Date.now()` the bar used to compute
-  // local simTimeS. Wired through to the hook's sample t_ms so client and
-  // server end up with bit-identical simTimeS for each transition (avoids
-  // ms-granularity Date.now() drift between two separate captures).
+  /** Second arg carries the same Date.now() used for local simTimeS so the
+   *  hook's sample t_ms matches bit-for-bit. */
   onHoldChange: (held: boolean, tNow?: number) => void;
-  // Fires once when client prediction hits terminal state; lets server trust
-  // the client-predicted verdict and bridges physics drift.
+  /** Fires once when client prediction hits terminal state. */
   onResolve?: (outcome: "caught" | "escaped") => void;
-  // Routine high-frequency snapshot. The bar/fish are NOT visually snapped to
-  // this — only `progress` is used as a soft cap (see NEAR_WIN_THRESHOLD).
-  // Snapping every frame would cause visible jitter and undo the bit-equal
-  // local prediction we worked hard to get.
+  /** Routine snapshot — only `progress` is used (as a soft cap); bar/fish are
+   *  NOT visually snapped to this to avoid jitter. */
   serverState?: {
     barY: number;
     fishY: number;
     progress: number;
   } | null;
-  // Bumped by the WS hook exactly when the server emits a `desync_correction`
-  // (NOT on routine `fishing_state` ticks). When this changes, the TimingBar
-  // force-overwrites its local stateRef from `serverState` — the divergence
-  // is real and server's view is canonical, so the visual is reset to match.
+  /** Bumped on `desync_correction` only; on change, local state is overwritten
+   *  from serverState since server's view is canonical. */
   reconcileVersion?: number;
 }
 
-// Physics step rate is shared with the server (`PHYSICS_FIXED_DT` /
-// `PHYSICS_MAX_STEP_ACCUM` in @hooked/shared). They MUST match: the
-// fish-position RNG sequence is consumed once per step, so any rate
-// divergence makes the fish swim down different trajectories on the two
-// sides and every cast resolves as escaped. Local aliases kept for terseness
-// in the existing tick loop.
+// Physics step rate MUST match server constants in @hooked/shared — the RNG
+// sequence is consumed once per step, so any divergence desyncs the fish.
 const FIXED_DT = PHYSICS_FIXED_DT;
 const MAX_STEP_ACCUM = PHYSICS_MAX_STEP_ACCUM;
-// Bar is NOT lerped — purely local prediction from heldRef. Fish is NOT
-// lerped client-side either — server pushes a SMOOTHED `fishYDisplay`
-// (smoothed by FISH_DISPLAY_SMOOTHING_PER_SEC in @hooked/shared) and we
-// adopt it directly so the in-bar predicate matches between client and
-// server bit-for-bit.
-// Server progress threshold above which the visual is allowed to display
-// 1.0. Must match the server's CLIENT_FINAL_FLOOR so the catch fires when
-// the visual fills.
+// Must match server's CLIENT_FINAL_FLOOR so the catch fires when visual fills.
 const NEAR_WIN_THRESHOLD = 0.65;
-// Threshold at which we consider local progress "visibly full" and fire
-// onResolve. Slightly under 1.0 because the cap pins local at exactly the
-// allowed value (0.99 most of the time, 1.0 when server >= NEAR_WIN); the
-// >= 0.95 trigger covers both cases without waiting on a fractional
-// floating-point rounding.
 const LOCAL_FULL_TRIGGER = 0.95;
-// Retry interval for the client-final signal while local progress is
-// "visibly full". Server may ignore the first attempt if its own progress
-// hasn't reached CLIENT_FINAL_FLOOR yet; subsequent retries will land once
-// server catches up. catch_resolved unmounts this component, so the retry
-// loop stops automatically the moment the server agrees.
 const RESOLVE_RETRY_MS = 250;
-// Mirrors server `SAFETY_TIMEOUT_MS` in ws/gateway.ts — cast is force-resolved
-// as escaped once this elapses.
+// Mirrors server SAFETY_TIMEOUT_MS — cast force-resolved as escaped after this.
 const CAST_TIMEOUT_S = 30;
 const CRITICAL_S = 3;
 const JITTER_S = 5;
@@ -121,43 +92,27 @@ export function TimingBar({
   const rafRef = useRef(0);
   const lastHapticSecondRef = useRef<number | null>(null);
   const resolvedRef = useRef(false);
-  // Last RAF-time at which we fired the resolve callback. Used to throttle
-  // the retry loop so we don't spam `final` input_samples at 60Hz when the
-  // server takes time to reach CLIENT_FINAL_FLOOR.
   const lastResolveSentAtRef = useRef(0);
   const [, force] = useState(0);
 
-  // Lag-comp state. Origin = wallclock ms when the player FIRST holds; same
-  // anchor the server picks (the WS hook's `t_ms` of the first held=true
-  // input_sample is captured in the same React event handler as our local
-  // setHeld below, so origins coincide within μs). Until origin is set the
-  // RAF loop renders only — physics is paused, mirroring the server.
+  // Lag-comp: origin = wallclock ms of first held=true; server picks the same
+  // anchor. Physics paused until origin is set.
   const inputHistoryRef = useRef<TimedInput[]>([]);
   const clientOriginMsRef = useRef<number | null>(null);
   const simTimeSRef = useRef(0);
   const inputCursorRef = useRef(-1);
 
-  // The client now runs the FULL physics tick locally (`stepAll`) using the
-  // shared RNG seed. Because lag-comp aligns the input timeline and the
-  // smoothing constant is precomputed, both sides produce bit-equal fish +
-  // bar + progress trajectories — so we render fishY at 60Hz from local
-  // computation, not from 20Hz server snapshots that aliased into visible
-  // jitter. Server progress is kept as a soft cap (NEAR_WIN_THRESHOLD) and
-  // server fishY is logged when it drifts noticeably so we'd notice any
-  // determinism regression early.
+  // Client runs full physics locally via shared RNG; server progress is kept
+  // only as a soft cap to bridge any determinism drift.
   const serverProgressRef = useRef<number | null>(null);
   useEffect(() => {
     if (!serverState) return;
     serverProgressRef.current = serverState.progress;
   }, [serverState]);
 
-  // Desync reconcile: when the server escalates a routine drift into a
-  // `desync_correction`, the hook bumps `reconcileVersion`. We then OVERWRITE
-  // local barY/fishY/fishYDisplay/progress from the latest server snapshot
-  // so the visual stops lying — the divergence is real and server's view is
-  // canonical at this point. We don't reset velocity/RNG (recovery from a
-  // truly diverged RNG isn't feasible mid-cast); the goal is to converge
-  // the predicate that decides catch vs escape, not to perfectly resume.
+  // Desync reconcile: overwrite local state from server snapshot when bumped.
+  // RNG isn't reset (mid-cast RNG recovery isn't feasible); goal is to align
+  // the catch/escape predicate, not to perfectly resume.
   useEffect(() => {
     if (reconcileVersion === 0) return;
     if (!serverState) return;
@@ -165,34 +120,18 @@ export function TimingBar({
     stateRef.current.fishY = serverState.fishY;
     stateRef.current.fishYDisplay = serverState.fishY;
     stateRef.current.progress = serverState.progress;
-    // Damp residual velocity so the bar doesn't immediately shoot away from
-    // the just-applied snap on the next physics step.
     stateRef.current.barVelocity = 0;
     stateRef.current.fishVelocity = 0;
-    // Reset the resolve-retry clock so a new resolve attempt has to climb
-    // back up after the snap, rather than firing immediately off the stale
-    // pre-snap progress.
     lastResolveSentAtRef.current = 0;
-    // Clear the resolve latch. Without this, the countdown timer (which is
-    // gated on `resolvedRef.current`) stays hidden through the snap because
-    // the latch only resets in the physics tick once local progress falls
-    // below LOCAL_FULL_TRIGGER — and immediately after a snap-down, local
-    // physics may still report a value above 0.95 for one or more frames.
-    // Player would see the timer stay hidden through the visual "reset".
-    // Server-side this path is no longer reached on the normal desync flow
-    // (gateway resolves the cast instead of emitting desync_correction),
-    // but kept for any future path that does emit a reconcile.
+    // Clear latch so the countdown timer doesn't stay hidden through the snap.
     resolvedRef.current = false;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reconcileVersion]);
 
   useEffect(() => {
     const tick = (now: number) => {
-      // Step physics up to (wallNow - origin)/1000 - INPUT_DELAY_S using
-      // the input that was active at each step's simTime. Identical mapping
-      // to the server's advancePhysics — same fixed dt, same input history,
-      // same default-false pre-origin — so the bar trajectory is a pure
-      // function of the input timeline shared by both sides.
+      // Mirror server's advancePhysics: same fixed dt, same input history,
+      // default-false pre-origin.
       const originMs = clientOriginMsRef.current;
       if (originMs !== null) {
         const wallSinceOriginS = (Date.now() - originMs) / 1000;
@@ -218,15 +157,8 @@ export function TimingBar({
         }
       }
 
-      // Asymmetric clamp on local progress:
-      //   - Local can LAG server freely (positive surprise — you catch
-      //     something that looked like a miss).
-      //   - Local can fill all the way to 0.99 regardless of server, so
-      //     the player gets full responsive feedback (visual nearly
-      //     full when their input has done the work).
-      //   - Local can only reach 1.0 once server is at NEAR_WIN_THRESHOLD.
-      //     This prevents the "bar full, no catch fires" case while
-      //     leaving the rest of the bar fully responsive to input.
+      // Local fills to 0.99 freely; only crosses 1.0 once server hits the
+      // near-win threshold, so visual fullness always coincides with a catch.
       const serverP = serverProgressRef.current;
       if (serverP !== null) {
         const cap = serverP >= NEAR_WIN_THRESHOLD ? 1.0 : 0.99;
@@ -235,14 +167,8 @@ export function TimingBar({
         }
       }
 
-      // Local progress is visibly full — fire the resolve callback. The hook
-      // sends a `final` input_samples; server force-catches if its own
-      // progress is past CLIENT_FINAL_FLOOR (0.65), otherwise ignores. We
-      // RETRY every RESOLVE_RETRY_MS while local is full so that if the
-      // first attempt arrives before server has caught up, subsequent
-      // attempts will land once server crosses the floor. catch_resolved
-      // (handled in the WS hook) unmounts this component, so retries stop
-      // automatically the moment the server agrees.
+      // Retry resolve while visibly full so the server can land it once it
+      // crosses CLIENT_FINAL_FLOOR; catch_resolved unmounts and stops retries.
       if (stateRef.current.progress >= LOCAL_FULL_TRIGGER) {
         if (now - lastResolveSentAtRef.current >= RESOLVE_RETRY_MS) {
           lastResolveSentAtRef.current = now;
@@ -250,8 +176,6 @@ export function TimingBar({
           onResolve?.("caught");
         }
       } else {
-        // Drained back below threshold — reset the retry clock so the next
-        // re-fill triggers a fresh attempt.
         lastResolveSentAtRef.current = 0;
       }
 
@@ -265,17 +189,10 @@ export function TimingBar({
   const setHeld = (held: boolean) => {
     if (heldRef.current === held) return;
     heldRef.current = held;
-    // Capture ONE timestamp for the whole flow — this becomes the bar's
-    // local simTimeS AND the sample's t_ms over the wire. If the hook
-    // captures its own Date.now() separately, ms-granularity rounding can
-    // drift the two captures apart by up to 1ms per event — at random,
-    // most of those cancel, but occasionally one lands inside a physics
-    // step's window and the lookup returns different `held` values on
-    // each side. Over a 9s cast that compounds into observable barY
-    // divergence with identical RNG and input counts.
+    // One timestamp drives both local simTimeS and the wire t_ms; separate
+    // Date.now() captures can drift by 1ms and desync the input history.
     const tNow = Date.now();
-    // Record the input into the local lag-comp history. Origin is set on
-    // the first held=true (mirrors the server) so origins coincide.
+    // Origin set on first held=true so client and server origins coincide.
     if (clientOriginMsRef.current === null) {
       if (!held) {
         onHoldChange(held, tNow);
@@ -312,9 +229,6 @@ export function TimingBar({
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
     };
-  // setHeld is recreated on every render but referentially stable in
-  // behavior (closes over refs). Re-binding is harmless and avoids a stale
-  // closure if the parent ever swaps onHoldChange.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [onHoldChange]);
 

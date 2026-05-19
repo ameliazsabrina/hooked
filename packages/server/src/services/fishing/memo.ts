@@ -1,23 +1,12 @@
 import { PublicKey, TransactionInstruction } from "@solana/web3.js";
 
-/**
- * SPL Memo program. We embed the per-session audit summary in a memo so the
- * keeper bridge tx is self-describing — anyone scanning the chain can pull
- * `(sessionId, merkleRoot)` straight off `update_room_entry_score` calls
- * without consulting our server.
- */
 export const MEMO_PROGRAM_ID = new PublicKey(
   "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr",
 );
 
 const MEMO_VERSION_TAG = "hooked-v1";
 
-/**
- * Build the memo string for a score-bridge tx. Format:
- *   `hooked-v1|<sessionId>|<merkleRootHex>`
- * Total ~95 bytes — well under the per-tx soft limit. Stable so off-chain
- * audit tooling can parse historical txs without version-sniffing.
- */
+/** Format: `hooked-v1|<sessionId>|<merkleRootHex>`. Stable for audit tooling. */
 export function encodeScoreBridgeMemo(input: {
   sessionId: string;
   merkleRoot: Buffer;
@@ -47,8 +36,7 @@ export function decodeScoreBridgeMemo(memo: string): {
   };
 }
 
-/** Build a memo instruction signed by `signer` (required so the memo is
- * attributable to the keeper, not anonymous). */
+/** Signer makes the memo attributable to the keeper. */
 export function buildMemoInstruction(memo: string, signer: PublicKey): TransactionInstruction {
   return new TransactionInstruction({
     keys: [{ pubkey: signer, isSigner: true, isWritable: false }],

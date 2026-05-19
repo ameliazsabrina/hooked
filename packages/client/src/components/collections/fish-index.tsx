@@ -86,9 +86,7 @@ export function FishIndex({
   const entries = useMemo<Map<string, SpeciesEntry>>(() => {
     const map = new Map<string, SpeciesEntry>();
     for (const species of FISH_SPECIES) {
-      // Apex tier slots are admin-managed (event pool ∪ caught), rendered via
-      // `apexSlots` below — skip the static FISH_SPECIES apex entries here so
-      // they don't double-render or collide on name lookups.
+      // Apex slots are admin-managed and rendered via `apexSlots` below.
       if (species.rarity === FishRarity.Apex) continue;
       map.set(species.name, {
         species,
@@ -110,9 +108,7 @@ export function FishIndex({
     return map;
   }, [catches]);
 
-  // Apex slots: the active event's pinned pool plus any apex fish the player
-  // has ever caught. De-duped by ApexFish id so a fish that's both in the
-  // current event and previously caught only shows up once.
+  // Apex slots: active event pool ∪ player's lifetime catches, de-duped by id.
   const apexSlots = useMemo<ApexFishEntry[]>(() => {
     const byId = new Map<string, ApexFishEntry>();
     if (apexEventLive) {
@@ -137,7 +133,6 @@ export function FishIndex({
     return n + discoveredApexIds.size;
   }, [entries, discoveredSpecies, discoveredApexIds]);
 
-  // Total = non-apex species + apex slots currently visible (pool ∪ caught).
   const totalSpecies =
     FISH_SPECIES.filter((s) => s.rarity !== FishRarity.Apex).length +
     apexSlots.length;

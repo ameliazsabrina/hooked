@@ -15,46 +15,14 @@ import {
 } from "../solana/roomsProgram.js";
 
 /**
- * One-off rescue tool that mirrors `withdrawToLpManager.ts`. Sends a
- * SystemProgram.transfer from LP_MANAGER → room_vault PDA, optionally
- * tagging the room's `lp.realizedYieldLamports` so the keeper picks up
- * the yield share at close_room time.
+ * Rescue CLI: SystemProgram.transfer LP_MANAGER → room_vault PDA, with
+ * optional yield tagging. Symmetric to withdrawToLpManager.ts.
  *
- * Use this when:
- *   - You ran `withdrawToLpManager` manually (no automated Meteora deploy)
- *     and need to put the principal back so the settlement keeper can
- *     pay players.
- *   - The automated `exitReadyRoomLp` failed mid-cycle (Meteora/Jupiter
- *     reverted) and the principal is stuck in LP_MANAGER's wallet — the
- *     auto-exit won't retry because it only processes rooms with
- *     `lp.status: "deployed"`, but a partial state may have flipped to
- *     "failed" or stayed "pending".
- *   - Any other reason the room_vault is short of `principal + yield`
- *     and you need to refund it before the next keeper tick.
+ * Usage: pnpm tsx src/cli/depositYieldFromLpManager.ts <roomId|onChainPoolId> [yieldLamports]
+ * Run with CONFIRM=yes for a real transfer; otherwise dry-run.
  *
- * Usage:
- *
- *   pnpm tsx src/cli/depositYieldFromLpManager.ts <roomId|onChainPoolId> [yieldLamports]
- *
- * `yieldLamports` defaults to 0 (no yield bonus distributed). If you
- * want to honor the 30/40/20/10 split for winners, pass a positive
- * lamport value — the script transfers `principal + yield` to the vault
- * and writes that yield to `room.lp.realizedYieldLamports`. The next
- * settlement tick will read it, extract the 30% protocol share at
- * close_room, and distribute the remaining 70% to top-3 via
- * return_principal.
- *
- * Symmetric counterpart of `withdrawToLpManager.ts`. Always run with
- * CONFIRM=yes for a real transfer; otherwise prints a dry-run plan.
- *
- * IMPORTANT: this CLI assumes the room's `RoomEntry` accounts have not
- * been finalized on-chain (i.e. `Room.status < 3`). If the room is
- * already finalized, the vault has been closed and lamports sent there
- * will simply pile up at the address without ever flowing to players.
- * Use `node --input-type=module` from a Heroku dyno to inspect
- * `getAccountInfo(vaultPda)` before running; if the account does NOT
- * exist (closed by finalize), do not use this tool — pay players
- * directly via `SystemProgram.transfer` and reconcile Mongo by hand.
+ * WARNING: do NOT run if finalize_room has closed the vault account.
+ * SOL sent there is unreachable; pay players directly with SystemProgram.transfer.
  */
 async function main() {
   const idArg = process.argv[2];
@@ -127,30 +95,17 @@ async function main() {
     );
   }
 
-  // Lookup DB room's current lp state so we can show the operator
-  // what's about to change, and so the `lp.status` flip is sensible.
   const dbRoom = dbRoomId
     ? await Room.findOne({ roomId: dbRoomId }, { lp: 1, phase: 1 }).lean()
     : null;
 
-  // We need the on-chain room.deposited_lamports + lpDeployedLamports
-  // for the operator's awareness — query the program account directly
-  // (lightweight, no Anchor needed for read).
-  // Fall back to DB lp.deployedLamports when on-chain account is missing
-  // (e.g. finalize closed the room PDA already — unusual but defend).
+  // Direct read for operator sanity check. Layout (after disc): version u8,
+  // admin 32, roomId u64, createdAt u64, entryClosesAt u64, closesAt u64,
+  // lpDeployAt u64, depositedLamports@81, lpDeployedLamports@89.
   let deployedLamports = BigInt(dbRoom?.lp?.deployedLamports ?? 0);
   let depositedLamports = 0n;
   const roomAccountInfo = await connection.getAccountInfo(roomPda);
   if (roomAccountInfo) {
-    // Best-effort read. The exact byte offsets are stable for the rooms
-    // program; if you change the on-chain account layout, update these
-    // offsets together. Layout (after 8-byte disc):
-    //   1 version, 32 admin, 8 roomId, 8 createdAt, 8 entryClosesAt,
-    //   8 closesAt, 8 lpDeployAt, 8 depositedLamports, 8 lpDeployedLamports
-    // Offsets: depositedLamports @ 8+1+32+8*5 = 81; lpDeployed @ 89.
-    // We don't strictly need these for the transfer, but they help the
-    // operator sanity-check what they're about to do. If layout drift
-    // causes garbage values, the operator notices and bails.
     try {
       const data = roomAccountInfo.data;
       depositedLamports = data.readBigUInt64LE(81);
@@ -158,14 +113,14 @@ async function main() {
       if (lpDeployedFromChain > deployedLamports)
         deployedLamports = lpDeployedFromChain;
     } catch {
-      // Layout changed — just rely on DB.
+      // Layout drift — fall back to DB.
     }
   }
 
   const transferAmount = deployedLamports + yieldLamports;
 
   const lpBalance = BigInt(await connection.getBalance(lpManager.publicKey));
-  const txFeeReserve = 100_000n; // generous reserve
+  const txFeeReserve = 100_000n;
 
   console.log("─── plan ─────────────────────────────────────");
   console.log(`db roomId            ${dbRoomId ?? "(unknown — used numeric)"}`);
@@ -233,8 +188,6 @@ async function main() {
     return;
   }
 
-  // SystemProgram.transfer from LP_MANAGER → vault PDA. PDAs accept
-  // lamports without signing.
   const tx = new Transaction().add(
     SystemProgram.transfer({
       fromPubkey: lpManager.publicKey,
@@ -248,10 +201,6 @@ async function main() {
   console.log("\n✓ deposit_back tx:", sig);
   console.log(`  https://solscan.io/tx/${sig}`);
 
-  // DB bookkeeping: stamp lp.status so future automated cycles + admin
-  // dashboards reflect that this room's LP is settled (out-of-band).
-  // Also write realizedYieldLamports so settleRoom's closeRoom call
-  // picks it up at the next tick.
   if (dbRoomId) {
     const update = {
       "lp.status": "exited" as const,

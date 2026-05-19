@@ -12,25 +12,8 @@ type WindowState =
   | null
   | undefined;
 
-/**
- * Window-timer label. Driven by the server-derived `windowState` (B4 fix
- * post-2026-05-18 incident) so the badge reflects the actual settlement
- * state of the room, not just clock math.
- *
- * Previously this returned "Closed" the millisecond `expiresAt - now` went
- * negative, even though the settlement keeper might not have actually paid
- * the player yet — that mismatch was the most visible symptom of the
- * incident. Now:
- *   - "active":   show days/hours remaining (uses expiresAt for the
- *                 countdown, which is still accurate while phase is active).
- *   - "closing":  window timer hit 0 but lifecycle tick hasn't fired —
- *                 "Closing" so the user knows the round is wrapping up.
- *   - "settling": close_room ran, return_principal in progress — "Returning…"
- *   - "closed":   keeper finished, but the next player.me poll hasn't
- *                 cleared the deposit row yet — "Closed".
- *   - "missing":  deposit references a non-existent room (defensive).
- *   - "deposit":  no active deposit; the panel as a whole renders "—".
- */
+/** Window-timer label driven by server-derived windowState so the badge
+ *  reflects the actual settlement state, not just clock math. */
 function getWindowTimerLabel(
   windowState: WindowState,
   expiresAt: string | null | undefined,
@@ -41,10 +24,9 @@ function getWindowTimerLabel(
   if (windowState === "closing") return "Closing";
   if (windowState === "missing") return "—";
 
-  // "active" — render countdown from expiresAt.
   if (!expiresAt) return "Active";
   const remaining = new Date(expiresAt).getTime() - Date.now();
-  if (remaining <= 0) return "Closing"; // belt-and-suspenders for clock skew
+  if (remaining <= 0) return "Closing";
   const days = Math.floor(remaining / (24 * 60 * 60 * 1000));
   const hours = Math.floor(
     (remaining % (24 * 60 * 60 * 1000)) / (60 * 60 * 1000),

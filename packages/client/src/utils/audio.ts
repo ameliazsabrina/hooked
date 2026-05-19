@@ -7,10 +7,7 @@ export type SfxName =
   | "nibbleBite"
   | "splash";
 
-// nibbleBite + splash fall back to existing files until dedicated SFX are
-// added — the new cast flow ships sounding plausible on day 1, with a
-// drop-in replacement once design delivers final cues. Replace the paths
-// below when assets are committed under public/assets/audio/.
+// nibbleBite + splash temporarily reuse castRod until dedicated SFX land.
 const SFX_PATHS: Record<SfxName, string> = {
   castRod: "/assets/audio/cast-rod.mp3",
   caughtFish: "/assets/audio/caught-fish.mp3",
@@ -48,8 +45,7 @@ export function playSfx(name: SfxName, volume = 0.7) {
   void node.play().catch(() => {});
 }
 
-// HTMLAudioElement's `loop = true` stutters at the seam. Web Audio loops an
-// AudioBufferSourceNode at sample boundaries, so the join is inaudible.
+// HTMLAudioElement's loop stutters at the seam; Web Audio loops sample-accurately.
 let audioCtx: AudioContext | null = null;
 let musicBuffer: AudioBuffer | null = null;
 let musicSource: AudioBufferSourceNode | null = null;
@@ -122,9 +118,8 @@ async function tryPlay() {
   removeGestureListeners();
 }
 
-// Arm capture-phase gesture listeners at module load so the first interaction
-// anywhere on the page unlocks the AudioContext, regardless of React mount
-// order or downstream stopPropagation.
+// Capture-phase listeners so first interaction unlocks AudioContext regardless
+// of React mount order or downstream stopPropagation.
 const GESTURE_EVENTS = [
   "pointerdown",
   "mousedown",

@@ -11,17 +11,11 @@ pub const MAX_RESOLVE_ELAPSED_SECS: i64 = 30;
 
 pub const DELEGATION_COMMIT_MS: u32 = 30_000;
 
-// Rarity multipliers × 10 (integer math). Applied as `(mult * weight_hg) / 100`
-// to yield `weight_kg * mult_as_decimal`. Decimals: Basic 1.0, Rare 1.5,
-// Monster 2.5, Legendary 3.5, Apex 4.0.
+// Rarity multipliers ×10 (integer): Basic 1.0, Rare 1.5, Monster 2.5, Legendary 3.5, Apex 4.0.
 pub const SCORE_MULTIPLIERS: [u32; 5] = [10, 15, 25, 35, 40];
 
-// PRD §6.2 catch-rate targets (24h avg, bp out of 10_000):
-//   Basic 7550 / Rare 2000 / Monster 400 / Legendary 40 / Apex 10.
-// Apex baseline is 0 bp here — it is gated by `EventConfig` (e.g. Colosseum).
-// During an active event, `EventConfig.apex_bp` is subtracted from Basic in
-// `initiate_cast` to honor the 10 bp target without changing this table. The
-// extra 10 bp of headroom in Basic absorbs Apex when no event is active.
+// Apex baseline is 0; gated by EventConfig. During events, `EventConfig.apex_bp` is
+// subtracted from Basic in `initiate_cast` to honor the 10 bp target.
 pub const DAY_RARITY_WEIGHTS: [u16; 5] = [7604, 1980, 380, 36, 0];
 
 pub const NIGHT_RARITY_WEIGHTS: [u16; 5] = [7516, 2020, 420, 44, 0];
@@ -72,10 +66,10 @@ pub const SPECIES_TABLE: [SpeciesEntry; SPECIES_COUNT] = [
     SpeciesEntry { id: 17, rarity: 3, zone: 3, min_weight_hg: 250, max_weight_hg: 400 },
     SpeciesEntry { id: 18, rarity: 3, zone: 3, min_weight_hg: 350, max_weight_hg: 500 },
     SpeciesEntry { id: 19, rarity: 3, zone: 3, min_weight_hg: 200, max_weight_hg: 350 },
-    // Apex (Colosseum event) — 30–100 kg, gated by EventConfig.
-    SpeciesEntry { id: 20, rarity: 4, zone: 3, min_weight_hg: 300, max_weight_hg: 500  }, // Anh Lucerna
-    SpeciesEntry { id: 21, rarity: 4, zone: 3, min_weight_hg: 500, max_weight_hg: 800  }, // Mattus Aureus
-    SpeciesEntry { id: 22, rarity: 4, zone: 3, min_weight_hg: 700, max_weight_hg: 1000 }, // Maximus Tridens
+    // Apex (Colosseum event) — gated by EventConfig.
+    SpeciesEntry { id: 20, rarity: 4, zone: 3, min_weight_hg: 300, max_weight_hg: 500  },
+    SpeciesEntry { id: 21, rarity: 4, zone: 3, min_weight_hg: 500, max_weight_hg: 800  },
+    SpeciesEntry { id: 22, rarity: 4, zone: 3, min_weight_hg: 700, max_weight_hg: 1000 },
 ];
 
 pub const SPECIES_PER_RARITY: [u8; 5] = [5, 5, 5, 5, 3];

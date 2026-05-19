@@ -23,10 +23,7 @@ pub struct CloseRoom<'info> {
     )]
     pub config: Account<'info, ProgramConfig>,
 
-    /// CHECK: Room-owned SOL vault PDA, validated by seeds + room.vault_bump.
-    /// Owned by System Program (created by depositors via system::transfer),
-    /// so lamport withdrawals must go through a system_program::transfer
-    /// CPI with the vault's PDA seeds for invoke_signed.
+    /// CHECK: Room SOL vault PDA. System-owned, so withdrawals must use system::transfer CPI with invoke_signed.
     #[account(
         mut,
         seeds = [ROOM_VAULT_SEED, room.key().as_ref()],
@@ -82,12 +79,8 @@ pub fn handler(ctx: Context<CloseRoom>, yield_lamports: u64) -> Result<()> {
         )?;
     }
 
-    // first_place / second_place / third_place are not written here. They are
-    // canonical from `update_room_entry_score`, which is the only writer of
-    // the cached top-3 leaderboard. close_room used to accept them as args,
-    // but admin had no on-chain proof the supplied keys matched real winners
-    // (P0 finding 2026-05-08). Removing the args makes the leaderboard
-    // structurally trustless — yield distribution flows from the cache.
+    // Top-3 winners are written only by `update_room_entry_score` — close_room
+    // accepting them as args was unverifiable (P0 2026-05-08).
     let room = &mut ctx.accounts.room;
     room.status = RoomStatus::Settling as u8;
     room.yield_lamports = yield_lamports;

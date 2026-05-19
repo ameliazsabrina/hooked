@@ -24,7 +24,6 @@ export function saveSession(rec: SessionRecord): void {
   try {
     localStorage.setItem(STORAGE_PREFIX + rec.wallet, JSON.stringify(rec));
   } catch {
-    // storage unavailable — non-fatal, session survives for the tab only
   }
 }
 
@@ -32,14 +31,11 @@ export function clearSession(wallet: string): void {
   try {
     localStorage.removeItem(STORAGE_PREFIX + wallet);
   } catch {
-    // ignore
   }
 }
 
-// Module-level store so the tRPC link can read the current token at request
-// time without participating in React rendering. This decouples provider
-// ordering: TRPCProvider mounts above SessionAuthProvider, and the link just
-// reads whichever token is current when each batch fires.
+// Module-level store so the tRPC link reads the current token at request time
+// without coupling to React render order with SessionAuthProvider.
 let currentToken: string | null = null;
 export const sessionTokenStore = {
   get: (): string | null => currentToken,

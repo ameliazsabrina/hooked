@@ -2,28 +2,14 @@ import type { Types } from "mongoose";
 
 import { Catch, FishingEvent, Player, type FishingEventFinalRank } from "../db/schema.js";
 
-/**
- * Prize-pool split formula for event winners. Top 10 by score. Weights sum
- * to 100 so the total payout always equals `prizePoolSol` (modulo 1e-9
- * rounding from JS floats — payments truncate to 9 decimals downstream).
- *
- * Mirrors the leaderboard-style payout shape the rest of the codebase uses
- * (see roomWinnerSchema, dailyLeaderboardSchema). Tweak the array to
- * change the curve; the rest of the pipeline doesn't care about length.
- */
+/** Top-N by score. Weights sum to 100 = full prizePoolSol. */
 export const EVENT_PRIZE_WEIGHTS_PCT: readonly number[] = [
   40, 20, 15, 10, 5, 3, 2, 2, 2, 1,
 ];
 
 export interface ComputeEventWinnersOptions {
-  /** Override `now` for deterministic tests. */
   now?: Date;
-  /**
-   * Allow re-computation even when finalRanks already exist. By default the
-   * function refuses to overwrite a populated finalRanks array (idempotent
-   * by default so paying out partial winners doesn't get reset). Pass true
-   * from the admin dashboard to force a recompute, e.g. after fixing a bug.
-   */
+  /** Recompute even when finalRanks is already populated. */
   force?: boolean;
 }
 
@@ -34,16 +20,6 @@ export interface ComputeEventWinnersResult {
   alreadyComputed: boolean;
 }
 
-/**
- * Aggregate event-window catches by player, rank by total score, apply the
- * prize-pool split, and persist `finalRanks` on the event document. Used by
- * both the admin `computeWinners` route and the lifecycle worker on auto-end.
- *
- * Trust model: catches are persisted server-side at submit time
- * (services/fishing/castEngine.submitInputSamples), so the score totals are
- * the same numbers the audit Merkle root commits to. A subsequent admin who
- * forces a re-compute can verify against those audit Merkle roots.
- */
 export async function computeEventWinners(
   eventId: string,
   options: ComputeEventWinnersOptions = {},
@@ -69,10 +45,7 @@ export async function computeEventWinners(
     };
   }
 
-  // Aggregate catches in [startsAt, endsAt] by player, summed score. Sorted
-  // desc and capped at the prize-weight length — extra players don't get
-  // ranks. Tie-break is implicit: Mongo's sort with equal scores defers to
-  // _id order, which is stable.
+  // Tie-break on _id (stable).
   const aggregated = await Catch.aggregate<{
     _id: Types.ObjectId;
     score: number;
@@ -88,14 +61,11 @@ export async function computeEventWinners(
   ]);
 
   if (aggregated.length === 0) {
-    // No catches in the window — nothing to award. Persist empty array so
-    // the admin dashboard distinguishes "computed: zero winners" from
-    // "not yet computed" (null).
+    // Persist [] so "computed: zero winners" is distinguishable from null.
     await FishingEvent.updateOne({ _id: event._id }, { $set: { finalRanks: [] } });
     return { eventId: String(event._id), ranks: [], alreadyComputed: false };
   }
 
-  // Resolve playerIds → wallet + display name in one round-trip.
   const playerIds = aggregated.map((row) => row._id);
   const playerDocs = await Player.find(
     { _id: { $in: playerIds } },

@@ -7,8 +7,6 @@ import { BountyList } from "./bounty-list";
 import type { EventStatus } from "~/components/hud/event-alert";
 import type { RoomLeaderboardSnapshot } from "~/hooks/use-fishing-ws";
 
-// Live updates older than this fall back to the tRPC poll (covers the case
-// where the WS dropped a frame or the player just connected).
 const LIVE_LEADERBOARD_MAX_AGE_MS = 60_000;
 
 interface CatchEntry {
@@ -113,8 +111,7 @@ function LeaderboardPanel({ roomLeaderboard }: LeaderboardPanelProps) {
     { roomId: roomId ?? "" },
     {
       enabled: connected && !!roomId,
-      // WS broadcasts drive freshness; this is the fallback for first paint
-      // and missed frames. 60s keeps it cheap.
+      // WS broadcasts drive freshness; this is the first-paint fallback.
       refetchInterval: 60000,
     },
   );
@@ -133,9 +130,7 @@ function LeaderboardPanel({ roomLeaderboard }: LeaderboardPanelProps) {
       }))
     : leaderboardQuery.data?.entries ?? [];
 
-  // Derive "you" rank from live entries when fresh; fall back to the tRPC
-  // value (which queries the full sorted set, so it's correct even when the
-  // player is outside top-50).
+  // Live entries are top-N; tRPC fallback covers ranks outside top-50.
   let playerRank: number | null = leaderboardQuery.data?.playerRank ?? null;
   if (liveFresh && walletStr) {
     const idx = roomLeaderboard.entries.findIndex(

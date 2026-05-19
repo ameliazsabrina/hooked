@@ -31,8 +31,6 @@ export enum FishingZone {
 
 export type InteractionMechanic = "timing_bar" | "circular_tap";
 
-// Basic/Rare/Monster → vertical timing bar; Legendary/Apex → circular tap.
-// Per-tier parameters live in `difficulty.ts` (VERTICAL_BASE / CIRCULAR_BASE).
 export function getInteractionMechanic(
   rarity: FishRarity,
 ): InteractionMechanic {
@@ -42,11 +40,7 @@ export function getInteractionMechanic(
   return "timing_bar";
 }
 
-/**
- * @deprecated Legacy shim. Use `VERTICAL_BASE` from `difficulty.ts` or the
- * per-cast `DifficultyProfile` delivered by the server. Kept only so existing
- * callers compile during the difficulty-system migration.
- */
+/** @deprecated Use `VERTICAL_BASE` from `difficulty.ts` or the per-cast `DifficultyProfile`. */
 export const TIMING_BAR_CONFIG: Record<
   FishRarity,
   { greenWidth: number; durationMs: number }
@@ -58,12 +52,7 @@ export const TIMING_BAR_CONFIG: Record<
   [FishRarity.Apex]: { greenWidth: 0.2, durationMs: 1500 },
 };
 
-/**
- * @deprecated Legacy shim. Use `CIRCULAR_BASE` from `difficulty.ts` or the
- * per-cast `DifficultyProfile` delivered by the server. Monster has been moved
- * to the vertical mechanic — the Monster entry here is retained only so older
- * server/client call sites type-check during migration.
- */
+/** @deprecated Use `CIRCULAR_BASE` from `difficulty.ts`. Monster entry retained for legacy callers; Monster now uses vertical mechanic. */
 export const CIRCULAR_TAP_CONFIG = {
   [FishRarity.Monster]: {
     taps: 3,
@@ -85,10 +74,7 @@ export const CIRCULAR_TAP_CONFIG = {
   },
 } as const;
 
-/**
- * @deprecated Use `CastDifficultyPayload` from `difficulty.ts` — the server
- * now sends a full `DifficultyProfile` instead of this narrow subset.
- */
+/** @deprecated Use `CastDifficultyPayload` from `difficulty.ts`. */
 export interface CircularTapClientConfig {
   targets: number[];
   arcSize: number;

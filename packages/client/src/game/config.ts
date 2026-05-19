@@ -11,8 +11,7 @@ export const gameConfig: Phaser.Types.Core.GameConfig = {
     width: "100%",
     height: "100%",
   },
-  // DOM layer overlays the animated fishing.gif — Phaser textures can't
-  // decode multi-frame GIFs.
+  // DOM layer overlays animated GIFs (Phaser textures only decode frame 1).
   dom: {
     createContainer: true,
   },

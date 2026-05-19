@@ -7,34 +7,22 @@ export const MAX_VELOCITY = 950;
 export const BAR_MIN_Y = 0;
 export const BAR_MAX_Y = 800;
 export const FILL_RATE_PER_SEC = 22 / 100;
-// Fly (no-bait) baseline: fill:drain = 1 : 1.9. Higher-tier baits scale this
-// down via state.drainMultiplier (1 - bait.progressDrainReduction).
+// Fly (no-bait) baseline fill:drain = 1 : 1.9; baits scale via state.drainMultiplier.
 export const BASE_DRAIN_RATE_PER_SEC = (22 / 100) * 1.9;
 export const TICK_HZ = 30;
 export const TICK_DT = 1 / TICK_HZ;
-// Authoritative physics step rate. MUST be identical on client and server:
-// `stepFishPosition` consumes the shared `mulberry32` RNG state once per
-// step (jitter) plus on each direction change, so any rate divergence makes
-// the fish swim down different trajectories on the two sides — the player
-// tracks what they see locally while the server's fish is elsewhere, and
-// every cast resolves as escaped because progress never fills.
+// MUST match exactly on client and server — `stepFishPosition` consumes the shared
+// mulberry32 RNG once per step, so any rate divergence forks the fish trajectory.
 export const PHYSICS_FIXED_DT = 1 / 60;
-// Cap on how much wall-time the accumulator can absorb in a single tick,
-// so a long pause / GC doesn't dump a huge backlog of physics steps in one
-// frame. Mirrors the client's local cap.
+// Cap on wall-time the accumulator can absorb in a single tick, so a pause/GC
+// doesn't dump a huge backlog of physics steps in one frame.
 export const PHYSICS_MAX_STEP_ACCUM = 0.1;
 export const INPUT_SAMPLE_HZ = 20;
-// Lag-comp buffer: simulation time trails wall time by this much on BOTH
-// sides. Inputs carry a wallclock `t_ms`; both client and server convert
-// `t_ms` → `simTimeS` against the *same* origin (the first input's `t_ms`),
-// then step physics up to `wallSinceOriginS - INPUT_DELAY_S`. Because the
-// input timeline is the only non-deterministic axis (fish RNG is seeded),
-// aligning the timeline aligns both simulations bit-for-bit.
-//
-// Sized to absorb regional one-way latency + a tick boundary. Smaller =
-// snappier visual response but more samples land "late" (after their step
-// has already been processed) and get clamped forward, reintroducing drift.
-// Larger = wider safety margin but more perceived input lag.
+// Lag-comp buffer: simulation time trails wall time by this much on both sides.
+// Inputs carry wallclock `t_ms`; both sides convert to `simTimeS` against the same
+// origin (first input's `t_ms`), then step physics up to `wallSinceOriginS - INPUT_DELAY_S`.
+// Aligning the input timeline (the only non-deterministic axis; fish RNG is seeded)
+// keeps both simulations bit-for-bit. Sized to absorb regional one-way latency + a tick boundary.
 export const INPUT_DELAY_MS = 60;
 export const INPUT_DELAY_S = INPUT_DELAY_MS / 1000;
 
@@ -45,15 +33,9 @@ export interface TimedInput {
 }
 
 /**
- * Look up the input that was active at `simTimeS` from a history sorted by
- * ascending `simTimeS`. Returns the `held` value of the most recent input
- * with `simTimeS <= queriedSimTimeS`, or `defaultHeld` if none.
- *
- * Uses a moving cursor that the caller advances monotonically to keep
- * lookups O(1) amortized when stepping forward through simulation time.
- * The cursor points at the index of the input whose `simTimeS <= queried`
- * with the largest such simTime — i.e. the active one. Returns the new
- * cursor so the caller can thread it forward across steps.
+ * Look up the input active at `simTimeS` from an ascending-sorted history.
+ * Returns the most recent input with `simTimeS <= queriedSimTimeS`, or `defaultHeld`.
+ * `cursor` is a monotonic position the caller threads forward to keep lookups O(1) amortized.
  */
 export function lookupActiveInput(
   history: ReadonlyArray<TimedInput>,
@@ -75,7 +57,7 @@ export const CHEST_BASE_SPAWN_CHANCE = 0.15;
 export const CHEST_HOLD_SECONDS_REQUIRED = 2;
 export const GREEN_BAR_HEIGHT_BASE = 60;
 export const ROD_GREEN_BAR_STEP_PX = 10;
-// Hit-detection radius in physics units; matches sprite (~44px in 460px track / 800 units).
+// Physics units; matches sprite (~44px in 460px track / 800 units).
 export const FISH_HIT_RADIUS = 38;
 
 export interface FishingGameState {
@@ -84,19 +66,15 @@ export interface FishingGameState {
   /** Raw fish position (physics-driven, with oscillation noise). */
   fishY: number;
   /**
-   * Smoothed fish position used by progress and terminal-state checks AND
-   * pushed to the client for display. Server and client both score against
-   * THIS value, not the raw `fishY`, so the in-bar predicate can never
-   * disagree across the wire (the previous design had the client lerping
-   * `fishY` toward server and computing local progress against the lerped
-   * value, while the server scored against raw `fishY` — that ~135ms gap
-   * caused local progress to fill while server progress stayed at 0).
+   * Smoothed fish position used by progress, terminal-state checks, AND wire push.
+   * Both sides score against THIS, not raw `fishY`, so the in-bar predicate
+   * cannot disagree across the wire.
    */
   fishYDisplay: number;
   fishVelocity: number;
   fishTargetY: number;
   fishLastDirChangeAt: number;
-  // Sampled seconds until the next dir-change. 0 means "roll on next tick".
+  /** Seconds until next dir-change. 0 means "roll on next tick". */
   fishDirInterval: number;
   progress: number;
   timeInBar: number;
@@ -105,26 +83,18 @@ export interface FishingGameState {
   sampleCount: number;
   chest: ChestState;
   rngState: number;
-  // 1 - bait.progressDrainReduction. Set at session init from baitSlug.
+  /** 1 - bait.progressDrainReduction. Set at session init from baitSlug. */
   drainMultiplier: number;
 }
 
-/**
- * Exponential-smoothing rate (1/sec) applied to `fishY → fishYDisplay`.
- * Filters per-tick oscillation jitter so both sides see a stable "playable"
- * fish trajectory. Lag-to-95% ≈ 3 / rate seconds.
- */
+/** Exponential-smoothing rate (1/sec) for `fishY → fishYDisplay`. Lag-to-95% ≈ 3 / rate seconds. */
 export const FISH_DISPLAY_SMOOTHING_PER_SEC = 22;
 
 /**
- * Precomputed smoothing factor for the hot path (`dt === PHYSICS_FIXED_DT`).
- * `Math.exp` is NOT correctly-rounded by IEEE 754 so its result can differ
- * by ~1 ULP between V8 (Node, Chrome) and other engines (JavaScriptCore,
- * SpiderMonkey). Calling it per step means that ULP error accumulates into
- * client/server fishYDisplay drift. By computing it once at module init we
- * fold any cross-engine difference into a single constant — the per-step
- * arithmetic is then pure IEEE multiply/add, which IS deterministic, so
- * fishYDisplay stays bit-equal across the wire over a 30s session.
+ * Precomputed K for the hot path. `Math.exp` is not correctly-rounded by IEEE 754
+ * so cross-engine results can differ by ~1 ULP (V8 vs JSC/SpiderMonkey). Computing
+ * once at module init keeps per-step arithmetic pure multiply/add — deterministic
+ * across the wire over a full session.
  */
 export const FISH_DISPLAY_SMOOTHING_K_FIXED =
   1 - Math.exp(-FISH_DISPLAY_SMOOTHING_PER_SEC * PHYSICS_FIXED_DT);
@@ -194,8 +164,7 @@ export function resolveGreenBarHeight(
   return clamp(base + rodBonus, 40, BAR_MAX_Y);
 }
 
-// Acceleration-based bar: hold = upward boost, release = gravity. Pulse-tap
-// rhythm is required to track the fish — holding parks it at the top.
+// Hold = upward boost, release = gravity. Pulse-tap rhythm required; holding parks bar at top.
 export function stepPhysics(
   state: FishingGameState,
   isHolding: boolean,
@@ -219,17 +188,11 @@ export function stepPhysics(
   }
 }
 
-// Target never chosen within this of the top/bottom wall.
 const FISH_EDGE_BUFFER = 40;
-// Constant upward drift as a fraction of movementSpeed — preserves the
-// "fish eventually escapes if you fail to catch" mechanic.
+// Constant upward drift — preserves "fish escapes if you fail to catch" mechanic.
 const FISH_DRIFT_FRACTION = 0.35;
-// Proportional-steering gain: converts target-offset (units) into desired velocity.
 const FISH_STEERING_STIFFNESS = 7;
-// Max oscillation speed as a multiple of movementSpeed.
 const FISH_MAX_SPEED_MULT = 2.8;
-// Per-tick velocity noise amplitude, as a multiple of oscillationMagnitude per second.
-// Adds high-frequency trembling on top of target-seeking for the jittery feel.
 const FISH_JITTER_AMP_RATE = 2.0;
 
 export function stepFishPosition(
@@ -252,8 +215,7 @@ export function stepFishPosition(
     state.fishDirInterval = baseInterval * (0.7 + 0.6 * r1.value);
     state.fishLastDirChangeAt = state.totalTime;
 
-    // Pattern-tilted full-range target. Y=0 is top, Y=BAR_MAX_Y is bottom,
-    // so sinker skews toward 1, floater toward 0.
+    // Y=0 is top, Y=BAR_MAX_Y is bottom; sinker skews toward 1, floater toward 0.
     let tilt: number;
     switch (profile.pattern) {
       case "sinker":
@@ -273,7 +235,6 @@ export function stepFishPosition(
     }
     state.fishTargetY = usableTop + tilt * usableRange;
 
-    // Fake-out: an occasional velocity impulse for sharp darts.
     if (profile.fakeOutChance > 0) {
       const r3 = mulberry32Next(state.rngState);
       state.rngState = r3.next;
@@ -286,7 +247,6 @@ export function stepFishPosition(
     }
   }
 
-  // Steer toward target, capped at a multiple of movementSpeed.
   const toTarget = state.fishTargetY - state.fishY;
   const maxSpeed = profile.movementSpeed * FISH_MAX_SPEED_MULT;
   const desired = clamp(
@@ -298,7 +258,6 @@ export function stepFishPosition(
   const dv = clamp(desired - state.fishVelocity, -accel * dt, accel * dt);
   state.fishVelocity += dv;
 
-  // Per-tick velocity jitter — rarity scales via oscillationMagnitude.
   if (profile.oscillationMagnitude > 0) {
     const rJ = mulberry32Next(state.rngState);
     state.rngState = rJ.next;
@@ -306,10 +265,9 @@ export function stepFishPosition(
     state.fishVelocity += (rJ.value - 0.5) * 2 * jitterAmp * dt;
   }
 
-  // Upward drift. Y=0 is the top (escape zone), so drift is negative.
+  // Y=0 is the top (escape zone), so drift is negative.
   state.fishVelocity -= profile.movementSpeed * FISH_DRIFT_FRACTION * dt;
 
-  // Integrate and absorb wall hits.
   let nextY = state.fishY + state.fishVelocity * dt;
   if (nextY <= BAR_MIN_Y) {
     nextY = BAR_MIN_Y;
@@ -335,9 +293,7 @@ export function stepProgress(
   greenBarHeight: number,
   dt: number,
 ): void {
-  // Score against the SMOOTHED fish position (`fishYDisplay`), not the raw
-  // `fishY`. Both client and server render `fishYDisplay` and use it here,
-  // which means the in-bar predicate can never disagree across the wire.
+  // Score against smoothed `fishYDisplay`, not raw `fishY` — keeps the in-bar predicate wire-consistent.
   const inBar = isFishInGreenBar(
     state.barY,
     state.fishYDisplay,
@@ -381,12 +337,7 @@ export function stepAll(
 ): void {
   stepPhysics(state, isHolding, dt);
   stepFishPosition(state, profile, dt);
-  // Smooth the displayed fish position toward the raw physics value. The
-  // smoothed value is what stepProgress and terminalState read, and what the
-  // gateway pushes over the wire — keeping client visuals and server scoring
-  // bit-aligned on a single fish trajectory. For the hot path we use the
-  // precomputed K to keep cross-engine arithmetic deterministic; arbitrary
-  // dt callers fall back to per-call exp (off the wire path).
+  // Hot path uses precomputed K for cross-engine determinism; arbitrary dt callers fall back to exp.
   const smoothK =
     dt === PHYSICS_FIXED_DT
       ? FISH_DISPLAY_SMOOTHING_K_FIXED
@@ -398,9 +349,7 @@ export function stepAll(
 
 export type FishingGameTerminal = "caught" | "escaped" | null;
 
-// If progress is this close to 1.0, treat the catch as earned — don't let a
-// one-frame fish dart to the top flip the outcome to escaped. Fish can still
-// "get away" honestly once progress drains back below this value.
+// Treat as caught once near 1.0 so a one-frame dart to the top can't flip the outcome to escaped.
 const NEAR_WIN_GRACE = 0.85;
 
 export function terminalState(
@@ -408,8 +357,7 @@ export function terminalState(
   _greenBarHeight: number,
 ): FishingGameTerminal {
   if (state.progress >= 1) return "caught";
-  // Use the smoothed fish position so a one-frame oscillation noise spike
-  // can't falsely trigger the "escape" verdict.
+  // Smoothed position so a one-frame oscillation spike can't falsely trigger "escape".
   if (state.fishYDisplay <= BAR_MIN_Y + 1 && state.progress < NEAR_WIN_GRACE) {
     return "escaped";
   }
