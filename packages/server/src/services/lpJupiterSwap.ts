@@ -1,27 +1,40 @@
 import {
+  AddressLookupTableAccount,
   Connection,
   Keypair,
   PublicKey,
+  TransactionInstruction,
+  TransactionMessage,
   VersionedTransaction,
 } from "@solana/web3.js";
 import { env } from "../config/env.js";
 
 const SOL_MINT = "So11111111111111111111111111111111111111112";
 
-type JupiterQuote = {
+type JupiterIx = {
+  programId: string;
+  accounts: Array<{
+    pubkey: string;
+    isSigner: boolean;
+    isWritable: boolean;
+  }>;
+  data: string; // base64
+};
+
+export type JupiterBuildResponse = {
   inputMint: string;
   outputMint: string;
   inAmount: string;
   outAmount: string;
   otherAmountThreshold: string;
-  swapMode: string;
   slippageBps: number;
   priceImpactPct: string;
-  routePlan: unknown[];
-};
-
-type JupiterSwapResponse = {
-  swapTransaction: string;
+  computeBudgetInstructions?: JupiterIx[];
+  setupInstructions?: JupiterIx[];
+  swapInstruction: JupiterIx;
+  cleanupInstruction?: JupiterIx | null;
+  otherInstructions?: JupiterIx[];
+  addressesByLookupTableAddress?: Record<string, string[]>;
 };
 
 /** Add new kinds here so isRetryableKind stays a decision table. */
@@ -158,31 +171,46 @@ async function fetchWithTimeout(
   }
 }
 
-async function fetchQuote(opts: {
+function jupiterHeaders(): Record<string, string> {
+  const h: Record<string, string> = { accept: "application/json" };
+  if (env.JUPITER_API_KEY) h["x-api-key"] = env.JUPITER_API_KEY;
+  return h;
+}
+
+// v2 ExactIn quote-and-build in one call. Replaces v6's /quote + /swap.
+// `taker` is the v2 rename of v6's `userPublicKey`.
+async function fetchSwapBuild(opts: {
   inputMint: string;
   outputMint: string;
   amountLamports: bigint;
   slippageBps: number;
-}): Promise<JupiterQuote> {
+  taker: PublicKey;
+}): Promise<JupiterBuildResponse> {
   return withRetry(async (attempt) => {
-    const url = new URL(`${env.JUPITER_API_URL}/quote`);
+    const url = new URL(`${env.JUPITER_API_URL}/build`);
     url.searchParams.set("inputMint", opts.inputMint);
     url.searchParams.set("outputMint", opts.outputMint);
     url.searchParams.set("amount", opts.amountLamports.toString());
     url.searchParams.set("slippageBps", String(opts.slippageBps));
-    url.searchParams.set("onlyDirectRoutes", "false");
+    url.searchParams.set("taker", opts.taker.toBase58());
+    if (env.JUPITER_EXCLUDE_DEXES.trim().length > 0) {
+      url.searchParams.set("excludeDexes", env.JUPITER_EXCLUDE_DEXES);
+    }
+    if (env.JUPITER_DEXES.trim().length > 0) {
+      url.searchParams.set("dexes", env.JUPITER_DEXES);
+    }
 
     let res: Response;
     try {
       res = await fetchWithTimeout(
         url,
-        { method: "GET" },
+        { method: "GET", headers: jupiterHeaders() },
         env.LP_JUPITER_TIMEOUT_MS,
       );
     } catch (err) {
       throw new JupiterSwapError({
         kind: classifyFetchError(err),
-        message: `[lpJupiterSwap] quote fetch error (attempt ${attempt}): ${(err as Error).message}`,
+        message: `[lpJupiterSwap] build fetch error (attempt ${attempt}): ${(err as Error).message}`,
         attempt,
         cause: err,
       });
@@ -192,28 +220,32 @@ async function fetchQuote(opts: {
       const body = (await res.text().catch(() => "")) ?? "";
       throw new JupiterSwapError({
         kind: classifyHttpStatus(res.status),
-        message: `[lpJupiterSwap] quote failed (attempt ${attempt}, ${res.status}): ${body.slice(0, 200)}`,
+        message: `[lpJupiterSwap] build failed (attempt ${attempt}, ${res.status}): ${body.slice(0, 200)}`,
         attempt,
         httpStatus: res.status,
         body,
       });
     }
 
-    let parsed: JupiterQuote;
+    let parsed: JupiterBuildResponse;
     try {
-      parsed = (await res.json()) as JupiterQuote;
+      parsed = (await res.json()) as JupiterBuildResponse;
     } catch (err) {
       throw new JupiterSwapError({
         kind: "invalid_response",
-        message: `[lpJupiterSwap] quote body unparseable: ${(err as Error).message}`,
+        message: `[lpJupiterSwap] build body unparseable: ${(err as Error).message}`,
         attempt,
         cause: err,
       });
     }
-    if (!parsed.outAmount || !parsed.otherAmountThreshold) {
+    if (
+      !parsed.swapInstruction ||
+      !parsed.outAmount ||
+      !parsed.otherAmountThreshold
+    ) {
       throw new JupiterSwapError({
         kind: "invalid_response",
-        message: `[lpJupiterSwap] quote missing outAmount/otherAmountThreshold`,
+        message: `[lpJupiterSwap] build missing swapInstruction/outAmount/otherAmountThreshold`,
         attempt,
       });
     }
@@ -221,68 +253,77 @@ async function fetchQuote(opts: {
   });
 }
 
-async function fetchSwapTx(opts: {
-  quote: JupiterQuote;
-  userPublicKey: PublicKey;
-}): Promise<VersionedTransaction> {
-  return withRetry(async (attempt) => {
-    let res: Response;
-    try {
-      res = await fetchWithTimeout(
-        `${env.JUPITER_API_URL}/swap`,
-        {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            quoteResponse: opts.quote,
-            userPublicKey: opts.userPublicKey.toBase58(),
-            wrapAndUnwrapSol: true,
-            asLegacyTransaction: false,
-            dynamicComputeUnitLimit: true,
-            prioritizationFeeLamports: "auto",
-          }),
-        },
-        env.LP_JUPITER_TIMEOUT_MS,
-      );
-    } catch (err) {
-      throw new JupiterSwapError({
-        kind: classifyFetchError(err),
-        message: `[lpJupiterSwap] swap build fetch error (attempt ${attempt}): ${(err as Error).message}`,
-        attempt,
-        cause: err,
-      });
-    }
-    if (!res.ok) {
-      const body = (await res.text().catch(() => "")) ?? "";
-      throw new JupiterSwapError({
-        kind: classifyHttpStatus(res.status),
-        message: `[lpJupiterSwap] swap build failed (attempt ${attempt}, ${res.status}): ${body.slice(0, 200)}`,
-        attempt,
-        httpStatus: res.status,
-        body,
-      });
-    }
-    let json: JupiterSwapResponse;
-    try {
-      json = (await res.json()) as JupiterSwapResponse;
-    } catch (err) {
-      throw new JupiterSwapError({
-        kind: "invalid_response",
-        message: `[lpJupiterSwap] swap body unparseable: ${(err as Error).message}`,
-        attempt,
-        cause: err,
-      });
-    }
-    if (!json.swapTransaction) {
-      throw new JupiterSwapError({
-        kind: "invalid_response",
-        message: `[lpJupiterSwap] swap body missing swapTransaction`,
-        attempt,
-      });
-    }
-    const buf = Buffer.from(json.swapTransaction, "base64");
-    return VersionedTransaction.deserialize(buf);
+function toTransactionInstruction(ix: JupiterIx): TransactionInstruction {
+  return new TransactionInstruction({
+    programId: new PublicKey(ix.programId),
+    keys: ix.accounts.map((a) => ({
+      pubkey: new PublicKey(a.pubkey),
+      isSigner: a.isSigner,
+      isWritable: a.isWritable,
+    })),
+    data: Buffer.from(ix.data, "base64"),
   });
+}
+
+async function fetchLookupTables(
+  connection: Connection,
+  addrs: string[],
+): Promise<AddressLookupTableAccount[]> {
+  if (addrs.length === 0) return [];
+  const results = await Promise.all(
+    addrs.map(async (a) => {
+      const r = await connection.getAddressLookupTable(new PublicKey(a));
+      return { addr: a, lut: r.value };
+    }),
+  );
+  // If Jupiter said we need a LUT and the chain can't return it, fail
+  // loudly — silently inlining the keys produces a >1232-byte tx that
+  // gets rejected at simulation with a less-obvious error. Surfpool
+  // forks frequently can't resolve LUTs created post-snapshot.
+  const missing = results.filter((r) => !r.lut).map((r) => r.addr);
+  if (missing.length > 0) {
+    throw new JupiterSwapError({
+      kind: "invalid_response",
+      message:
+        `[lpJupiterSwap] could not resolve ${missing.length} address lookup ` +
+        `table(s) from chain: ${missing.join(", ")}. On a surfpool fork this ` +
+        `usually means the LUT account didn't lazy-clone. Constrain Jupiter ` +
+        `via JUPITER_DEXES to AMMs that don't need LUTs (e.g. "Raydium"), ` +
+        `or run the e2e against mainnet directly.`,
+      attempt: 1,
+    });
+  }
+  return results.map((r) => r.lut as AddressLookupTableAccount);
+}
+
+async function assembleSwapTransaction(opts: {
+  connection: Connection;
+  payer: PublicKey;
+  build: JupiterBuildResponse;
+}): Promise<VersionedTransaction> {
+  const { build, connection, payer } = opts;
+  const instructions: TransactionInstruction[] = [
+    ...(build.computeBudgetInstructions ?? []),
+    ...(build.setupInstructions ?? []),
+    build.swapInstruction,
+    ...(build.cleanupInstruction ? [build.cleanupInstruction] : []),
+    ...(build.otherInstructions ?? []),
+  ].map(toTransactionInstruction);
+
+  const lutAddrs = Object.keys(build.addressesByLookupTableAddress ?? {});
+  const luts = await fetchLookupTables(connection, lutAddrs);
+
+  // Fetch a fresh blockhash rather than trusting build's — by the time we
+  // sign and send, the API-supplied one may already be stale.
+  const { blockhash } = await connection.getLatestBlockhash("confirmed");
+
+  const msg = new TransactionMessage({
+    payerKey: payer,
+    recentBlockhash: blockhash,
+    instructions,
+  }).compileToV0Message(luts);
+
+  return new VersionedTransaction(msg);
 }
 
 export type SwapResult = {
@@ -307,18 +348,20 @@ async function executeSwap(opts: {
       attempt: 0,
     });
   }
-  const quote = await fetchQuote({
+  const build = await fetchSwapBuild({
     inputMint: opts.inputMint,
     outputMint: opts.outputMint,
     amountLamports: opts.amountLamports,
     slippageBps: opts.slippageBps,
+    taker: opts.signer.publicKey,
   });
-  const expectedOut = BigInt(quote.outAmount);
-  const minOut = BigInt(quote.otherAmountThreshold);
+  const expectedOut = BigInt(build.outAmount);
+  const minOut = BigInt(build.otherAmountThreshold);
 
-  const tx = await fetchSwapTx({
-    quote,
-    userPublicKey: opts.signer.publicKey,
+  const tx = await assembleSwapTransaction({
+    connection: opts.connection,
+    payer: opts.signer.publicKey,
+    build,
   });
   tx.sign([opts.signer]);
 
@@ -377,6 +420,17 @@ async function executeSwap(opts: {
     slippageLamports: expectedOut - minOut,
   };
 }
+
+/**
+ * Test-only exports. Not part of the service's public surface — consumed
+ * by the cassette test in `tests/integration/jupiterSwapAssembly.test.ts`
+ * to replay real captured /build responses through the assembly path.
+ */
+export const __testing = {
+  toTransactionInstruction,
+  fetchLookupTables,
+  assembleSwapTransaction,
+};
 
 /** Swap native SOL → USDC. */
 export function swapSolToUsdc(opts: {

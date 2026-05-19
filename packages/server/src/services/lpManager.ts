@@ -138,7 +138,8 @@ export async function checkBuffer(
   return { ok: balance >= required, balanceLamports: balance };
 }
 
-async function deployToDlmm(opts: {
+/** @internal — exported for the surfpool e2e test only. App code should use `deployRoomLiquidity`. */
+export async function deployToDlmm(opts: {
   connection: Connection;
   signer: Keypair;
   totalSolLamports: bigint;
@@ -225,7 +226,8 @@ async function deployToDlmm(opts: {
   };
 }
 
-async function exitFromDlmm(opts: {
+/** @internal — exported for the surfpool e2e test only. App code should use `exitRoomLiquidity`. */
+export async function exitFromDlmm(opts: {
   connection: Connection;
   signer: Keypair;
   positionPubkey: PublicKey;

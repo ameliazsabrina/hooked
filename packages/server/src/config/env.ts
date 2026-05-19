@@ -50,7 +50,20 @@ const envSchema = z.object({
   USDC_MINT_ADDRESS: z
     .string()
     .default("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"),
-  JUPITER_API_URL: z.string().default("https://quote-api.jup.ag/v6"),
+  JUPITER_API_URL: z.string().default("https://api.jup.ag/swap/v2"),
+  // Jupiter Portal API key. Sent as `x-api-key`. Absent → falls back to the
+  // 0.5 RPS keyless tier, which will throttle LP rebalance loops in prod.
+  JUPITER_API_KEY: z.string().optional(),
+  // Comma-separated DEX labels to exclude from Jupiter routes (matches the
+  // `excludeDexes` /build query param). Use to dodge AMMs that have been
+  // unreliable on a given network or that misbehave on surfpool forks.
+  // Example: "TaurusFi,SomeNewAMM". Empty → no exclusions.
+  JUPITER_EXCLUDE_DEXES: z.string().default(""),
+  // Comma-separated DEX labels to *restrict* Jupiter routes to (matches
+  // the `dexes` /build query param). When set, Jupiter routes ONLY through
+  // these AMMs. Useful on surfpool forks to avoid oracle-priced AMMs whose
+  // spread guards reject stale-cloned state. Empty → no restriction.
+  JUPITER_DEXES: z.string().default(""),
   // Minimum LP_MANAGER buffer (lamports) before deploy is allowed.
   IL_BUFFER_LAMPORTS_MIN: z.coerce
     .number()
