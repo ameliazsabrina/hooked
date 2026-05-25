@@ -14,6 +14,7 @@ import {
   executeSubmitResolveOffchain,
   type RolledCast,
 } from "../services/fishing/wsExecutor.js";
+import { CastEngineError } from "../services/fishing/errors.js";
 import { computeCatchScore } from "../services/fishing/scoring.js";
 import type { Rarity } from "../services/fishing/types.js";
 import {
@@ -1185,9 +1186,17 @@ export default fp(async (fastify) => {
                   (err as Error).message,
                 );
                 socket.session = null;
+                // Distinguish a settling/closed room so the client can disable
+                // the Cast button + show the settling notice, rather than
+                // treating it like a generic failure.
+                const code =
+                  err instanceof CastEngineError &&
+                  err.code === "WINDOW_CLOSED"
+                    ? "window_closed"
+                    : "cast_failed";
                 safeSend(socket, {
                   type: "error",
-                  code: "cast_failed",
+                  code,
                   message: (err as Error).message,
                 });
               }

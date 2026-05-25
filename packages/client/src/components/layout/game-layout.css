@@ -1245,6 +1245,18 @@
   padding: 0 12px;
 }
 
+.cast-settling-notice {
+  margin: -2px 12px 10px;
+  padding: 5px 10px;
+  background: rgba(30, 50, 80, 0.92);
+  border: 1px solid #4a78c8;
+  border-radius: 4px;
+  color: #d4e4ff;
+  font-size: clamp(10px, 1.3vw, 13px);
+  text-align: center;
+  flex-shrink: 0;
+}
+
 .cast-button {
   flex: 0 1 60%;
   max-width: 320px;

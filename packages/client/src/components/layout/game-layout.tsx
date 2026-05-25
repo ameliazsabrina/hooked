@@ -65,7 +65,21 @@ export function GameLayout({ nickname, ready }: GameLayoutProps) {
   const { ready: authReady } = useSessionAuth();
   const playerQuery = trpc.player.me.useQuery(undefined, {
     enabled: connected && authReady,
+    // Poll so the Cast button disables itself shortly after the room stops
+    // accepting casts, without waiting for a failed cast to invalidate.
+    refetchInterval: 15_000,
   });
+  // Server-derived room window state; only "active" allows casting. "deposit"
+  // means no active deposit (already gated by !sessionId).
+  const windowState =
+    playerQuery.data?.exists && "windowState" in playerQuery.data
+      ? playerQuery.data.windowState
+      : null;
+  const roomSettling =
+    windowState === "closing" ||
+    windowState === "settling" ||
+    windowState === "closed" ||
+    windowState === "missing";
   const streak = playerQuery.data?.exists ? playerQuery.data.loginStreak : 0;
   const rodTier = playerQuery.data?.exists
     ? (playerQuery.data.equipment?.rodTier ?? 0)
@@ -131,6 +145,13 @@ export function GameLayout({ nickname, ready }: GameLayoutProps) {
   }, [applyMode]);
 
   const fishing = useFishingWs(gameRef);
+
+  const castDisabled =
+    fishing.state !== "idle" ||
+    fishing.bait <= 0 ||
+    !fishing.sessionId ||
+    !fishing.authed ||
+    roomSettling;
 
   useEffect(() => {
     if (ready && !fishing.sessionId) {
@@ -263,19 +284,9 @@ export function GameLayout({ nickname, ready }: GameLayoutProps) {
             <button
               className="cast-button"
               onClick={fishing.cast}
-              disabled={
-                fishing.state !== "idle" ||
-                fishing.bait <= 0 ||
-                !fishing.sessionId ||
-                !fishing.authed
-              }
+              disabled={castDisabled}
               style={
-                fishing.state !== "idle" ||
-                fishing.bait <= 0 ||
-                !fishing.sessionId ||
-                !fishing.authed
-                  ? { opacity: 0.5, cursor: "not-allowed" }
-                  : undefined
+                castDisabled ? { opacity: 0.5, cursor: "not-allowed" } : undefined
               }
             >
               Cast
@@ -289,6 +300,16 @@ export function GameLayout({ nickname, ready }: GameLayoutProps) {
               <img src="/assets/ui/mobile-leaderboard.svg" alt="" />
             </button>
           </div>
+
+          {roomSettling && (
+            <div
+              className="cast-settling-notice"
+              role="status"
+              aria-live="polite"
+            >
+              This round is settling up — casting paused for now.
+            </div>
+          )}
 
           <div className="bottom-panels">
             <StatsPanel />

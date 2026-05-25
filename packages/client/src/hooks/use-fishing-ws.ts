@@ -688,6 +688,12 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
         if (msg.code === "no_active_cast") {
           return;
         }
+        // Room stopped accepting casts (settling/closed). Refresh room state so
+        // the Cast button disables + the settling notice shows immediately,
+        // rather than waiting for the next player.me poll.
+        if (msg.code === "window_closed") {
+          void utils.player.me.invalidate();
+        }
         activeCastIdRef.current = null;
         // Reset gate; stale heldRef would drop the next cast's first press.
         heldRef.current = false;
