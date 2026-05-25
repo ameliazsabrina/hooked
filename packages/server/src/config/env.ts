@@ -100,6 +100,9 @@ const envSchema = z.object({
   // signature issued, so re-running quote→build→send is safe.
   // `confirm_failed` is NEVER retried: tx may have landed.
   LP_SWAP_SEND_RETRY_ATTEMPTS: z.coerce.number().int().min(1).default(2),
+  // Max LP deploy attempts per room before a transient failure is escalated to
+  // "failed_permanent" (alert, no further auto-retry).
+  LP_MAX_DEPLOY_ATTEMPTS: z.coerce.number().int().min(1).default(3),
   LP_EXIT_HOURS_BEFORE_CLOSE: z.coerce.number().nonnegative().default(12),
   // Meteora `StrategyType`: "Spot" | "Curve" | "BidAsk". SDK rejects unknown.
   LP_STRATEGY_TYPE: z.string().default("Spot"),

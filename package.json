@@ -8,5 +8,16 @@
     "dev:server": "pnpm --filter @hooked/server dev",
     "build": "pnpm --filter @hooked/shared build && pnpm --parallel --filter @hooked/client --filter @hooked/server build",
     "lint": "pnpm --parallel -r lint"
+  },
+  "pnpm": {
+    "supportedArchitectures": {
+      "os": [
+        "current"
+      ],
+      "cpu": [
+        "x64",
+        "arm64"
+      ]
+    }
   }
 }

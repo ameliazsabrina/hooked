@@ -184,14 +184,51 @@ export async function deployToDlmm(opts: {
 
   const poolAddress = new PublicKey(env.METEORA_POOL_ADDRESS);
   const dlmmPool = await DLMM.create(opts.connection, poolAddress);
+  // Refresh on-chain state immediately before reading the active bin / building
+  // the add-liquidity tx; a stale active bin causes strategy/slippage reverts.
+  await dlmmPool.refetchStates();
+
+  // Idempotency guard against double-deploy. With retries enabled, a prior
+  // attempt whose tx LANDED but whose DB write failed would leave an orphan
+  // position; opening another would split funds. The system deploys one room
+  // at a time per LP_MANAGER, so any pre-existing position here is unexpected —
+  // refuse and surface for manual reconciliation rather than risk a double.
+  const existing = await dlmmPool.getPositionsByUserAndLbPair(
+    opts.signer.publicKey,
+  );
+  if (existing.userPositions.length > 0) {
+    throw new Error(
+      `[lpManager] LP_MANAGER already holds ${existing.userPositions.length} ` +
+        `position(s) in pool ${poolAddress.toBase58()} — refusing to open ` +
+        `another (possible orphan from a prior partial deploy). Reconcile manually.`,
+    );
+  }
+
   const activeBin = await dlmmPool.getActiveBin();
   const positionKeypair = Keypair.generate();
+
+  // Use the USDC actually sitting in the wallet, NOT the swap's quoted output.
+  // swap.outLamports is build.outAmount (the quote); the realized balance after
+  // slippage is lower, so passing the quote as totalYAmount makes
+  // AddLiquidityByStrategy try to transfer more USDC than exists → SPL Token
+  // "insufficient funds" (0x1). Confirmed via the surfpool fork e2e.
+  let totalYAmount = swap.outLamports;
+  if (usdcSide > 0n) {
+    const usdcAta = getAssociatedTokenAddressSync(
+      new PublicKey(env.USDC_MINT_ADDRESS),
+      opts.signer.publicKey,
+      false,
+      TOKEN_PROGRAM_ID,
+    );
+    const bal = await opts.connection.getTokenAccountBalance(usdcAta);
+    totalYAmount = BigInt(bal.value.amount);
+  }
 
   const tx: Transaction =
     await dlmmPool.initializePositionAndAddLiquidityByStrategy({
       positionPubKey: positionKeypair.publicKey,
       totalXAmount: new BN(solSide.toString()),
-      totalYAmount: new BN(swap.outLamports.toString()),
+      totalYAmount: new BN(totalYAmount.toString()),
       strategy: {
         minBinId: activeBin.binId - env.LP_BIN_RANGE,
         maxBinId: activeBin.binId + env.LP_BIN_RANGE,

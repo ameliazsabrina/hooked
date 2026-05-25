@@ -11,6 +11,7 @@ import type { FastifyError } from "fastify";
 import { appRouter, type AppRouter } from "./trpc/router.js";
 import { createContext } from "./trpc/context.js";
 import healthRoutes from "./routes/health.js";
+import statsRoutes from "./routes/stats.js";
 import adminApexFishImageRoutes from "./routes/adminApexFishImage.js";
 import databasePlugin from "./plugins/database.js";
 import redisPlugin from "./plugins/redis.js";
@@ -70,6 +71,7 @@ async function buildServer() {
   });
 
   await server.register(healthRoutes);
+  await server.register(statsRoutes);
   await server.register(adminApexFishImageRoutes);
 
   await server.register(gatewayPlugin);

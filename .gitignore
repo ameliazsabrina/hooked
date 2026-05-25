@@ -69,5 +69,10 @@ secrets/
 # --- Test fixtures we don't ship ---
 packages/server/tests/fixtures/
 
+# --- surfpool local runtime artifacts (fork e2e, anchor tests) ---
+.surfpool/
+packages/programs/runbooks/
+packages/programs/txtx.yml
+
 .github
 .vercel

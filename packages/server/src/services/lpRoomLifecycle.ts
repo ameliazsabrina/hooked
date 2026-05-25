@@ -17,6 +17,7 @@ import {
 } from "./lpManager.js";
 import { formatSolanaError } from "../solana/formatError.js";
 import { computeRentSafeWithdrawAmount } from "./lpWithdrawMath.js";
+import { nextStatusOnFailure } from "./lpDeployRetry.js";
 
 type LpLogger = {
   info: (msg: string) => void;
@@ -29,10 +30,15 @@ const noopLogger: LpLogger = { info: () => {}, error: () => {} };
 export async function deployReadyRoomLp(logger: LpLogger = noopLogger) {
   if (!env.FEATURES_LP_ENABLED) return;
 
+  // Retry transient failures within the window: pick up "pending" (first try)
+  // and "failed" (transient retry) rooms still under the attempt cap.
+  // "failed_permanent" is never re-selected — it needs a human.
+  const maxAttempts = env.LP_MAX_DEPLOY_ATTEMPTS;
   const rooms = await Room.find({
     phase: "active",
     onChainPoolId: { $ne: null },
-    "lp.status": "pending",
+    "lp.status": { $in: ["pending", "failed"] },
+    "lp.deployAttempts": { $lt: maxAttempts },
   }).lean();
   if (rooms.length === 0) return;
 
@@ -59,6 +65,13 @@ export async function deployReadyRoomLp(logger: LpLogger = noopLogger) {
   }
 
   for (const room of rooms) {
+    // Count the attempt up-front and persist it, so a crash mid-deploy still
+    // advances toward the cap instead of retrying forever.
+    const attempts = (room.lp?.deployAttempts ?? 0) + 1;
+    await Room.updateOne(
+      { roomId: room.roomId },
+      { $set: { "lp.deployAttempts": attempts } },
+    );
     try {
       const onChainRoomId = BigInt(room.onChainPoolId!);
       const roomPda = getRoomPda(onChainRoomId);
@@ -158,12 +171,28 @@ export async function deployReadyRoomLp(logger: LpLogger = noopLogger) {
       );
     } catch (err) {
       const detailed = formatSolanaError(err);
-      logger.error(`lpDeploy room=${room.roomId} failed: ${detailed}`);
+      const status = nextStatusOnFailure({
+        message: detailed,
+        attempts,
+        maxAttempts,
+      });
+      if (status === "failed_permanent") {
+        // Terminal error or attempts exhausted — alert; needs a human.
+        logger.error(
+          `ALERT lpDeploy room=${room.roomId} PERMANENTLY failed after ` +
+            `${attempts} attempt(s): ${detailed}`,
+        );
+      } else {
+        logger.error(
+          `lpDeploy room=${room.roomId} attempt ${attempts}/${maxAttempts} ` +
+            `failed (will retry next tick): ${detailed}`,
+        );
+      }
       await Room.updateOne(
         { roomId: room.roomId },
         {
           $set: {
-            "lp.status": "failed",
+            "lp.status": status,
             // Multi-line so admin dashboards see program logs without re-running.
             "lp.lastError": detailed.slice(0, 4000),
           },

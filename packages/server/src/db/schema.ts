@@ -259,9 +259,17 @@ const roomSchema = new Schema(
       type: {
         status: {
           type: String,
-          enum: ["pending", "deployed", "exited", "failed", "skipped"],
+          enum: [
+            "pending",
+            "deployed",
+            "exited",
+            "failed",
+            "failed_permanent",
+            "skipped",
+          ],
           default: "pending",
         },
+        deployAttempts: { type: Number, default: 0 },
         positionPubkey: { type: String, default: null },
         deployedLamports: { type: Number, default: null },
         deployedAt: { type: Date, default: null },
