@@ -54,10 +54,12 @@ pub fn handler(ctx: Context<WithdrawToLpManager>, amount: u64) -> Result<()> {
         room.lp_deployed_lamports == 0,
         RoomError::LpAlreadyDeployed
     );
-    require!(
-        now >= room.lp_deploy_at && now < room.closes_at,
-        RoomError::LpDeployWindowNotOpen
-    );
+    // Only a lower bound: LP may be deployed any time at/after lp_deploy_at,
+    // including after closes_at, to recover rooms whose LP automation failed
+    // during the original window. The `status == Entry` account constraint
+    // still blocks this once close_room has run, so funds can never leave to
+    // the LP manager after settlement begins.
+    require!(now >= room.lp_deploy_at, RoomError::LpDeployWindowNotOpen);
     require!(
         amount <= room.deposited_lamports,
         RoomError::LpAmountExceedsDeposited

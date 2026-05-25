@@ -27,6 +27,13 @@ export const INPUT_SAMPLE_HZ = 20;
 // timeline for the rest of the cast; 150ms tracks the client keep-alive cadence.
 export const INPUT_DELAY_MS = 150;
 export const INPUT_DELAY_S = INPUT_DELAY_MS / 1000;
+// Adaptive lag-comp bounds. The server measures per-socket network jitter and
+// raises the buffer toward INPUT_DELAY_MAX_MS for high-jitter clients so late
+// transitions stop getting clamped (the cause of "full bar but got away"). The
+// chosen value is delivered to the client per cast via fish_hooked so both
+// sides step to the same simTime. INPUT_DELAY_MS is the floor.
+export const INPUT_DELAY_MAX_MS = 600;
+export const INPUT_DELAY_MARGIN_MS = 60;
 
 export interface TimedInput {
   /** Seconds since the per-cast simulation origin (first input's `t_ms`). */

@@ -218,6 +218,7 @@ export function GameLayout({ nickname, ready }: GameLayoutProps) {
                   onResolve={fishing.onTimingBarResolve}
                   serverState={fishing.serverSnapshot}
                   reconcileVersion={fishing.reconcileVersion}
+                  inputDelayMs={fishing.inputDelayMs}
                 />
               )}
 

@@ -75,7 +75,10 @@ async function loadEquippedRodTier(wallet: PublicKey): Promise<number> {
 import {
   BAR_MAX_Y,
   FishRarity,
+  INPUT_DELAY_MS,
   INPUT_DELAY_S,
+  INPUT_DELAY_MAX_MS,
+  INPUT_DELAY_MARGIN_MS,
   PHYSICS_FIXED_DT,
   PHYSICS_MAX_STEP_ACCUM,
   buildDifficultyProfile,
@@ -161,6 +164,10 @@ interface SessionContext {
   clampedCount: number;
   maxClampMs: number;
   peakProgress: number;
+  // Adaptive lag-comp buffer (seconds) chosen for THIS cast at hook time and
+  // shipped to the client. advancePhysics steps to wall - inputDelayS using
+  // this instead of the static INPUT_DELAY_S so both sides stay aligned.
+  inputDelayS: number;
 }
 
 const NIBBLE_DELAY_MS = 3000;
@@ -197,6 +204,25 @@ interface Socket {
   session: SessionContext | null;
   roomId: string | null;
   send: (m: ServerMessage) => void;
+  // Adaptive lag-comp telemetry, persisted across casts on this connection.
+  // netMinOffsetMs ≈ (clock skew + best-case one-way latency); subtracting it
+  // from each sample's (arrival - t_ms) cancels the skew and yields the live
+  // network jitter we must buffer. netJitterMs is a decaying max so a single
+  // spike raises the buffer then relaxes.
+  netMinOffsetMs: number | null;
+  netJitterMs: number;
+}
+
+// Decay applied to the per-socket jitter max on every observed sample so the
+// buffer shrinks back toward the floor once a latency spike passes.
+const NET_JITTER_DECAY = 0.97;
+
+// Pick the lag-comp buffer for a cast from the socket's observed jitter,
+// clamped to [INPUT_DELAY_MS, INPUT_DELAY_MAX_MS]. First cast on a fresh
+// connection has no samples yet → floor.
+function computeAdaptiveDelayMs(socket: Socket): number {
+  const candidate = Math.ceil(socket.netJitterMs) + INPUT_DELAY_MARGIN_MS;
+  return Math.min(INPUT_DELAY_MAX_MS, Math.max(INPUT_DELAY_MS, candidate));
 }
 
 const sockets = new Map<string, Socket>();
@@ -474,7 +500,7 @@ function advancePhysics(ctx: SessionContext, now: number): void {
   if (!ctx.physicsStarted) return;
   if (ctx.physicsClientOriginMs === null) return;
   const wallSinceOriginS = (now - ctx.physicsServerOriginMs) / 1000;
-  const targetSimTimeS = wallSinceOriginS - INPUT_DELAY_S;
+  const targetSimTimeS = wallSinceOriginS - ctx.inputDelayS;
   // Clamp forward sprint per wall-tick (covers GC pauses).
   const maxAdvance = ctx.simTimeS + PHYSICS_MAX_STEP_ACCUM;
   const stepUpTo = Math.min(targetSimTimeS, maxAdvance);
@@ -612,6 +638,12 @@ function handleNibbleResponse(
   void clientTs;
   ctx.hooked = true;
   if (ctx.pendingHookPayload) {
+    // Lock in the lag-comp buffer from the freshest jitter estimate (built up
+    // over prior casts / keep-alives on this socket) and tell the client the
+    // exact value so its local physics steps to the same simTime.
+    const inputDelayMs = computeAdaptiveDelayMs(socket);
+    ctx.inputDelayS = inputDelayMs / 1000;
+    ctx.pendingHookPayload.inputDelayMs = inputDelayMs;
     safeSend(socket, ctx.pendingHookPayload);
     ctx.pendingHookPayload = null;
   }
@@ -690,6 +722,7 @@ function resolveCatch(
   ctx.clampedCount = 0;
   ctx.maxClampMs = 0;
   ctx.peakProgress = 0;
+  ctx.inputDelayS = INPUT_DELAY_S;
 
   // Deliver on the tick — awaiting Mongo here added ~500-1500ms of dead air
   // between the bar filling and the catch popup. Persistence runs below.
@@ -821,6 +854,8 @@ export default fp(async (fastify) => {
         session: null,
         roomId: null,
         send: (m) => safeSend({ ...socket, raw }, m),
+        netMinOffsetMs: null,
+        netJitterMs: 0,
       };
       sockets.set(socketId, socket);
 
@@ -1025,6 +1060,9 @@ export default fp(async (fastify) => {
                 weightHg: rolled.weightHg,
                 castTimestamp,
                 rngSeed: rolled.rngSeed,
+                // Placeholder; re-stamped from the latest jitter estimate at
+                // emit time (deliverPendingHook) so it reflects observed RTT.
+                inputDelayMs: INPUT_DELAY_MS,
               };
               socket.session = {
                 wallet,
@@ -1069,6 +1107,7 @@ export default fp(async (fastify) => {
                 clampedCount: 0,
                 maxClampMs: 0,
                 peakProgress: 0,
+                inputDelayS: INPUT_DELAY_S,
               };
               safeSend(socket, {
                 type: "cast_accepted",
@@ -1125,6 +1164,7 @@ export default fp(async (fastify) => {
               clampedCount: 0,
               maxClampMs: 0,
               peakProgress: 0,
+              inputDelayS: INPUT_DELAY_S,
             };
             void (async () => {
               const [baitSlug, rodTier] = await Promise.all([
@@ -1235,6 +1275,25 @@ export default fp(async (fastify) => {
               return;
             }
             for (const s of msg.samples) ctx.samples.push(s);
+            // Update the socket's network-jitter estimate (drives the next
+            // cast's adaptive lag-comp buffer). (arrival - t_ms) folds in clock
+            // skew + one-way latency; subtracting the rolling min cancels the
+            // skew, leaving live jitter. Decaying max so a spike relaxes later.
+            const arrivalNow = Date.now();
+            for (const s of msg.samples) {
+              const offset = arrivalNow - s.t_ms;
+              if (
+                socket.netMinOffsetMs === null ||
+                offset < socket.netMinOffsetMs
+              ) {
+                socket.netMinOffsetMs = offset;
+              }
+              const jitter = offset - socket.netMinOffsetMs;
+              socket.netJitterMs = Math.max(
+                jitter,
+                socket.netJitterMs * NET_JITTER_DECAY,
+              );
+            }
             // Simulation-time origin = `t_ms` of the FIRST held=true sample.
             // Pre-tap keep-alives are absorbed so client/server origins land
             // on the same wallclock instant. Late arrivals are clamped forward
@@ -1305,7 +1364,7 @@ export default fp(async (fastify) => {
             if (ctx.game.progress >= CLIENT_FINAL_FLOOR) {
               // TEMP desync instrumentation — see fly logs.
               console.log(
-                `[finalize] cast=${ctx.activeCastId} progress=${ctx.game.progress.toFixed(3)} peak=${ctx.peakProgress.toFixed(3)} rejects=${ctx.rejectedFinalCount} clamped=${ctx.clampedCount} maxClampMs=${ctx.maxClampMs.toFixed(0)} -> CATCH`,
+                `[finalize] cast=${ctx.activeCastId} progress=${ctx.game.progress.toFixed(3)} peak=${ctx.peakProgress.toFixed(3)} rejects=${ctx.rejectedFinalCount} clamped=${ctx.clampedCount} maxClampMs=${ctx.maxClampMs.toFixed(0)} delayMs=${(ctx.inputDelayS * 1000).toFixed(0)} -> CATCH`,
               );
               ctx.rejectedFinalCount = 0;
               ctx.desyncDetectedAt = null;
@@ -1315,7 +1374,7 @@ export default fp(async (fastify) => {
             ctx.rejectedFinalCount += 1;
             // TEMP desync instrumentation — see fly logs.
             console.log(
-              `[finalize] cast=${ctx.activeCastId} progress=${ctx.game.progress.toFixed(3)} peak=${ctx.peakProgress.toFixed(3)} rejects=${ctx.rejectedFinalCount} clamped=${ctx.clampedCount} maxClampMs=${ctx.maxClampMs.toFixed(0)} -> ${ctx.rejectedFinalCount >= DESYNC_REJECT_THRESHOLD ? "ESCAPE" : "REJECT(retry)"}`,
+              `[finalize] cast=${ctx.activeCastId} progress=${ctx.game.progress.toFixed(3)} peak=${ctx.peakProgress.toFixed(3)} rejects=${ctx.rejectedFinalCount} clamped=${ctx.clampedCount} maxClampMs=${ctx.maxClampMs.toFixed(0)} delayMs=${(ctx.inputDelayS * 1000).toFixed(0)} -> ${ctx.rejectedFinalCount >= DESYNC_REJECT_THRESHOLD ? "ESCAPE" : "REJECT(retry)"}`,
             );
             // On divergence, resolve as escaped instead of looping. Previously
             // we emitted desync_correction and kept retrying; in practice the

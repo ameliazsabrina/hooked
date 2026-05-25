@@ -55,6 +55,46 @@ describe("room lifecycle", () => {
     )[0];
   }
 
+  const rpcUrl = (provider.connection as any)._rpcEndpoint as string;
+
+  async function surfpoolAvailable(): Promise<boolean> {
+    try {
+      const res = await fetch(rpcUrl, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "surfnet_getSurfnetInfo",
+          params: [],
+        }),
+      });
+      if (!res.ok) return false;
+      const json = await res.json();
+      return !json.error;
+    } catch {
+      return false;
+    }
+  }
+
+  async function timeTravelToSec(absoluteSec: number): Promise<void> {
+    const res = await fetch(rpcUrl, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "surfnet_timeTravel",
+        params: [{ absoluteTimestamp: absoluteSec * 1000 }],
+      }),
+    });
+    const json = await res.json();
+    expect(
+      json.error,
+      `timeTravel failed: ${JSON.stringify(json)}`,
+    ).to.equal(undefined);
+  }
+
   before(async () => {
     const fund = async (kp: Keypair, sol: number) => {
       const sig = await provider.connection.requestAirdrop(
@@ -813,5 +853,110 @@ describe("room lifecycle", () => {
     expect(roomAccAfter.lpManager.toBase58()).to.equal(
       lpManager.publicKey.toBase58(),
     );
+  });
+
+  it("withdraws to lp_manager AFTER closes_at while still Entry (late-deploy recovery)", async function () {
+    if (!(await surfpoolAvailable())) this.skip();
+
+    const LATE_ROOM_ID = new BN(2_002);
+    const room = roomPda(LATE_ROOM_ID);
+    const vault = roomVaultPda(room);
+    const lpPlayer = Keypair.generate();
+    const sig = await provider.connection.requestAirdrop(
+      lpPlayer.publicKey,
+      3 * LAMPORTS_PER_SOL,
+    );
+    await provider.connection.confirmTransaction(sig);
+
+    await program.methods
+      .createRoom(LATE_ROOM_ID)
+      .accounts({ admin: admin.publicKey } as any)
+      .rpc();
+    await program.methods
+      .depositRoom(ONE_SOL)
+      .accounts({ room, authority: lpPlayer.publicKey } as any)
+      .signers([lpPlayer])
+      .rpc();
+
+    const acc = await program.account.room.fetch(room);
+    const closesAt = acc.closesAt.toNumber();
+
+    const vaultBefore = (await provider.connection.getAccountInfo(vault))!
+      .lamports;
+    const managerBefore =
+      (await provider.connection.getAccountInfo(lpManager.publicKey))
+        ?.lamports ?? 0;
+
+    await timeTravelToSec(closesAt + 60);
+
+    await program.methods
+      .withdrawToLpManager(ONE_SOL)
+      .accounts({
+        room,
+        lpManager: lpManager.publicKey,
+        admin: admin.publicKey,
+      } as any)
+      .rpc();
+
+    const vaultAfter =
+      (await provider.connection.getAccountInfo(vault))?.lamports ?? 0;
+    const managerAfter = (await provider.connection.getAccountInfo(
+      lpManager.publicKey,
+    ))!.lamports;
+    expect(vaultBefore - vaultAfter).to.equal(ONE_SOL.toNumber());
+    expect(managerAfter - managerBefore).to.equal(ONE_SOL.toNumber());
+
+    const after = await program.account.room.fetch(room);
+    expect(after.lpDeployedLamports.toString()).to.equal(ONE_SOL.toString());
+    expect(after.status).to.equal(0);
+  });
+
+  it("rejects withdraw_to_lp_manager once close_room has run (status no longer Entry)", async function () {
+    if (!(await surfpoolAvailable())) this.skip();
+
+    const CLOSED_ROOM_ID = new BN(2_003);
+    const room = roomPda(CLOSED_ROOM_ID);
+    const lpPlayer = Keypair.generate();
+    const sig = await provider.connection.requestAirdrop(
+      lpPlayer.publicKey,
+      3 * LAMPORTS_PER_SOL,
+    );
+    await provider.connection.confirmTransaction(sig);
+
+    await program.methods
+      .createRoom(CLOSED_ROOM_ID)
+      .accounts({ admin: admin.publicKey } as any)
+      .rpc();
+    await program.methods
+      .depositRoom(ONE_SOL)
+      .accounts({ room, authority: lpPlayer.publicKey } as any)
+      .signers([lpPlayer])
+      .rpc();
+
+    const acc = await program.account.room.fetch(room);
+    await timeTravelToSec(acc.closesAt.toNumber() + 60);
+
+    await program.methods
+      .closeRoom(new BN(0))
+      .accounts({
+        room,
+        treasury: treasury.publicKey,
+        admin: admin.publicKey,
+      } as any)
+      .rpc();
+
+    try {
+      await program.methods
+        .withdrawToLpManager(ONE_SOL)
+        .accounts({
+          room,
+          lpManager: lpManager.publicKey,
+          admin: admin.publicKey,
+        } as any)
+        .rpc();
+      expect.fail("should reject — room no longer in Entry");
+    } catch (err: any) {
+      expect(err.toString()).to.contain("LpDeployWindowNotOpen");
+    }
   });
 });

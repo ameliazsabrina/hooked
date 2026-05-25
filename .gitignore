@@ -67,7 +67,7 @@ secrets/
 .secrets/
 
 # --- Test fixtures we don't ship ---
-packages/server/tests/
+packages/server/tests/fixtures/
 
 .github
 .vercel

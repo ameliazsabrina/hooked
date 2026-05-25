@@ -15,8 +15,11 @@
     "start": "node dist/index.js",
     "db:seed": "tsx src/db/seed.ts",
     "backfill:sell-values": "tsx src/cli/backfill-sell-values.ts",
+    "cassette:capture": "tsx src/cli/captureJupiterBuildFixture.ts",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "e2e:lp": "bash ../programs/scripts/test-lp-e2e.sh",
+    "e2e:lp:mainnet": "bash ../programs/scripts/test-lp-e2e-mainnet.sh"
   },
   "dependencies": {
     "@coral-xyz/anchor": "^0.32.1",

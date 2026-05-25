@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   BAR_MAX_Y,
   BAR_MIN_Y,
-  INPUT_DELAY_S,
+  INPUT_DELAY_MS,
   PHYSICS_FIXED_DT,
   PHYSICS_MAX_STEP_ACCUM,
   initialFishingGameState,
@@ -39,6 +39,10 @@ interface TimingBarProps {
   /** Bumped on `desync_correction` only; on change, local state is overwritten
    *  from serverState since server's view is canonical. */
   reconcileVersion?: number;
+  /** Server-chosen adaptive lag-comp buffer (ms) for this cast. Local physics
+   *  MUST step to `wall - inputDelayMs/1000` with this exact value so it tracks
+   *  the server. Falls back to INPUT_DELAY_MS when the server didn't send it. */
+  inputDelayMs?: number | null;
 }
 
 // Physics step rate MUST match server constants in @hooked/shared — the RNG
@@ -65,7 +69,13 @@ export function TimingBar({
   onResolve,
   serverState,
   reconcileVersion = 0,
+  inputDelayMs,
 }: TimingBarProps) {
+  // Match the server's per-cast lag-comp buffer; fall back to the static floor.
+  const inputDelayS = (inputDelayMs ?? INPUT_DELAY_MS) / 1000;
+  // Read inside the RAF loop without re-subscribing the effect.
+  const inputDelaySRef = useRef(inputDelayS);
+  inputDelaySRef.current = inputDelayS;
   const greenBarHeight = useMemo(
     () => resolveGreenBarHeight(profile, rodTier),
     [profile, rodTier],
@@ -135,7 +145,7 @@ export function TimingBar({
       const originMs = clientOriginMsRef.current;
       if (originMs !== null) {
         const wallSinceOriginS = (Date.now() - originMs) / 1000;
-        const targetSimTimeS = wallSinceOriginS - INPUT_DELAY_S;
+        const targetSimTimeS = wallSinceOriginS - inputDelaySRef.current;
         const maxAdvance = simTimeSRef.current + MAX_STEP_ACCUM;
         const stepUpTo = Math.min(targetSimTimeS, maxAdvance);
         while (simTimeSRef.current + FIXED_DT <= stepUpTo) {

@@ -16,6 +16,7 @@ import {
   exitRoomLiquidity,
 } from "./lpManager.js";
 import { formatSolanaError } from "../solana/formatError.js";
+import { computeRentSafeWithdrawAmount } from "./lpWithdrawMath.js";
 
 type LpLogger = {
   info: (msg: string) => void;
@@ -78,10 +79,43 @@ export async function deployReadyRoomLp(logger: LpLogger = noopLogger) {
         continue;
       }
 
+      // Rent-safe withdraw amount: withdrawing the full principal can leave the
+      // vault holding non-zero dust below the rent-exempt minimum, which makes
+      // the System transfer CPI fail simulation with "insufficient funds for
+      // rent" — the bug that stranded rooms. See computeRentSafeWithdrawAmount.
+      const connection = program.provider.connection;
+      const vaultBalance = BigInt(await connection.getBalance(roomVaultPda));
+      const rentMin = BigInt(
+        await connection.getMinimumBalanceForRentExemption(0),
+      );
+      const amount = computeRentSafeWithdrawAmount({
+        principal,
+        vaultBalance,
+        rentMin,
+      });
+      if (amount <= 0n) {
+        await Room.updateOne(
+          { roomId: room.roomId },
+          {
+            $set: {
+              "lp.status": "skipped",
+              "lp.lastError": `vault ${vaultBalance} <= rentMin ${rentMin}; nothing to withdraw`,
+            },
+          },
+        );
+        continue;
+      }
+
+      // Crash-recovery: if the withdraw already landed, reuse the on-chain
+      // amount so the Meteora deploy matches what actually arrived.
+      const deployLamports = alreadyOnChain
+        ? BigInt(onChainRoom.lpDeployedLamports.toString())
+        : amount;
+
       let withdrawSig: string | null = null;
       if (!alreadyOnChain) {
         withdrawSig = await program.methods
-          .withdrawToLpManager(new BN(principal.toString()))
+          .withdrawToLpManager(new BN(amount.toString()))
           .accounts({
             room: roomPda,
             config: getProgramConfigPda(),
@@ -91,13 +125,14 @@ export async function deployReadyRoomLp(logger: LpLogger = noopLogger) {
           } as never)
           .rpc();
         logger.info(
-          `room=${room.roomId} withdraw_to_lp_manager ${principal} lamports tx=${withdrawSig}`,
+          `room=${room.roomId} withdraw_to_lp_manager ${amount} lamports ` +
+            `(vault=${vaultBalance}, rentMin=${rentMin}) tx=${withdrawSig}`,
         );
       }
 
       const deploy = await deployRoomLiquidity({
         roomPdaStr: roomPda.toBase58(),
-        lamports: principal,
+        lamports: deployLamports,
       });
       logger.info(
         `room=${room.roomId} lp deploy ok pos=${deploy.positionPubkey} dryRun=${deploy.dryRun}`,

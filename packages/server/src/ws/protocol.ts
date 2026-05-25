@@ -131,6 +131,13 @@ export interface FishHookedMessage {
   castTimestamp: number;
   /** Same seed the server uses, so client visuals match resolution. */
   rngSeed: number;
+  /**
+   * Adaptive lag-comp buffer (ms) the server chose for this cast based on the
+   * socket's measured network jitter. The client MUST step its local physics
+   * to `wallSinceOrigin - inputDelayMs/1000` with this exact value so its
+   * simulation tracks the server's. Falls back to INPUT_DELAY_MS if absent.
+   */
+  inputDelayMs: number;
 }
 
 export interface FishingStateMessage {

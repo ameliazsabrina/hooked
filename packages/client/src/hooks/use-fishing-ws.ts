@@ -107,6 +107,9 @@ type ServerMessage =
       weightHg: number;
       castTimestamp: number;
       rngSeed: number;
+      // Server-chosen adaptive lag-comp buffer for this cast. Optional so an
+      // older server still parses; client falls back to INPUT_DELAY_MS.
+      inputDelayMs?: number;
     }
   | {
       type: "fishing_state";
@@ -220,6 +223,9 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
   );
   const [species, setSpecies] = useState<FishSpecies | null>(null);
   const [castStartedAtMs, setCastStartedAtMs] = useState<number | null>(null);
+  // Adaptive lag-comp buffer the server chose for the active cast; passed to
+  // TimingBar so its local physics steps to the same simTime as the server.
+  const [inputDelayMs, setInputDelayMs] = useState<number | null>(null);
   const [eventStatus, setEventStatus] = useState<{
     active: boolean;
     name: string;
@@ -523,6 +529,7 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
         activeCastIdRef.current = msg.clientCastId;
         if (msg.sessionId) setSessionId(msg.sessionId);
         setCastStartedAtMs(msg.castTimestamp);
+        setInputDelayMs(msg.inputDelayMs ?? null);
         const rarity = mapRarity(msg.rarity);
         const onChainMechanic = getInteractionMechanic(rarity);
         setFishRarity(rarity);
@@ -990,6 +997,7 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
     difficulty,
     species,
     castStartedAtMs,
+    inputDelayMs,
     serverSnapshot,
     reconcileVersion,
     sessionId,

@@ -95,6 +95,24 @@ async function main() {
     process.exit(1);
   }
 
+  // The on-chain instruction requires status == Entry (0). Once the keeper has
+  // run close_room (status → Settling/Closed) the late-deploy recovery path is
+  // permanently gone — funds can only go to depositors/treasury from there.
+  if (room.status !== 0) {
+    const names: Record<number, string> = {
+      1: "Active",
+      2: "Settling (close_room already ran)",
+      3: "Closed (finalized)",
+    };
+    console.error(
+      `Room status is ${room.status} (${names[room.status] ?? "unknown"}), not Entry. ` +
+        `withdraw_to_lp_manager can no longer run. The keeper has already begun ` +
+        `settlement — vault SOL can now only flow to depositors (return_principal) ` +
+        `or treasury (finalize_room).`,
+    );
+    process.exit(1);
+  }
+
   const now = Math.floor(Date.now() / 1000);
   const lpDeployAt = room.lpDeployAt.toNumber();
   const closesAt = room.closesAt.toNumber();
@@ -105,10 +123,15 @@ async function main() {
     process.exit(1);
   }
   if (now >= closesAt) {
-    console.error(
-      `LP window already closed. now=${now} closesAt=${closesAt}. Wait for close_room → return_principal instead.`,
+    // Past the original window. The program now allows this as long as the
+    // room is still in Entry (close_room has NOT run). This is the recovery
+    // path for rooms whose LP automation failed during the window.
+    console.warn(
+      `⚠  LP window already closed (now=${now} closesAt=${closesAt}). ` +
+        `Proceeding via late-deploy recovery path — only valid while the room ` +
+        `is still in Entry status (i.e. close_room has not yet run). If the ` +
+        `keeper has already settled this room, the tx will revert.`,
     );
-    process.exit(1);
   }
   if (!room.lpDeployedLamports.isZero()) {
     console.error(
