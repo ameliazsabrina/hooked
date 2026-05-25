@@ -276,7 +276,18 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
   const sessionStateQuery = trpc.player.sessionState.useQuery(undefined, {
     enabled: !!walletStr && authReady,
     refetchOnWindowFocus: false,
+    // Poll the read-only session state so the Cast button disables itself
+    // shortly after the room stops accepting casts. (Must NOT poll player.me —
+    // that procedure rewrites lastSeenAt/loginStreak on every call.)
+    refetchInterval: 20_000,
   });
+  // Only "active" allows casting; everything past the window blocks it.
+  const sessionWindowState = sessionStateQuery.data?.windowState ?? null;
+  const roomSettling =
+    sessionWindowState === "closing" ||
+    sessionWindowState === "settling" ||
+    sessionWindowState === "closed" ||
+    sessionWindowState === "missing";
   const utils = trpc.useUtils();
   const sellFishMutation = trpc.shop.sellFish.useMutation();
   const sellFishBulkMutation = trpc.shop.sellFishBulk.useMutation();
@@ -692,7 +703,7 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
         // the Cast button disables + the settling notice shows immediately,
         // rather than waiting for the next player.me poll.
         if (msg.code === "window_closed") {
-          void utils.player.me.invalidate();
+          void utils.player.sessionState.invalidate();
         }
         activeCastIdRef.current = null;
         // Reset gate; stale heldRef would drop the next cast's first press.
@@ -1008,6 +1019,7 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
     reconcileVersion,
     sessionId,
     authed,
+    roomSettling,
     eventStatus,
     roomLeaderboard,
     cast,

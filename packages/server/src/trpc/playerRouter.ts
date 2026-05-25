@@ -171,6 +171,7 @@ export const playerRouter = router({
           discoveredApexFish: [],
           date,
           window,
+          windowState: "deposit" as const,
         };
       }
 
@@ -200,6 +201,24 @@ export const playerRouter = router({
       const activeRoom = activeDeposit
         ? await Room.findOne({ roomId: activeDeposit.poolId }).lean()
         : null;
+
+      // Room window state (mirrors player.me) so the client can gate casting
+      // off a read-only, poll-safe query. Only "active" allows casting.
+      let windowState:
+        | "deposit"
+        | "active"
+        | "closing"
+        | "settling"
+        | "closed"
+        | "missing" = "deposit";
+      if (activeDeposit) {
+        if (!activeRoom) windowState = "missing";
+        else if (activeRoom.phase === "closed") windowState = "closed";
+        else if (activeRoom.phase === "settling") windowState = "settling";
+        else if (activeRoom.closesAt.getTime() <= now.getTime())
+          windowState = "closing";
+        else windowState = "active";
+      }
 
       const windowStart = activeRoom
         ? activeRoom.createdAt
@@ -273,6 +292,7 @@ export const playerRouter = router({
         score,
         date,
         window,
+        windowState,
         discoveredSpeciesIds,
         discoveredApexFish,
         catches: inventory.map((c) => ({
