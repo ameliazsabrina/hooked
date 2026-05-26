@@ -190,7 +190,9 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
   const { publicKey } = useWallet();
   const { ready: authReady, retry: sessionRetry } = useSessionAuth();
   const sessionRetryRef = useRef(sessionRetry);
-  useEffect(() => { sessionRetryRef.current = sessionRetry; }, [sessionRetry]);
+  useEffect(() => {
+    sessionRetryRef.current = sessionRetry;
+  }, [sessionRetry]);
 
   const [state, setState] = useState<FishingState>("idle");
   const [bait, setBait] = useState(0);
@@ -271,14 +273,13 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
 
   const walletStr = publicKey?.toBase58() ?? null;
   const walletStrRef = useRef(walletStr);
-  useEffect(() => { walletStrRef.current = walletStr; }, [walletStr]);
+  useEffect(() => {
+    walletStrRef.current = walletStr;
+  }, [walletStr]);
 
   const sessionStateQuery = trpc.player.sessionState.useQuery(undefined, {
     enabled: !!walletStr && authReady,
     refetchOnWindowFocus: false,
-    // Poll the read-only session state so the Cast button disables itself
-    // shortly after the room stops accepting casts. (Must NOT poll player.me —
-    // that procedure rewrites lastSeenAt/loginStreak on every call.)
     refetchInterval: 20_000,
   });
   // Only "active" allows casting; everything past the window blocks it.
@@ -298,7 +299,9 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
     // Hydrate bait once per (wallet, date, window) — same-window reconnects
     // preserve local optimistic decrements; wallet switch or window rotation
     // re-hydrates from on-chain state.
-    const baitKey = walletStr ? `${walletStr}:${data.date}:${data.window}` : null;
+    const baitKey = walletStr
+      ? `${walletStr}:${data.date}:${data.window}`
+      : null;
     if (baitKey && baitHydratedForWalletRef.current !== baitKey) {
       baitHydratedForWalletRef.current = baitKey;
       setBait(data.bait);
@@ -325,9 +328,7 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
     // an unguarded `.map` would throw and unmount GameLayout.
     setDiscoveredSpecies(
       new Set(
-        (data.discoveredSpeciesIds ?? []).map(
-          (id) => getSpeciesData(id).name,
-        ),
+        (data.discoveredSpeciesIds ?? []).map((id) => getSpeciesData(id).name),
       ),
     );
     setDiscoveredApexFish(data.discoveredApexFish ?? []);
@@ -453,8 +454,7 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
       ws.addEventListener("error", () => {
         try {
           ws.close();
-        } catch {
-        }
+        } catch {}
       });
     } catch (err) {
       console.warn("[ws] connect failed:", err);
@@ -478,7 +478,9 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
         setAuthed(false);
         const wallet = walletStrRef.current;
         if (wallet) clearDelegation(wallet);
-        try { wsRef.current?.close(); } catch {}
+        try {
+          wsRef.current?.close();
+        } catch {}
         wsRef.current = null;
         sessionRetryRef.current();
         return;
@@ -487,8 +489,7 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
         // Align hydration key so a subsequent sessionStateQuery can't clobber.
         setBait(msg.bait);
         if (walletStr) {
-          baitHydratedForWalletRef.current =
-            `${walletStr}:${msg.date}:${msg.window}`;
+          baitHydratedForWalletRef.current = `${walletStr}:${msg.date}:${msg.window}`;
         }
         return;
       }
@@ -501,7 +502,9 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
         castAnimTimerRef.current = setTimeout(() => {
           castAnimTimerRef.current = null;
           // Only advance if a server race hasn't already moved us forward.
-          setState((prev) => (prev === "cast_animating" ? "idle_waiting" : prev));
+          setState((prev) =>
+            prev === "cast_animating" ? "idle_waiting" : prev,
+          );
         }, CAST_ANIMATION_MS);
         return;
       }
@@ -518,7 +521,9 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
         // Fallback in case the server's escape message is delayed.
         nibbleWindowTimerRef.current = setTimeout(() => {
           nibbleWindowTimerRef.current = null;
-          setState((prev) => (prev === "nibble_window" ? "idle_waiting" : prev));
+          setState((prev) =>
+            prev === "nibble_window" ? "idle_waiting" : prev,
+          );
         }, NIBBLE_WINDOW_MS + 250);
         return;
       }
@@ -569,7 +574,10 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
         const diffProfile = buildDifficultyProfile(rarity, diffSeed, diffMods);
 
         if (onChainMechanic === "circular_tap") {
-          const taps = diffProfile.kind === "circular" ? diffProfile.tapsRequired : undefined;
+          const taps =
+            diffProfile.kind === "circular"
+              ? diffProfile.tapsRequired
+              : undefined;
           setCircularTapConfig(buildCircularTapConfig(rarity, 0, taps));
         }
         setDifficulty({
@@ -703,7 +711,11 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
         // the Cast button disables + the settling notice shows immediately,
         // rather than waiting for the next player.me poll.
         if (msg.code === "window_closed") {
+          // Refresh both: sessionState (poll-safe, new field) and me (carries
+          // windowState on already-deployed servers). me's streak recompute is
+          // idempotent within a UTC day, so a one-off invalidate here is safe.
           void utils.player.sessionState.invalidate();
+          void utils.player.me.invalidate();
         }
         activeCastIdRef.current = null;
         // Reset gate; stale heldRef would drop the next cast's first press.
@@ -775,8 +787,7 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
       // preventDefault stops mobile double-tap zoom + text selection.
       try {
         ev.preventDefault();
-      } catch {
-      }
+      } catch {}
       const castId = activeCastIdRef.current;
       if (!castId) return;
       const clientTs = Date.now();
@@ -811,10 +822,13 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
     };
   }, [state, sessionId, gameRef]);
 
-  const startSession = useCallback(async (_window: "day" | "night" = "day") => {
-    void _window;
-    if (publicKey) setSessionId((prev) => prev ?? publicKey.toBase58());
-  }, [publicKey]);
+  const startSession = useCallback(
+    async (_window: "day" | "night" = "day") => {
+      void _window;
+      if (publicKey) setSessionId((prev) => prev ?? publicKey.toBase58());
+    },
+    [publicKey],
+  );
 
   const cast = useCallback(async () => {
     if (state !== "idle" || bait <= 0 || !authedRef.current) return;

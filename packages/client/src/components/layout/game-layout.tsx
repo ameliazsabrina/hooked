@@ -66,6 +66,15 @@ export function GameLayout({ nickname, ready }: GameLayoutProps) {
   const playerQuery = trpc.player.me.useQuery(undefined, {
     enabled: connected && authReady,
   });
+  const meWindowState =
+    playerQuery.data?.exists && "windowState" in playerQuery.data
+      ? playerQuery.data.windowState
+      : null;
+  const meRoomSettling =
+    meWindowState === "closing" ||
+    meWindowState === "settling" ||
+    meWindowState === "closed" ||
+    meWindowState === "missing";
   const streak = playerQuery.data?.exists ? playerQuery.data.loginStreak : 0;
   const rodTier = playerQuery.data?.exists
     ? (playerQuery.data.equipment?.rodTier ?? 0)
@@ -132,12 +141,16 @@ export function GameLayout({ nickname, ready }: GameLayoutProps) {
 
   const fishing = useFishingWs(gameRef);
 
+  // Settling from either source: me.windowState (already deployed, no poll) or
+  // the poll-safe sessionState.windowState exposed by the fishing hook.
+  const roomSettling = meRoomSettling || fishing.roomSettling;
+
   const castDisabled =
     fishing.state !== "idle" ||
     fishing.bait <= 0 ||
     !fishing.sessionId ||
     !fishing.authed ||
-    fishing.roomSettling;
+    roomSettling;
 
   useEffect(() => {
     if (ready && !fishing.sessionId) {
@@ -272,7 +285,9 @@ export function GameLayout({ nickname, ready }: GameLayoutProps) {
               onClick={fishing.cast}
               disabled={castDisabled}
               style={
-                castDisabled ? { opacity: 0.5, cursor: "not-allowed" } : undefined
+                castDisabled
+                  ? { opacity: 0.5, cursor: "not-allowed" }
+                  : undefined
               }
             >
               Cast
@@ -287,7 +302,7 @@ export function GameLayout({ nickname, ready }: GameLayoutProps) {
             </button>
           </div>
 
-          {fishing.roomSettling && (
+          {roomSettling && (
             <div
               className="cast-settling-notice"
               role="status"
