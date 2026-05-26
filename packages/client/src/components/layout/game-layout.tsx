@@ -308,7 +308,7 @@ export function GameLayout({ nickname, ready }: GameLayoutProps) {
               role="status"
               aria-live="polite"
             >
-              This round is settling up — casting paused for now.
+              This round is settling up. Casting paused for now.
             </div>
           )}
 
