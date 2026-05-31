@@ -64,7 +64,7 @@ const playerSchema = new Schema(
     lastSeenAt: { type: Date, default: null },
     ipCountry: { type: String, default: null },
   },
-  { timestamps: true }
+  { timestamps: true },
 );
 
 const catchSchema = new Schema(
@@ -114,7 +114,7 @@ const catchSchema = new Schema(
     soldPrice: { type: Number, default: null },
     caughtAt: { type: Date, required: true, default: Date.now },
   },
-  { timestamps: true }
+  { timestamps: true },
 );
 
 catchSchema.index({ playerId: 1, caughtAt: -1 });
@@ -159,7 +159,7 @@ const poolTierSchema = new Schema(
       default: [],
     },
   },
-  { timestamps: true }
+  { timestamps: true },
 );
 poolTierSchema.index({ tier: 1, activeMonth: 1 }, { unique: true });
 
@@ -179,7 +179,7 @@ const leaderboardEntrySchema = new Schema(
       default: null,
     },
   },
-  { _id: false }
+  { _id: false },
 );
 
 const finalRankSchema = new Schema(
@@ -189,7 +189,7 @@ const finalRankSchema = new Schema(
     displayName: { type: String, required: true },
     prizeSOL: { type: Number, required: true },
   },
-  { _id: false }
+  { _id: false },
 );
 
 const dailyLeaderboardSchema = new Schema(
@@ -201,7 +201,7 @@ const dailyLeaderboardSchema = new Schema(
     distributed: { type: Boolean, required: true, default: false },
     finalRanks: { type: [finalRankSchema], default: null },
   },
-  { timestamps: true }
+  { timestamps: true },
 );
 dailyLeaderboardSchema.index({ date: 1, tier: 1 }, { unique: true });
 
@@ -215,7 +215,7 @@ const roomPlayerSchema = new Schema(
     returnTxSignature: { type: String, default: null },
     returnedAt: { type: Date, default: null },
   },
-  { _id: false }
+  { _id: false },
 );
 
 const roomWinnerSchema = new Schema(
@@ -225,7 +225,7 @@ const roomWinnerSchema = new Schema(
     displayName: { type: String, required: true },
     prizeSol: { type: Number, required: true },
   },
-  { _id: false }
+  { _id: false },
 );
 
 const roomSchema = new Schema(
@@ -270,6 +270,7 @@ const roomSchema = new Schema(
           default: "pending",
         },
         deployAttempts: { type: Number, default: 0 },
+        exitAttempts: { type: Number, default: 0 },
         positionPubkey: { type: String, default: null },
         deployedLamports: { type: Number, default: null },
         deployedAt: { type: Date, default: null },
@@ -316,7 +317,7 @@ const roomSchema = new Schema(
     scoreBridgeGapAt: { type: Date, default: null },
     scoreBridgeGapPushed: { type: Number, default: 0 },
   },
-  { timestamps: true }
+  { timestamps: true },
 );
 roomSchema.index({ phase: 1, closesAt: 1 });
 
@@ -354,12 +355,12 @@ const adminAuditLogSchema = new Schema(
     errorMessage: { type: String, default: null },
     ipAddress: { type: String, default: null },
   },
-  { timestamps: false }
+  { timestamps: false },
 );
 adminAuditLogSchema.index({ adminWallet: 1, timestamp: -1 });
 adminAuditLogSchema.index(
   { timestamp: 1 },
-  { expireAfterSeconds: 90 * 24 * 60 * 60 }
+  { expireAfterSeconds: 90 * 24 * 60 * 60 },
 );
 
 const bountyRewardSchema = new Schema(
@@ -368,7 +369,7 @@ const bountyRewardSchema = new Schema(
     amount: { type: Number, default: null },
     lamports: { type: Number, default: null },
   },
-  { _id: false }
+  { _id: false },
 );
 
 const bountySlotSchema = new Schema(
@@ -390,7 +391,7 @@ const bountySlotSchema = new Schema(
     target: { type: Number, required: true },
     reward: { type: bountyRewardSchema, required: true },
   },
-  { _id: false }
+  { _id: false },
 );
 
 const bountyPeriodSchema = new Schema(
@@ -400,7 +401,7 @@ const bountyPeriodSchema = new Schema(
     endsAt: { type: Date, required: true },
     slots: { type: [bountySlotSchema], default: [] },
   },
-  { timestamps: true }
+  { timestamps: true },
 );
 bountyPeriodSchema.index({ cadence: 1, startsAt: 1 }, { unique: true });
 bountyPeriodSchema.index({ cadence: 1, endsAt: 1 });
@@ -433,11 +434,11 @@ const playerBountyProgressSchema = new Schema(
     },
     rewardTxSignature: { type: String, default: null },
   },
-  { timestamps: true }
+  { timestamps: true },
 );
 playerBountyProgressSchema.index(
   { playerId: 1, periodId: 1, slot: 1 },
-  { unique: true }
+  { unique: true },
 );
 
 // Weights stored in kg (admin UX); converted to hectograms (×10) when
@@ -495,7 +496,13 @@ const fishingEventFinalRankSchema = new Schema(
 
 const fishingEventSchema = new Schema(
   {
-    name: { type: String, required: true, trim: true, minlength: 1, maxlength: 64 },
+    name: {
+      type: String,
+      required: true,
+      trim: true,
+      minlength: 1,
+      maxlength: 64,
+    },
     active: { type: Boolean, required: true, default: false },
     startsAt: { type: Date, required: true },
     endsAt: { type: Date, required: true },
@@ -589,8 +596,6 @@ const fishingSessionSchema = new Schema(
     castCount: { type: Number, required: true, default: 0, min: 0 },
     catchCount: { type: Number, required: true, default: 0, min: 0 },
     pityCounter: { type: Number, required: true, default: 0, min: 0 },
-
-    // "active" → "committed" on commitSession; "abandoned" via keeper sweep.
     status: {
       type: String,
       enum: ["active", "committed", "abandoned"],
@@ -608,9 +613,6 @@ const fishingSessionSchema = new Schema(
 
     chainScoreTxSignature: { type: String, default: null },
     chainScoreBridgedAt: { type: Date, default: null },
-
-    // Snapshot at session-start so admins can't retroactively change Apex
-    // availability for an already-rolled session.
     eventActiveAtStart: { type: Boolean, required: true, default: false },
     eventNameAtStart: { type: String, default: null },
     eventApexBpAtStart: { type: Number, required: true, default: 0 },
@@ -633,19 +635,12 @@ const fishingSessionSchema = new Schema(
   { timestamps: true },
 );
 
-// One ACTIVE session per (player, dateKey, window). Committed/abandoned
-// can coexist — preserves audit trail when a new room deposit abandons
-// the prior session mid-window.
 fishingSessionSchema.index(
   { playerId: 1, dateKey: 1, window: 1 },
   { unique: true, partialFilterExpression: { status: "active" } },
 );
 fishingSessionSchema.index({ status: 1, dateKey: 1 });
 fishingSessionSchema.index({ walletAddress: 1, dateKey: -1 });
-
-// Stored in Mongo (not Redis): Redis is the most likely failure mode
-// (BullMQ scheduler key lost on flush). Putting the heartbeat in Redis
-// would let an outage mask the very symptom we're detecting.
 const keeperHeartbeatSchema = new Schema(
   {
     keeperName: { type: String, required: true, unique: true, index: true },
@@ -656,7 +651,6 @@ const keeperHeartbeatSchema = new Schema(
       required: true,
     },
     lastError: { type: String, default: null },
-    /** Surfaces "keeper running but every tick fails" vs "keeper not ticking". */
     consecutiveErrors: { type: Number, required: true, default: 0 },
   },
   { timestamps: true },
@@ -664,18 +658,28 @@ const keeperHeartbeatSchema = new Schema(
 
 export type PlayerDocument = InferSchemaType<typeof playerSchema>;
 export type CatchDocument = InferSchemaType<typeof catchSchema>;
-export type FishingSessionDocument = InferSchemaType<typeof fishingSessionSchema>;
-export type FishingDailySeedDocument = InferSchemaType<typeof fishingDailySeedSchema>;
+export type FishingSessionDocument = InferSchemaType<
+  typeof fishingSessionSchema
+>;
+export type FishingDailySeedDocument = InferSchemaType<
+  typeof fishingDailySeedSchema
+>;
 export type FishingEventDocument = InferSchemaType<typeof fishingEventSchema>;
-export type FishingEventFinalRank = InferSchemaType<typeof fishingEventFinalRankSchema>;
+export type FishingEventFinalRank = InferSchemaType<
+  typeof fishingEventFinalRankSchema
+>;
 export type ApexFishDocument = InferSchemaType<typeof apexFishSchema>;
 export type ReactionLogDocument = InferSchemaType<typeof reactionLogSchema>;
 export type PoolTierDocument = InferSchemaType<typeof poolTierSchema>;
-export type DailyLeaderboardDocument = InferSchemaType<typeof dailyLeaderboardSchema>;
+export type DailyLeaderboardDocument = InferSchemaType<
+  typeof dailyLeaderboardSchema
+>;
 export type RoomDocument = InferSchemaType<typeof roomSchema>;
 export type AdminAuditLogDocument = InferSchemaType<typeof adminAuditLogSchema>;
 export type BountyPeriodDocument = InferSchemaType<typeof bountyPeriodSchema>;
-export type PlayerBountyProgressDocument = InferSchemaType<typeof playerBountyProgressSchema>;
+export type PlayerBountyProgressDocument = InferSchemaType<
+  typeof playerBountyProgressSchema
+>;
 
 export const APEX_IMAGE_MIME_TYPES_LIST = APEX_IMAGE_MIME_TYPES;
 export type ApexImageMimeType = (typeof APEX_IMAGE_MIME_TYPES)[number];
@@ -694,7 +698,10 @@ function model<S extends mongoose.Schema>(
 export const Player = model("Player", playerSchema);
 export const Catch = model("Catch", catchSchema);
 export const FishingSession = model("FishingSession", fishingSessionSchema);
-export const FishingDailySeed = model("FishingDailySeed", fishingDailySeedSchema);
+export const FishingDailySeed = model(
+  "FishingDailySeed",
+  fishingDailySeedSchema,
+);
 export const FishingEvent = model("FishingEvent", fishingEventSchema);
 export const ApexFish = model("ApexFish", apexFishSchema);
 export const ReactionLog = model("ReactionLog", reactionLogSchema);
@@ -710,10 +717,7 @@ export const PlayerBountyProgress = model(
   "PlayerBountyProgress",
   playerBountyProgressSchema,
 );
-export const KeeperHeartbeat = model(
-  "KeeperHeartbeat",
-  keeperHeartbeatSchema,
-);
+export const KeeperHeartbeat = model("KeeperHeartbeat", keeperHeartbeatSchema);
 export type KeeperHeartbeatDocument = InferSchemaType<
   typeof keeperHeartbeatSchema
 >;

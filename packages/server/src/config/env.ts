@@ -51,20 +51,9 @@ const envSchema = z.object({
     .string()
     .default("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"),
   JUPITER_API_URL: z.string().default("https://api.jup.ag/swap/v2"),
-  // Jupiter Portal API key. Sent as `x-api-key`. Absent → falls back to the
-  // 0.5 RPS keyless tier, which will throttle LP rebalance loops in prod.
   JUPITER_API_KEY: z.string().optional(),
-  // Comma-separated DEX labels to exclude from Jupiter routes (matches the
-  // `excludeDexes` /build query param). Use to dodge AMMs that have been
-  // unreliable on a given network or that misbehave on surfpool forks.
-  // Example: "TaurusFi,SomeNewAMM". Empty → no exclusions.
   JUPITER_EXCLUDE_DEXES: z.string().default(""),
-  // Comma-separated DEX labels to *restrict* Jupiter routes to (matches
-  // the `dexes` /build query param). When set, Jupiter routes ONLY through
-  // these AMMs. Useful on surfpool forks to avoid oracle-priced AMMs whose
-  // spread guards reject stale-cloned state. Empty → no restriction.
   JUPITER_DEXES: z.string().default(""),
-  // Minimum LP_MANAGER buffer (lamports) before deploy is allowed.
   IL_BUFFER_LAMPORTS_MIN: z.coerce
     .number()
     .int()
@@ -103,6 +92,12 @@ const envSchema = z.object({
   // Max LP deploy attempts per room before a transient failure is escalated to
   // "failed_permanent" (alert, no further auto-retry).
   LP_MAX_DEPLOY_ATTEMPTS: z.coerce.number().int().min(1).default(3),
+  // Max LP exit attempts per room before a transient failure is escalated to
+  // "failed_permanent" (alert, no further auto-retry). Mirrors the deploy cap.
+  // Without this, a single failed exit used to strand the room forever — the
+  // bug that froze ~20 rooms in 'settling' (vault drained, on-chain entries
+  // never marked returned, keeper retrying the precondition every tick).
+  LP_MAX_EXIT_ATTEMPTS: z.coerce.number().int().min(1).default(5),
   LP_EXIT_HOURS_BEFORE_CLOSE: z.coerce.number().nonnegative().default(12),
   // Meteora `StrategyType`: "Spot" | "Curve" | "BidAsk". SDK rejects unknown.
   LP_STRATEGY_TYPE: z.string().default("Spot"),

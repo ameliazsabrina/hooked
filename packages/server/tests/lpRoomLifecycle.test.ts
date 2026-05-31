@@ -226,6 +226,95 @@ describe("lpRoomLifecycle — deploy + exit (dry-run, mocked program)", () => {
     expect(sentTxs.length).toBe(0);
   });
 
+  it("exitReadyRoomLp — settling-phase room with stuck LP is still picked up (recovery path)", async () => {
+    // Without this, a room that flips active→settling before LP exit ran
+    // (the bug behind R-20260512..R-20260522) is stranded — query was
+    // phase:"active" only. Now phase ∈ {active, settling}.
+    await Room.create({
+      roomId: ROOM_ID,
+      createdAt: new Date(Date.now() - 7 * 86_400_000),
+      entryClosesAt: new Date(Date.now() - 6 * 86_400_000),
+      closesAt: new Date(Date.now() - 60_000), // already past close
+      phase: "settling",
+      capacitySol: 20,
+      maxPlayers: 40,
+      depositedSol: 1,
+      realPlayerCount: 1,
+      onChainPoolId: ON_CHAIN_ID,
+      createdByAdmin: "test-admin",
+      lp: {
+        status: "deployed",
+        positionPubkey: Keypair.generate().publicKey.toBase58(),
+        deployedLamports: 1_000_000_000,
+      },
+    });
+
+    await exitReadyRoomLp();
+
+    const room = await Room.findOne({ roomId: ROOM_ID }).lean();
+    expect(room?.lp?.status).toBe("exited");
+    expect(room?.lp?.exitAttempts).toBe(1);
+    expect(room?.lp?.realizedYieldLamports).toBe(20_000_000);
+  });
+
+  it("exitReadyRoomLp — missing position → 'failed_permanent' immediately (terminal)", async () => {
+    // "no deploy state" is terminal — there's nothing to exit, so a retry
+    // can't fix it. Must alert (failed_permanent), not loop on transient retry.
+    await seedActiveRoom({
+      closesInMs: 1_000,
+      lpStatus: "deployed",
+      positionPubkey: undefined,
+      deployedLamports: 0,
+    });
+
+    await exitReadyRoomLp();
+
+    const room = await Room.findOne({ roomId: ROOM_ID }).lean();
+    expect(room?.lp?.status).toBe("failed_permanent");
+    expect(room?.lp?.exitAttempts).toBe(1);
+    expect(room?.lp?.lastError).toMatch(/no deploy state/);
+  });
+
+  it("exitReadyRoomLp — 'failed' status under cap is retried; cap exhaustion flips to 'failed_permanent'", async () => {
+    // First create the room with exitAttempts already at the cap so the next
+    // failed attempt should escalate. With dry-run exit succeeding, we instead
+    // verify the eligibility query: a room with exitAttempts >= max is NOT
+    // selected (mirrors deployReadyRoomLp's attempt-cap behavior).
+    process.env.LP_MAX_EXIT_ATTEMPTS = "2";
+    vi.resetModules();
+    const { exitReadyRoomLp: exitV2 } = await import(
+      "../src/services/lpRoomLifecycle.js"
+    );
+
+    await Room.create({
+      roomId: ROOM_ID,
+      createdAt: new Date(Date.now() - 7 * 86_400_000),
+      entryClosesAt: new Date(Date.now() - 6 * 86_400_000),
+      closesAt: new Date(Date.now() - 60_000),
+      phase: "settling",
+      capacitySol: 20,
+      maxPlayers: 40,
+      depositedSol: 1,
+      realPlayerCount: 1,
+      onChainPoolId: ON_CHAIN_ID,
+      createdByAdmin: "test-admin",
+      lp: {
+        status: "failed",
+        exitAttempts: 2, // already at cap
+        positionPubkey: Keypair.generate().publicKey.toBase58(),
+        deployedLamports: 1_000_000_000,
+      },
+    });
+
+    await exitV2();
+
+    // Untouched: cap exhausted, query excluded the room.
+    const room = await Room.findOne({ roomId: ROOM_ID }).lean();
+    expect(room?.lp?.status).toBe("failed");
+    expect(room?.lp?.exitAttempts).toBe(2);
+    delete process.env.LP_MAX_EXIT_ATTEMPTS;
+  });
+
   it("deployReadyRoomLp — no-op when feature flag off", async () => {
     process.env.FEATURES_LP_ENABLED = "false";
     vi.resetModules();

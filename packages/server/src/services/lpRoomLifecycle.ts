@@ -202,17 +202,22 @@ export async function deployReadyRoomLp(logger: LpLogger = noopLogger) {
   }
 }
 
-/** settleRoom reads realizedYieldLamports when it runs close_room. */
 export async function exitReadyRoomLp(logger: LpLogger = noopLogger) {
   if (!env.FEATURES_LP_ENABLED) return;
 
+  const maxAttempts = env.LP_MAX_EXIT_ATTEMPTS;
   const exitWindow = new Date(
     Date.now() + env.LP_EXIT_HOURS_BEFORE_CLOSE * 60 * 60 * 1000,
   );
   const rooms = await Room.find({
-    phase: "active",
+    // settling rooms with stuck LP must stay eligible; the active→settling
+    // flip happens earlier in the same lifecycle tick.
+    phase: { $in: ["active", "settling"] },
     onChainPoolId: { $ne: null },
-    "lp.status": "deployed",
+    // "deployed" = first attempt; "failed" = transient retry under cap.
+    // "failed_permanent" is never re-selected — needs a human.
+    "lp.status": { $in: ["deployed", "failed"] },
+    "lp.exitAttempts": { $lt: maxAttempts },
     closesAt: { $lte: exitWindow },
   }).lean();
   if (rooms.length === 0) return;
@@ -226,6 +231,13 @@ export async function exitReadyRoomLp(logger: LpLogger = noopLogger) {
   }
 
   for (const room of rooms) {
+    // Count the attempt up-front and persist it, so a crash mid-exit still
+    // advances toward the cap instead of retrying forever.
+    const attempts = (room.lp?.exitAttempts ?? 0) + 1;
+    await Room.updateOne(
+      { roomId: room.roomId },
+      { $set: { "lp.exitAttempts": attempts } },
+    );
     try {
       const onChainRoomId = BigInt(room.onChainPoolId!);
       const roomPda = getRoomPda(onChainRoomId);
@@ -233,9 +245,18 @@ export async function exitReadyRoomLp(logger: LpLogger = noopLogger) {
       const positionPubkeyStr = room.lp?.positionPubkey;
       const deployedLamports = BigInt(room.lp?.deployedLamports ?? 0);
       if (!positionPubkeyStr || deployedLamports === 0n) {
+        // No deploy state to exit from — terminal, not a transient retry.
         await Room.updateOne(
           { roomId: room.roomId },
-          { $set: { "lp.status": "skipped", "lp.lastError": "no deploy state" } },
+          {
+            $set: {
+              "lp.status": "failed_permanent",
+              "lp.lastError": "no deploy state",
+            },
+          },
+        );
+        logger.error(
+          `ALERT lpExit room=${room.roomId} PERMANENTLY failed: no deploy state`,
         );
         continue;
       }
@@ -278,12 +299,27 @@ export async function exitReadyRoomLp(logger: LpLogger = noopLogger) {
       );
     } catch (err) {
       const detailed = formatSolanaError(err);
-      logger.error(`lpExit room=${room.roomId} failed: ${detailed}`);
+      const status = nextStatusOnFailure({
+        message: detailed,
+        attempts,
+        maxAttempts,
+      });
+      if (status === "failed_permanent") {
+        logger.error(
+          `ALERT lpExit room=${room.roomId} PERMANENTLY failed after ` +
+            `${attempts} attempt(s): ${detailed}`,
+        );
+      } else {
+        logger.error(
+          `lpExit room=${room.roomId} attempt ${attempts}/${maxAttempts} ` +
+            `failed (will retry next tick): ${detailed}`,
+        );
+      }
       await Room.updateOne(
         { roomId: room.roomId },
         {
           $set: {
-            "lp.status": "failed",
+            "lp.status": status,
             "lp.lastError": detailed.slice(0, 4000),
           },
         },
