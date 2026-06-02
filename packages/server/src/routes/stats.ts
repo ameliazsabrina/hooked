@@ -6,10 +6,9 @@ export default async function statsRoutes(fastify: FastifyInstance) {
     const [roomsOpened, depositedAgg, castsAgg] = await Promise.all([
       // Every room ever created, across all phases.
       Room.countDocuments({}),
-      // SOL currently deposited — sum of player deposits not yet returned.
+      // All SOL ever deposited — sum of every player deposit, across all rooms.
       Room.aggregate<{ _id: null; total: number }>([
         { $unwind: "$players" },
-        { $match: { "players.returned": false } },
         { $group: { _id: null, total: { $sum: "$players.deposit" } } },
       ]),
       // Total casts attempted across every fishing session.
