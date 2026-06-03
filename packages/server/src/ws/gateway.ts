@@ -108,8 +108,15 @@ import {
 type MinimalWebSocket = {
   readyState: number;
   OPEN: number;
+  bufferedAmount: number;
   send: (data: string) => void;
-  on: (event: "message" | "close", handler: (data: Buffer) => void) => void;
+  ping: () => void;
+  close: (code?: number, reason?: string) => void;
+  terminate: () => void;
+  on: (
+    event: "message" | "close" | "pong",
+    handler: (data: Buffer) => void,
+  ) => void;
 };
 
 interface SessionContext {
@@ -205,6 +212,11 @@ function clearCastTimers(ctx: SessionContext): void {
 const TIMING_BAR_MECHANIC = 0;
 const CIRCULAR_TAP_MECHANIC = 1;
 
+interface RateBucket {
+  tokens: number;
+  last: number;
+}
+
 interface Socket {
   id: string;
   raw: MinimalWebSocket;
@@ -219,6 +231,10 @@ interface Socket {
   // spike raises the buffer then relaxes.
   netMinOffsetMs: number | null;
   netJitterMs: number;
+  // Heartbeat: consecutive 25s ticks without a pong; terminate at 2.
+  missedPongs: number;
+  // Per-event-class token buckets for inbound rate limiting.
+  rate: { gameplay: RateBucket; ticks: RateBucket; control: RateBucket };
 }
 
 // Decay applied to the per-socket jitter max on every observed sample so the
@@ -314,11 +330,94 @@ function verifySessionKeyNonce(
   }
 }
 
+// Backpressure: a client that isn't draining gets closed; before that, shed
+// non-essential frames so gameplay frames still land.
+const SEND_DROP_WATERMARK = 256 * 1024;
+const SEND_CLOSE_WATERMARK = 1024 * 1024;
+
+// Frames whose loss would corrupt gameplay/auth state — never shed these.
+const ESSENTIAL_FRAMES: ReadonlySet<ServerMessage["type"]> = new Set([
+  "authenticated",
+  "auth_failed",
+  "error",
+  "cast_accepted",
+  "nibble_event",
+  "fish_hooked",
+  "fish_escaped",
+  "catch_resolved",
+  "bait_refilled",
+  "desync_correction",
+  "pong",
+]);
+
 function safeSend(socket: Socket, msg: ServerMessage): void {
-  if (socket.raw.readyState === socket.raw.OPEN) {
-    socket.raw.send(JSON.stringify(msg));
+  if (socket.raw.readyState !== socket.raw.OPEN) return;
+  const buffered = socket.raw.bufferedAmount ?? 0;
+  if (buffered > SEND_CLOSE_WATERMARK) {
+    // Client isn't draining — drop it and let it reconnect.
+    try {
+      socket.raw.terminate();
+    } catch {
+      // already gone
+    }
+    return;
+  }
+  if (buffered > SEND_DROP_WATERMARK && !ESSENTIAL_FRAMES.has(msg.type)) return;
+  socket.raw.send(JSON.stringify(msg));
+}
+
+// Per-wallet inbound rate limits by event class (token bucket: rate/s, burst).
+const RATE_LIMITS = {
+  gameplay: { rate: 10, burst: 20 },
+  ticks: { rate: 60, burst: 90 },
+  control: { rate: 5, burst: 10 },
+} as const;
+
+type RateClass = keyof typeof RATE_LIMITS;
+
+function rateClassFor(type: ClientMessage["type"]): RateClass {
+  switch (type) {
+    case "input_samples":
+      return "ticks";
+    case "ping":
+    case "authenticate":
+      return "control";
+    default:
+      return "gameplay";
   }
 }
+
+// Returns false when the bucket is empty (caller drops the message).
+function takeToken(bucket: RateBucket, limit: { rate: number; burst: number }): boolean {
+  const now = Date.now();
+  const elapsedS = (now - bucket.last) / 1000;
+  bucket.tokens = Math.min(limit.burst, bucket.tokens + elapsedS * limit.rate);
+  bucket.last = now;
+  if (bucket.tokens >= 1) {
+    bucket.tokens -= 1;
+    return true;
+  }
+  return false;
+}
+
+function allowMessage(socket: Socket, type: ClientMessage["type"]): boolean {
+  const cls = rateClassFor(type);
+  return takeToken(socket.rate[cls], RATE_LIMITS[cls]);
+}
+
+function freshRateState(): Socket["rate"] {
+  const now = Date.now();
+  return {
+    gameplay: { tokens: RATE_LIMITS.gameplay.burst, last: now },
+    ticks: { tokens: RATE_LIMITS.ticks.burst, last: now },
+    control: { tokens: RATE_LIMITS.control.burst, last: now },
+  };
+}
+
+const HEARTBEAT_INTERVAL_MS = 25_000;
+const MAX_MISSED_PONGS = 2;
+const AUTH_TIMEOUT_MS = 10_000;
+const MAX_SOCKETS_PER_WALLET = 3;
 
 // Replay the terminal outcome of an already-seen cast: resolved/escaped resend
 // the cached frame, in-flight drops silently. Returns true if handled.
@@ -340,6 +439,22 @@ function addWalletSocket(wallet: string, id: string): void {
     socketsByWallet.set(wallet, set);
   }
   set.add(id);
+  // Close oldest beyond the cap. Insertion order = age; never close the new one.
+  let excess = set.size - MAX_SOCKETS_PER_WALLET;
+  if (excess <= 0) return;
+  for (const oldId of set) {
+    if (oldId === id) continue;
+    const old = sockets.get(oldId);
+    if (old) {
+      try {
+        old.raw.close(4002, "connection cap exceeded");
+      } catch {
+        // already gone
+      }
+    }
+    set.delete(oldId);
+    if (--excess <= 0) break;
+  }
 }
 
 function removeWalletSocket(wallet: string, id: string): void {
@@ -896,8 +1011,42 @@ export default fp(async (fastify) => {
         send: (m) => safeSend({ ...socket, raw }, m),
         netMinOffsetMs: null,
         netJitterMs: 0,
+        missedPongs: 0,
+        rate: freshRateState(),
       };
       sockets.set(socketId, socket);
+
+      // Built-in ping frames; terminate after MAX_MISSED_PONGS silent ticks.
+      raw.on("pong", () => {
+        socket.missedPongs = 0;
+      });
+      const heartbeatTimer = setInterval(() => {
+        if (socket.missedPongs >= MAX_MISSED_PONGS) {
+          try {
+            raw.terminate();
+          } catch {
+            // already gone
+          }
+          return;
+        }
+        socket.missedPongs += 1;
+        try {
+          raw.ping();
+        } catch {
+          // already gone
+        }
+      }, HEARTBEAT_INTERVAL_MS);
+
+      // Close sockets that connect but never authenticate.
+      const authTimer = setTimeout(() => {
+        if (!socket.wallet) {
+          try {
+            raw.close(4001, "auth timeout");
+          } catch {
+            // already gone
+          }
+        }
+      }, AUTH_TIMEOUT_MS);
 
       const physicsTimer = setInterval(() => {
         const ctx = socket.session;
@@ -963,6 +1112,9 @@ export default fp(async (fastify) => {
         }
         const msg = validated.data as ClientMessage;
 
+        // Over-budget messages are dropped silently to avoid reply amplification.
+        if (!allowMessage(socket, msg.type)) return;
+
         switch (msg.type) {
           case "authenticate": {
             // TODO: drop diagnostic log once auth path is stable.
@@ -1001,6 +1153,7 @@ export default fp(async (fastify) => {
               authFail("invalid wallet pubkey");
               return;
             }
+            clearTimeout(authTimer);
             addWalletSocket(msg.wallet, socketId);
             safeSend(socket, {
               type: "authenticated",
@@ -1485,6 +1638,8 @@ export default fp(async (fastify) => {
 
       raw.on("close", () => {
         clearInterval(physicsTimer);
+        clearInterval(heartbeatTimer);
+        clearTimeout(authTimer);
         const ctx = socket.session;
         if (ctx?.activeCastId) {
           clearCastTimers(ctx);
