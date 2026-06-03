@@ -41,11 +41,12 @@ describe("WebSocket — resolution replay & reconnect recovery", () => {
   let wsUrl: string;
 
   beforeAll(async () => {
+    // Cold MongoMemoryServer download/start can exceed the default 10s hook cap.
     await startTestMongo();
     server = await buildTestServer({ redis: makeRedis() });
     httpBase = await server.listen({ port: 0, host: "127.0.0.1" });
     wsUrl = httpBase.replace(/^http/, "ws") + "/ws/gateway";
-  });
+  }, 60000);
 
   afterAll(async () => {
     if (server) await server.close();
