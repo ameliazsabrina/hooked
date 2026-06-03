@@ -388,7 +388,10 @@ function rateClassFor(type: ClientMessage["type"]): RateClass {
 }
 
 // Returns false when the bucket is empty (caller drops the message).
-function takeToken(bucket: RateBucket, limit: { rate: number; burst: number }): boolean {
+function takeToken(
+  bucket: RateBucket,
+  limit: { rate: number; burst: number },
+): boolean {
   const now = Date.now();
   const elapsedS = (now - bucket.last) / 1000;
   bucket.tokens = Math.min(limit.burst, bucket.tokens + elapsedS * limit.rate);
@@ -414,13 +417,16 @@ function freshRateState(): Socket["rate"] {
   };
 }
 
-const HEARTBEAT_INTERVAL_MS = 25_000;
 const MAX_MISSED_PONGS = 2;
-const AUTH_TIMEOUT_MS = 10_000;
 const MAX_SOCKETS_PER_WALLET = 3;
 
-// Replay the terminal outcome of an already-seen cast: resolved/escaped resend
-// the cached frame, in-flight drops silently. Returns true if handled.
+function heartbeatIntervalMs(): number {
+  return Number(process.env.WS_HEARTBEAT_MS) || 25_000;
+}
+function authTimeoutMs(): number {
+  return Number(process.env.WS_AUTH_TIMEOUT_MS) || 10_000;
+}
+
 function replayTerminal(socket: Socket, clientCastId: string): boolean {
   const wallet = socket.wallet?.toBase58();
   if (!wallet) return false;
@@ -1035,7 +1041,7 @@ export default fp(async (fastify) => {
         } catch {
           // already gone
         }
-      }, HEARTBEAT_INTERVAL_MS);
+      }, heartbeatIntervalMs());
 
       // Close sockets that connect but never authenticate.
       const authTimer = setTimeout(() => {
@@ -1046,7 +1052,7 @@ export default fp(async (fastify) => {
             // already gone
           }
         }
-      }, AUTH_TIMEOUT_MS);
+      }, authTimeoutMs());
 
       const physicsTimer = setInterval(() => {
         const ctx = socket.session;
@@ -1403,8 +1409,7 @@ export default fp(async (fastify) => {
                 // the Cast button + show the settling notice, rather than
                 // treating it like a generic failure.
                 const code =
-                  err instanceof CastEngineError &&
-                  err.code === "WINDOW_CLOSED"
+                  err instanceof CastEngineError && err.code === "WINDOW_CLOSED"
                     ? "window_closed"
                     : "cast_failed";
                 safeSend(socket, {
