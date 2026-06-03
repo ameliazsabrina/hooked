@@ -27,8 +27,8 @@ describe("WebSocket — heartbeat & auth timeout", () => {
   }
 
   it("closes an unauthenticated socket after the auth timeout (4001)", async () => {
-    // Tiny auth timeout; keep heartbeat long so it doesn't interfere.
-    process.env.WS_AUTH_TIMEOUT_MS = "60";
+    // Floored auth timeout; keep heartbeat long so it doesn't interfere.
+    process.env.WS_AUTH_TIMEOUT_MS = "1000";
     process.env.WS_HEARTBEAT_MS = "100000";
 
     const ws = new WebSocket(wsUrl);
@@ -36,15 +36,15 @@ describe("WebSocket — heartbeat & auth timeout", () => {
     const code = await Promise.race([
       waitForClose(ws),
       new Promise<number>((_, rej) =>
-        setTimeout(() => rej(new Error("no close within 1s")), 1000),
+        setTimeout(() => rej(new Error("no close within 3s")), 3000),
       ),
     ]);
     expect(code).toBe(4001);
-  });
+  }, 8000);
 
   it("terminates a socket that stops answering pings", async () => {
-    // Tiny heartbeat; keep auth timeout long so it doesn't interfere.
-    process.env.WS_HEARTBEAT_MS = "40";
+    // Floored heartbeat; keep auth timeout long so it doesn't interfere.
+    process.env.WS_HEARTBEAT_MS = "1000";
     process.env.WS_AUTH_TIMEOUT_MS = "100000";
 
     // autoPong:false → client never answers server pings → missed-pong reaper.
@@ -52,7 +52,7 @@ describe("WebSocket — heartbeat & auth timeout", () => {
     await new Promise<void>((r) => ws.once("open", () => r()));
     const closed = await Promise.race([
       waitForClose(ws).then(() => true),
-      new Promise<boolean>((r) => setTimeout(() => r(false), 1000)),
+      new Promise<boolean>((r) => setTimeout(() => r(false), 5000)),
     ]);
     expect(closed).toBe(true);
     try {
@@ -60,5 +60,21 @@ describe("WebSocket — heartbeat & auth timeout", () => {
     } catch {
       // already gone
     }
-  });
+  }, 10000);
+
+  it("clamps a misconfigured tiny heartbeat so it can't rapid-reap", async () => {
+    // 25ms would terminate in ~75ms if used literally; the floor coerces it
+    // back to the default, so the socket must survive well past that.
+    process.env.WS_HEARTBEAT_MS = "25";
+    process.env.WS_AUTH_TIMEOUT_MS = "100000";
+
+    const ws = new WebSocket(wsUrl);
+    await new Promise<void>((r) => ws.once("open", () => r()));
+    const closedEarly = await Promise.race([
+      waitForClose(ws).then(() => true),
+      new Promise<boolean>((r) => setTimeout(() => r(false), 1500)),
+    ]);
+    expect(closedEarly).toBe(false);
+    ws.close();
+  }, 8000);
 });

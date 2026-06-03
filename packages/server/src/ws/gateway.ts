@@ -420,11 +420,15 @@ function freshRateState(): Socket["rate"] {
 const MAX_MISSED_PONGS = 2;
 const MAX_SOCKETS_PER_WALLET = 3;
 
+// Floored so a misconfigured tiny value can't reap healthy connections.
+const MIN_TIMER_MS = 1000;
 function heartbeatIntervalMs(): number {
-  return Number(process.env.WS_HEARTBEAT_MS) || 25_000;
+  const v = Number(process.env.WS_HEARTBEAT_MS);
+  return Number.isFinite(v) && v >= MIN_TIMER_MS ? v : 25_000;
 }
 function authTimeoutMs(): number {
-  return Number(process.env.WS_AUTH_TIMEOUT_MS) || 10_000;
+  const v = Number(process.env.WS_AUTH_TIMEOUT_MS);
+  return Number.isFinite(v) && v >= MIN_TIMER_MS ? v : 10_000;
 }
 
 function replayTerminal(socket: Socket, clientCastId: string): boolean {
@@ -1095,6 +1099,9 @@ export default fp(async (fastify) => {
       }, PHYSICS_TICK_MS);
 
       raw.on("message", async (data: Buffer) => {
+        // Any inbound traffic proves liveness, even if protocol pongs are
+        // dropped by a proxy — keeps an active client from being reaped.
+        socket.missedPongs = 0;
         let parsedJson: unknown;
         try {
           parsedJson = JSON.parse(data.toString());
