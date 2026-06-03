@@ -270,6 +270,20 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
   const [authed, setAuthed] = useState(false);
   const reconnectAttemptsRef = useRef(0);
   const MAX_RECONNECT_ATTEMPTS = 5;
+  // Cast in flight when the socket dropped; replayed on reconnect via authenticate.
+  const pendingRecoveryCastIdRef = useRef<string | null>(null);
+  // Terminal outcomes already applied, so a replay can't double-count a catch.
+  const resolvedCastIdsRef = useRef<Set<string>>(new Set());
+  const seenTerminalCast = useCallback((id: string): boolean => {
+    const seen = resolvedCastIdsRef.current;
+    if (seen.has(id)) return true;
+    seen.add(id);
+    if (seen.size > 64) {
+      const oldest = seen.values().next().value;
+      if (oldest !== undefined) seen.delete(oldest);
+    }
+    return false;
+  }, []);
 
   const walletStr = publicKey?.toBase58() ?? null;
   const walletStrRef = useRef(walletStr);
@@ -383,6 +397,7 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
             nonce,
             signature,
             delegation: bundle.delegation,
+            recoverCastId: pendingRecoveryCastIdRef.current ?? undefined,
           }),
         );
       });
@@ -405,6 +420,10 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
         // Clear cast bookkeeping; otherwise a mid-reel drop wedges heldRef and
         // setHeld silently no-ops the next cast's first press.
         heldRef.current = false;
+        // Remember the in-flight cast so reconnect can recover its outcome.
+        if (activeCastIdRef.current) {
+          pendingRecoveryCastIdRef.current = activeCastIdRef.current;
+        }
         activeCastIdRef.current = null;
         if (biteTimerRef.current) {
           clearTimeout(biteTimerRef.current);
@@ -528,7 +547,11 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
         return;
       }
       case "fish_escaped": {
-        if (activeCastIdRef.current !== msg.clientCastId) return;
+        const isActive = activeCastIdRef.current === msg.clientCastId;
+        const isRecovery = pendingRecoveryCastIdRef.current === msg.clientCastId;
+        if (!isActive && !isRecovery) return;
+        if (seenTerminalCast(msg.clientCastId)) return;
+        if (isRecovery) pendingRecoveryCastIdRef.current = null;
         if (nibbleWindowTimerRef.current) {
           clearTimeout(nibbleWindowTimerRef.current);
           nibbleWindowTimerRef.current = null;
@@ -624,6 +647,10 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
         return;
       }
       case "catch_resolved": {
+        if (seenTerminalCast(msg.clientCastId)) return;
+        if (pendingRecoveryCastIdRef.current === msg.clientCastId) {
+          pendingRecoveryCastIdRef.current = null;
+        }
         activeCastIdRef.current = null;
         heldRef.current = false;
         if (biteTimerRef.current) {

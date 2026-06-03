@@ -38,6 +38,8 @@ export interface AuthenticateMessage {
   signature: string;
   // If present, `signature` is signed by the delegated session key.
   delegation?: WsDelegation;
+  // Reconnect: replay the terminal outcome of this in-flight cast, if any.
+  recoverCastId?: string;
 }
 
 export interface AuthenticatedMessage {

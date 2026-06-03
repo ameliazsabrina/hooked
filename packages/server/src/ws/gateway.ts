@@ -25,6 +25,13 @@ import {
   type EventStatus,
 } from "../services/eventConfig.js";
 import type { ClientMessage, ServerMessage, InputSample } from "./protocol.js";
+import { ClientMessageSchema } from "./schemas.js";
+import {
+  getTerminal,
+  markEscaped,
+  markInFlight,
+  markResolved,
+} from "./idempotency.js";
 import {
   recordReactionLog,
   computeSampleJitterMaxMs,
@@ -313,6 +320,19 @@ function safeSend(socket: Socket, msg: ServerMessage): void {
   }
 }
 
+// Replay the terminal outcome of an already-seen cast: resolved/escaped resend
+// the cached frame, in-flight drops silently. Returns true if handled.
+function replayTerminal(socket: Socket, clientCastId: string): boolean {
+  const wallet = socket.wallet?.toBase58();
+  if (!wallet) return false;
+  const terminal = getTerminal(wallet, clientCastId);
+  if (!terminal) return false;
+  if (terminal.status === "resolved" || terminal.status === "escaped") {
+    safeSend(socket, terminal.msg);
+  }
+  return true;
+}
+
 function addWalletSocket(wallet: string, id: string): void {
   let set = socketsByWallet.get(wallet);
   if (!set) {
@@ -549,6 +569,14 @@ async function cancelCastOnDisconnect(
       speciesId: ctx.speciesId,
     });
   }
+  if (socket.wallet && ctx.activeCastId) {
+    markEscaped(socket.wallet.toBase58(), ctx.activeCastId, {
+      type: "fish_escaped",
+      sessionId: ctx.sessionPda ?? "",
+      clientCastId: ctx.activeCastId,
+      reason: "no_tap",
+    });
+  }
 }
 
 // Mid-reel disconnect refund. Uses ABANDON_CAST_GRACE_SECS so a single blip
@@ -574,6 +602,14 @@ async function abandonCastOnDisconnect(
       outcome: refunded ? "cancelled" : "escaped_miss",
       rarity: ctx.rarity,
       speciesId: ctx.speciesId,
+    });
+  }
+  if (socket.wallet && ctx.activeCastId) {
+    markEscaped(socket.wallet.toBase58(), ctx.activeCastId, {
+      type: "fish_escaped",
+      sessionId: ctx.sessionPda ?? "",
+      clientCastId: ctx.activeCastId,
+      reason: "no_tap",
     });
   }
 }
@@ -727,8 +763,8 @@ function resolveCatch(
 
   // Deliver on the tick — awaiting Mongo here added ~500-1500ms of dead air
   // between the bar filling and the catch popup. Persistence runs below.
-  safeSend(socket, {
-    type: "catch_resolved",
+  const resolvedMsg = {
+    type: "catch_resolved" as const,
     sessionId: sessionIdStr,
     clientCastId: activeCastId,
     hit,
@@ -740,7 +776,10 @@ function resolveCatch(
     weightHg,
     score,
     roomId: roomId ?? undefined,
-  });
+  };
+  safeSend(socket, resolvedMsg);
+  // Cache for retry replay + reconnect recovery.
+  if (walletStr) markResolved(walletStr, activeCastId, resolvedMsg);
 
   if (!ctx.sessionPda) return;
 
@@ -901,9 +940,9 @@ export default fp(async (fastify) => {
       }, PHYSICS_TICK_MS);
 
       raw.on("message", async (data: Buffer) => {
-        let msg: ClientMessage;
+        let parsedJson: unknown;
         try {
-          msg = JSON.parse(data.toString()) as ClientMessage;
+          parsedJson = JSON.parse(data.toString());
         } catch {
           safeSend(socket, {
             type: "error",
@@ -912,6 +951,17 @@ export default fp(async (fastify) => {
           });
           return;
         }
+
+        const validated = ClientMessageSchema.safeParse(parsedJson);
+        if (!validated.success) {
+          safeSend(socket, {
+            type: "error",
+            code: "invalid_message",
+            message: validated.error.issues[0]?.message ?? "invalid message",
+          });
+          return;
+        }
+        const msg = validated.data as ClientMessage;
 
         switch (msg.type) {
           case "authenticate": {
@@ -960,6 +1010,12 @@ export default fp(async (fastify) => {
               safeSend(socket, eventStatusMessage(status)),
             );
             void hydrateRoomBindingForSocket(socketId, msg.wallet);
+            // Reconnect recovery: replay the terminal outcome of the cast that
+            // was in flight when the prior socket dropped, so a catch resolved
+            // mid-disconnect isn't lost (and an escape isn't double-counted).
+            if (msg.recoverCastId) {
+              replayTerminal(socket, msg.recoverCastId);
+            }
             return;
           }
 
@@ -972,6 +1028,9 @@ export default fp(async (fastify) => {
               });
               return;
             }
+            // A retried initiate for an already-resolved cast replays the result
+            // instead of rolling a fresh fish.
+            if (replayTerminal(socket, msg.clientCastId)) return;
             if (socket.session?.activeCastId) {
               safeSend(socket, {
                 type: "error",
@@ -982,6 +1041,7 @@ export default fp(async (fastify) => {
             }
             const wallet = socket.wallet;
             const clientCastId = msg.clientCastId;
+            markInFlight(wallet.toBase58(), clientCastId);
             const startSession = (
               rolled: RolledCast,
               sessionPdaStr: string | null,
@@ -1207,6 +1267,7 @@ export default fp(async (fastify) => {
           case "nibble_response": {
             const ctx = socket.session;
             if (!ctx?.activeCastId || ctx.activeCastId !== msg.clientCastId) {
+              replayTerminal(socket, msg.clientCastId);
               return;
             }
             handleNibbleResponse(socket, msg.clientCastId, msg.clientTs);
@@ -1217,8 +1278,10 @@ export default fp(async (fastify) => {
             // C-1 fix: replay client-reported tap timestamps through server's
             // own spinner copy. The client's hit/miss claims are never trusted.
             const ctx = socket.session;
-            if (!ctx?.activeCastId || ctx.activeCastId !== msg.clientCastId)
+            if (!ctx?.activeCastId || ctx.activeCastId !== msg.clientCastId) {
+              replayTerminal(socket, msg.clientCastId);
               return;
+            }
             if (!ctx.hooked) return;
             if (ctx.mechanic !== CIRCULAR_TAP_MECHANIC) return;
             if (!ctx.circularTap) {
@@ -1271,11 +1334,13 @@ export default fp(async (fastify) => {
           case "input_samples": {
             const ctx = socket.session;
             if (!ctx?.activeCastId || ctx.activeCastId !== msg.clientCastId) {
-              safeSend(socket, {
-                type: "error",
-                code: "no_active_cast",
-                message: "no active cast matching clientCastId",
-              });
+              if (!replayTerminal(socket, msg.clientCastId)) {
+                safeSend(socket, {
+                  type: "error",
+                  code: "no_active_cast",
+                  message: "no active cast matching clientCastId",
+                });
+              }
               return;
             }
             // Pre-hook samples are suspect — the input mechanic shouldn't
@@ -1343,11 +1408,13 @@ export default fp(async (fastify) => {
           case "cast_finalize": {
             const ctx = socket.session;
             if (!ctx?.activeCastId || ctx.activeCastId !== msg.clientCastId) {
-              safeSend(socket, {
-                type: "error",
-                code: "no_active_cast",
-                message: "no active cast matching clientCastId",
-              });
+              if (!replayTerminal(socket, msg.clientCastId)) {
+                safeSend(socket, {
+                  type: "error",
+                  code: "no_active_cast",
+                  message: "no active cast matching clientCastId",
+                });
+              }
               return;
             }
             if (!ctx.hooked) {
