@@ -1,11 +1,16 @@
 import { z } from "zod";
-import { TRPCError } from "@trpc/server";
 
 import { ApexFish, FishingEvent } from "../../db/schema.js";
 import { readApexCatalog } from "../../services/fishing/apexCatalog.js";
 import { getEventStatus } from "../../services/eventConfig.js";
 import { computeEventWinners } from "../../services/eventWinners.js";
 import { adminSessionProcedure, router } from "../trpc.js";
+import {
+  NotFoundError,
+  ConflictError,
+  ValidationError,
+  mapAppErrorToTRPC,
+} from "../../errors/AppError.js";
 
 const ObjectIdString = z
   .string()
@@ -21,6 +26,7 @@ const datePair = z
     startsAt: z.coerce.date(),
     endsAt: z.coerce.date(),
   })
+  .strict()
   .refine((v) => v.endsAt.getTime() > v.startsAt.getTime(), {
     path: ["endsAt"],
     message: "endsAt must be after startsAt",
@@ -35,10 +41,7 @@ async function assertApexFishIdsExist(ids: string[]): Promise<void> {
   if (found.length !== dedup.length) {
     const foundSet = new Set(found.map((d) => String(d._id)));
     const missing = dedup.filter((id) => !foundSet.has(id));
-    throw new TRPCError({
-      code: "BAD_REQUEST",
-      message: `Unknown apex fish ids: ${missing.join(", ")}`,
-    });
+    throw new ValidationError(`Unknown apex fish ids: ${missing.join(", ")}`);
   }
 }
 
@@ -53,6 +56,7 @@ const createInput = z
     prizePoolSol: z.number().nonnegative(),
     apexFishIds: apexFishIdsSchema,
   })
+  .strict()
   .and(datePair);
 
 const updateInput = z
@@ -65,6 +69,7 @@ const updateInput = z
     prizePoolSol: z.number().nonnegative().optional(),
     apexFishIds: apexFishIdsSchema.optional(),
   })
+  .strict()
   .refine(
     (v) =>
       !v.startsAt ||
@@ -162,7 +167,7 @@ export const adminEventRouter = router({
         status: STATUS_FILTER,
         page: z.number().int().min(1).default(1),
         limit: z.number().int().min(1).max(100).default(50),
-      }),
+      }).strict(),
     )
     .query(async ({ input }) => {
       const now = new Date();
@@ -192,18 +197,22 @@ export const adminEventRouter = router({
     }),
 
   get: adminSessionProcedure
-    .input(z.object({ id: ObjectIdString }))
+    .input(z.object({ id: ObjectIdString }).strict())
     .query(async ({ input }) => {
-      const ev = await FishingEvent.findById(input.id).lean();
-      if (!ev) {
-        throw new TRPCError({ code: "NOT_FOUND", message: "Event not found" });
+      try {
+        const ev = await FishingEvent.findById(input.id).lean();
+        if (!ev) {
+          throw new NotFoundError("Event not found");
+        }
+        return serializeEvent(ev);
+      } catch (err) {
+        mapAppErrorToTRPC(err);
       }
-      return serializeEvent(ev);
     }),
 
   /** 60s cache; apexFish mutations invalidate on write. */
   apexCatalog: adminSessionProcedure
-    .input(z.object({ force: z.boolean().default(false) }).optional())
+    .input(z.object({ force: z.boolean().default(false) }).strict().optional())
     .query(async ({ ctx, input }) => {
       return readApexCatalog(ctx.requestOrigin, input?.force ?? false);
     }),
@@ -212,145 +221,148 @@ export const adminEventRouter = router({
   create: adminSessionProcedure
     .input(createInput)
     .mutation(async ({ ctx, input }) => {
-      await assertApexFishIdsExist(input.apexFishIds);
-      const ev = await FishingEvent.create({
-        name: input.name,
-        active: false,
-        startsAt: input.startsAt,
-        endsAt: input.endsAt,
-        apexBp: input.apexBp,
-        prizePoolSol: input.prizePoolSol,
-        apexFishIds: input.apexFishIds,
-        createdBy: ctx.adminWallet,
-      });
-      return serializeEvent(ev.toObject());
+      try {
+        await assertApexFishIdsExist(input.apexFishIds);
+        const ev = await FishingEvent.create({
+          name: input.name,
+          active: false,
+          startsAt: input.startsAt,
+          endsAt: input.endsAt,
+          apexBp: input.apexBp,
+          prizePoolSol: input.prizePoolSol,
+          apexFishIds: input.apexFishIds,
+          createdBy: ctx.adminWallet,
+        });
+        return serializeEvent(ev.toObject());
+      } catch (err) {
+        mapAppErrorToTRPC(err);
+      }
     }),
 
   /** Refused while active so session snapshots stay honest. */
   update: adminSessionProcedure
     .input(updateInput)
     .mutation(async ({ input }) => {
-      const existing = await FishingEvent.findById(input.id);
-      if (!existing) {
-        throw new TRPCError({ code: "NOT_FOUND", message: "Event not found" });
+      try {
+        const existing = await FishingEvent.findById(input.id);
+        if (!existing) {
+          throw new NotFoundError("Event not found");
+        }
+        if (existing.active) {
+          throw new ConflictError("Cannot edit an active event. Deactivate first.");
+        }
+        if (input.apexFishIds !== undefined) {
+          await assertApexFishIdsExist(input.apexFishIds);
+        }
+        const patch: Record<string, unknown> = {};
+        if (input.name !== undefined) patch.name = input.name;
+        if (input.startsAt !== undefined) patch.startsAt = input.startsAt;
+        if (input.endsAt !== undefined) patch.endsAt = input.endsAt;
+        if (input.apexBp !== undefined) patch.apexBp = input.apexBp;
+        if (input.prizePoolSol !== undefined) patch.prizePoolSol = input.prizePoolSol;
+        if (input.apexFishIds !== undefined) patch.apexFishIds = input.apexFishIds;
+        const updated = await FishingEvent.findByIdAndUpdate(input.id, { $set: patch }, { new: true });
+        if (!updated) {
+          throw new NotFoundError("Event vanished mid-update");
+        }
+        return serializeEvent(updated.toObject());
+      } catch (err) {
+        mapAppErrorToTRPC(err);
       }
-      if (existing.active) {
-        throw new TRPCError({
-          code: "CONFLICT",
-          message: "Cannot edit an active event. Deactivate first.",
-        });
-      }
-      if (input.apexFishIds !== undefined) {
-        await assertApexFishIdsExist(input.apexFishIds);
-      }
-      const patch: Record<string, unknown> = {};
-      if (input.name !== undefined) patch.name = input.name;
-      if (input.startsAt !== undefined) patch.startsAt = input.startsAt;
-      if (input.endsAt !== undefined) patch.endsAt = input.endsAt;
-      if (input.apexBp !== undefined) patch.apexBp = input.apexBp;
-      if (input.prizePoolSol !== undefined) patch.prizePoolSol = input.prizePoolSol;
-      if (input.apexFishIds !== undefined) patch.apexFishIds = input.apexFishIds;
-      const updated = await FishingEvent.findByIdAndUpdate(input.id, { $set: patch }, { new: true });
-      if (!updated) {
-        throw new TRPCError({ code: "NOT_FOUND", message: "Event vanished mid-update" });
-      }
-      return serializeEvent(updated.toObject());
     }),
 
   activate: adminSessionProcedure
-    .input(z.object({ id: ObjectIdString }))
+    .input(z.object({ id: ObjectIdString }).strict())
     .mutation(async ({ input }) => {
-      const conflict = await FishingEvent.findOne({ active: true });
-      if (conflict && String(conflict._id) !== input.id) {
-        throw new TRPCError({
-          code: "CONFLICT",
-          message: `Another event is already active: ${conflict.name}`,
-        });
-      }
-      const ev = await FishingEvent.findById(input.id);
-      if (!ev) {
-        throw new TRPCError({ code: "NOT_FOUND", message: "Event not found" });
-      }
-      if (ev.active) return serializeEvent(ev.toObject());
       try {
-        const updated = await FishingEvent.findByIdAndUpdate(
-          ev._id,
-          { $set: { active: true } },
-          { new: true },
-        );
-        await getEventStatus(true).catch(() => {});
-        return serializeEvent((updated ?? ev).toObject());
-      } catch (err) {
-        if ((err as { code?: number }).code === 11000) {
-          throw new TRPCError({
-            code: "CONFLICT",
-            message: "Another event was activated concurrently.",
-          });
+        const conflict = await FishingEvent.findOne({ active: true });
+        if (conflict && String(conflict._id) !== input.id) {
+          throw new ConflictError(`Another event is already active: ${conflict.name}`);
         }
-        throw err;
+        const ev = await FishingEvent.findById(input.id);
+        if (!ev) {
+          throw new NotFoundError("Event not found");
+        }
+        if (ev.active) return serializeEvent(ev.toObject());
+        try {
+          const updated = await FishingEvent.findByIdAndUpdate(
+            ev._id,
+            { $set: { active: true } },
+            { new: true },
+          );
+          await getEventStatus(true).catch(() => {});
+          return serializeEvent((updated ?? ev).toObject());
+        } catch (err) {
+          if ((err as { code?: number }).code === 11000) {
+            throw new ConflictError("Another event was activated concurrently.");
+          }
+          throw err;
+        }
+      } catch (err) {
+        mapAppErrorToTRPC(err);
       }
     }),
 
   /** Force-end + trigger winners compute. */
   deactivate: adminSessionProcedure
-    .input(z.object({ id: ObjectIdString }))
+    .input(z.object({ id: ObjectIdString }).strict())
     .mutation(async ({ input }) => {
-      const updated = await FishingEvent.findOneAndUpdate(
-        { _id: input.id, active: true },
-        { $set: { active: false } },
-        { new: true },
-      );
-      if (!updated) {
-        throw new TRPCError({
-          code: "NOT_FOUND",
-          message: "No active event with that id",
-        });
-      }
-      await getEventStatus(true).catch(() => {});
-      // Best-effort; non-fatal warning surfaces in the response.
-      let winnersComputedAt: string | null = null;
-      let winnersError: string | null = null;
       try {
-        await computeEventWinners(String(updated._id));
-        winnersComputedAt = new Date().toISOString();
+        const updated = await FishingEvent.findOneAndUpdate(
+          { _id: input.id, active: true },
+          { $set: { active: false } },
+          { new: true },
+        );
+        if (!updated) {
+          throw new NotFoundError("No active event with that id");
+        }
+        await getEventStatus(true).catch(() => {});
+        // Best-effort; non-fatal warning surfaces in the response.
+        let winnersComputedAt: string | null = null;
+        let winnersError: string | null = null;
+        try {
+          await computeEventWinners(String(updated._id));
+          winnersComputedAt = new Date().toISOString();
+        } catch (err) {
+          winnersError = (err as Error).message;
+        }
+        return {
+          event: serializeEvent(updated.toObject()),
+          winnersComputedAt,
+          winnersError,
+        };
       } catch (err) {
-        winnersError = (err as Error).message;
+        mapAppErrorToTRPC(err);
       }
-      return {
-        event: serializeEvent(updated.toObject()),
-        winnersComputedAt,
-        winnersError,
-      };
     }),
 
   /** Forbidden while active or once finalRanks is populated (audit trail). */
   delete: adminSessionProcedure
-    .input(z.object({ id: ObjectIdString }))
+    .input(z.object({ id: ObjectIdString }).strict())
     .mutation(async ({ input }) => {
-      const ev = await FishingEvent.findById(input.id);
-      if (!ev) {
-        throw new TRPCError({ code: "NOT_FOUND", message: "Event not found" });
-      }
-      if (ev.active) {
-        throw new TRPCError({
-          code: "CONFLICT",
-          message: "Cannot delete an active event",
-        });
-      }
-      if (ev.finalRanks && ev.finalRanks.length > 0) {
-        throw new TRPCError({
-          code: "CONFLICT",
-          message:
+      try {
+        const ev = await FishingEvent.findById(input.id);
+        if (!ev) {
+          throw new NotFoundError("Event not found");
+        }
+        if (ev.active) {
+          throw new ConflictError("Cannot delete an active event");
+        }
+        if (ev.finalRanks && ev.finalRanks.length > 0) {
+          throw new ConflictError(
             "Cannot delete an event that already has finalRanks (audit trail)",
-        });
+          );
+        }
+        await FishingEvent.deleteOne({ _id: ev._id });
+        return { ok: true };
+      } catch (err) {
+        mapAppErrorToTRPC(err);
       }
-      await FishingEvent.deleteOne({ _id: ev._id });
-      return { ok: true };
     }),
 
   /** Idempotent; `force: true` overwrites finalRanks. */
   computeWinners: adminSessionProcedure
-    .input(z.object({ id: ObjectIdString, force: z.boolean().default(false) }))
+    .input(z.object({ id: ObjectIdString, force: z.boolean().default(false) }).strict())
     .mutation(async ({ input }) => {
       try {
         const result = await computeEventWinners(input.id, { force: input.force });
@@ -360,71 +372,73 @@ export const adminEventRouter = router({
           alreadyComputed: result.alreadyComputed,
         };
       } catch (err) {
-        throw new TRPCError({
-          code: "BAD_REQUEST",
-          message: (err as Error).message,
-        });
+        mapAppErrorToTRPC(new ValidationError((err as Error).message));
       }
     }),
 
   /** Stub: marks paid with a sentinel signature pending payout-worker wiring. */
   payWinner: adminSessionProcedure
-    .input(z.object({ id: ObjectIdString, rank: z.number().int().min(1) }))
+    .input(z.object({ id: ObjectIdString, rank: z.number().int().min(1) }).strict())
     .mutation(async ({ input }) => {
-      const ev = await FishingEvent.findOne({
-        _id: input.id,
-        finalRanks: { $elemMatch: { rank: input.rank, paid: false } },
-      });
-      if (!ev) {
-        throw new TRPCError({
-          code: "NOT_FOUND",
-          message: "No unpaid winner with that rank",
+      try {
+        const ev = await FishingEvent.findOne({
+          _id: input.id,
+          finalRanks: { $elemMatch: { rank: input.rank, paid: false } },
         });
-      }
-      const now = new Date();
-      const sentinelSig = `pending-payout-${input.rank}-${now.getTime()}`;
-      await FishingEvent.updateOne(
-        { _id: ev._id, "finalRanks.rank": input.rank, "finalRanks.paid": false },
-        {
-          $set: {
-            "finalRanks.$.paid": true,
-            "finalRanks.$.signature": sentinelSig,
-            "finalRanks.$.paidAt": now,
-          },
-          $inc: { "finalRanks.$.attempts": 1 },
-        },
-      );
-      return { ok: true, signature: sentinelSig };
-    }),
-
-  payAllWinners: adminSessionProcedure
-    .input(z.object({ id: ObjectIdString }))
-    .mutation(async ({ input }) => {
-      const ev = await FishingEvent.findById(input.id).lean();
-      if (!ev) {
-        throw new TRPCError({ code: "NOT_FOUND", message: "Event not found" });
-      }
-      const unpaid = (ev.finalRanks ?? []).filter((r) => !r.paid);
-      if (unpaid.length === 0) {
-        return { ok: true, paid: 0, signatures: [] };
-      }
-      const now = new Date();
-      const signatures: string[] = [];
-      for (const row of unpaid) {
-        const sig = `pending-payout-${row.rank}-${now.getTime()}`;
+        if (!ev) {
+          throw new NotFoundError("No unpaid winner with that rank");
+        }
+        const now = new Date();
+        const sentinelSig = `pending-payout-${input.rank}-${now.getTime()}`;
         await FishingEvent.updateOne(
-          { _id: ev._id, "finalRanks.rank": row.rank, "finalRanks.paid": false },
+          { _id: ev._id, "finalRanks.rank": input.rank, "finalRanks.paid": false },
           {
             $set: {
               "finalRanks.$.paid": true,
-              "finalRanks.$.signature": sig,
+              "finalRanks.$.signature": sentinelSig,
               "finalRanks.$.paidAt": now,
             },
             $inc: { "finalRanks.$.attempts": 1 },
           },
         );
-        signatures.push(sig);
+        return { ok: true, signature: sentinelSig };
+      } catch (err) {
+        mapAppErrorToTRPC(err);
       }
-      return { ok: true, paid: signatures.length, signatures };
+    }),
+
+  payAllWinners: adminSessionProcedure
+    .input(z.object({ id: ObjectIdString }).strict())
+    .mutation(async ({ input }) => {
+      try {
+        const ev = await FishingEvent.findById(input.id).lean();
+        if (!ev) {
+          throw new NotFoundError("Event not found");
+        }
+        const unpaid = (ev.finalRanks ?? []).filter((r) => !r.paid);
+        if (unpaid.length === 0) {
+          return { ok: true, paid: 0, signatures: [] };
+        }
+        const now = new Date();
+        const signatures: string[] = [];
+        for (const row of unpaid) {
+          const sig = `pending-payout-${row.rank}-${now.getTime()}`;
+          await FishingEvent.updateOne(
+            { _id: ev._id, "finalRanks.rank": row.rank, "finalRanks.paid": false },
+            {
+              $set: {
+                "finalRanks.$.paid": true,
+                "finalRanks.$.signature": sig,
+                "finalRanks.$.paidAt": now,
+              },
+              $inc: { "finalRanks.$.attempts": 1 },
+            },
+          );
+          signatures.push(sig);
+        }
+        return { ok: true, paid: signatures.length, signatures };
+      } catch (err) {
+        mapAppErrorToTRPC(err);
+      }
     }),
 });

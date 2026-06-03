@@ -23,7 +23,7 @@ export const adminReactionsRouter = router({
         sinceHours: z.number().int().min(1).max(24 * 30).optional(),
         page: z.number().int().min(1).default(1),
         limit: z.number().int().min(1).max(200).default(100),
-      }),
+      }).strict(),
     )
     .query(async ({ input }) => {
       const filter: Record<string, unknown> = {};
@@ -77,7 +77,7 @@ export const adminReactionsRouter = router({
     .input(
       z.object({
         sinceHours: z.number().int().min(1).max(24 * 30).default(24),
-      }),
+      }).strict(),
     )
     .query(async ({ input }) => {
       const since = new Date(Date.now() - input.sinceHours * 3600_000);

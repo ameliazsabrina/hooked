@@ -11,7 +11,7 @@ export const adminAuditRouter = router({
         procedure: z.string().optional(),
         page: z.number().int().min(1).default(1),
         limit: z.number().int().min(1).max(200).default(50),
-      }),
+      }).strict(),
     )
     .query(async ({ input }) => {
       const filter: Record<string, unknown> = {};

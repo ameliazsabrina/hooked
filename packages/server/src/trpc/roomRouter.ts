@@ -1,6 +1,12 @@
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
 import BN from "bn.js";
+import {
+  NotFoundError,
+  ValidationError,
+  PreconditionError,
+  mapAppErrorToTRPC,
+} from "../errors/AppError.js";
 import { LAMPORTS_PER_SOL, PublicKey } from "@solana/web3.js";
 import {
   VALID_DEPOSIT_AMOUNTS,
@@ -83,7 +89,7 @@ async function maybeTriggerCapacityOverflow(roomId: string): Promise<void> {
 
 const roomIdInput = z.object({
   roomId: z.string().regex(/^R-\d{8}-[0-9a-f]{6}$/),
-});
+}).strict();
 
 export const roomRouter = router({
   list: publicProcedure.query(async () => {
@@ -120,25 +126,28 @@ export const roomRouter = router({
   }),
 
   info: publicProcedure.input(roomIdInput).query(async ({ input }) => {
-    const room = await Room.findOne({ roomId: input.roomId }).lean();
-    if (!room)
-      throw new TRPCError({ code: "NOT_FOUND", message: "Room not found" });
+    try {
+      const room = await Room.findOne({ roomId: input.roomId }).lean();
+      if (!room) throw new NotFoundError("Room not found");
 
-    return {
-      roomId: room.roomId,
-      phase: room.phase,
-      createdAt: room.createdAt.toISOString(),
-      entryClosesAt: room.entryClosesAt.toISOString(),
-      closesAt: room.closesAt.toISOString(),
-      capacitySol: room.capacitySol,
-      depositedSol: room.depositedSol,
-      maxPlayers: room.maxPlayers,
-      realPlayerCount: room.realPlayerCount,
-      onChainPoolId: room.onChainPoolId,
-      onChainPoolAddress: room.onChainPoolAddress,
-      totalYieldSol: room.totalYieldSol,
-      winners: room.winners,
-    };
+      return {
+        roomId: room.roomId,
+        phase: room.phase,
+        createdAt: room.createdAt.toISOString(),
+        entryClosesAt: room.entryClosesAt.toISOString(),
+        closesAt: room.closesAt.toISOString(),
+        capacitySol: room.capacitySol,
+        depositedSol: room.depositedSol,
+        maxPlayers: room.maxPlayers,
+        realPlayerCount: room.realPlayerCount,
+        onChainPoolId: room.onChainPoolId,
+        onChainPoolAddress: room.onChainPoolAddress,
+        totalYieldSol: room.totalYieldSol,
+        winners: room.winners,
+      };
+    } catch (err) {
+      mapAppErrorToTRPC(err);
+    }
   }),
 
   active: publicProcedure.query(async () => {
@@ -197,171 +206,162 @@ export const roomRouter = router({
       z.object({
         onChainRoomId: z.string().regex(/^\d+$/),
         txSignature: z.string().optional(),
-      }),
+      }).strict(),
     )
     .mutation(async ({ ctx, input }) => {
-      const player = await Player.findOne({
-        walletAddress: ctx.walletAddress,
-      }).lean();
-      if (!player || !player.nickname) {
-        throw new TRPCError({
-          code: "BAD_REQUEST",
-          message: "Complete onboarding first",
-        });
-      }
+      try {
+        const player = await Player.findOne({
+          walletAddress: ctx.walletAddress,
+        }).lean();
+        if (!player || !player.nickname) {
+          throw new ValidationError("Complete onboarding first");
+        }
 
-      const roomDoc = await Room.findOne({
-        onChainPoolId: input.onChainRoomId,
-      }).lean();
-      if (!roomDoc) {
-        throw new TRPCError({ code: "NOT_FOUND", message: "Room not found" });
-      }
+        const roomDoc = await Room.findOne({
+          onChainPoolId: input.onChainRoomId,
+        }).lean();
+        if (!roomDoc) throw new NotFoundError("Room not found");
 
-      // NX-flagged seed; self-heals depositors who joined pre-seeding.
-      const playerIdStr = player._id.toString();
-      await lb
-        .seedRoomMember(ctx.redis, roomDoc.roomId, playerIdStr)
-        .catch((err) =>
-          console.error("[lb] seedRoomMember failed:", (err as Error).message),
+        // NX-flagged seed; self-heals depositors who joined pre-seeding.
+        const playerIdStr = player._id.toString();
+        await lb
+          .seedRoomMember(ctx.redis, roomDoc.roomId, playerIdStr)
+          .catch((err) =>
+            console.error("[lb] seedRoomMember failed:", (err as Error).message),
+          );
+
+        const active = player.deposits?.find((d) => !d.returned);
+        if (active) {
+          await markPriorSessionAbandoned(ctx.walletAddress, roomDoc.roomId);
+          bindWalletToRoom(ctx.walletAddress, roomDoc.roomId);
+          return {
+            depositAmount: active.amount,
+            roomId: roomDoc.roomId,
+            alreadyRecorded: true,
+          };
+        }
+
+        const loaded = getRoomsProgram();
+        if (!loaded) {
+          throw new PreconditionError("Rooms program unavailable — treasury keypair missing");
+        }
+
+        const roomPda = getRoomPda(BigInt(input.onChainRoomId));
+        const authorityKey = new PublicKey(ctx.walletAddress);
+        const entryPda = getRoomEntryPda(roomPda, authorityKey);
+
+        let entryAccount =
+          await loaded.program.account.roomEntry.fetchNullable(entryPda);
+        // Brief poll for the 'processed' → 'confirmed' gap.
+        for (let i = 0; i < 6 && !entryAccount; i++) {
+          await new Promise((r) => setTimeout(r, 500));
+          entryAccount =
+            await loaded.program.account.roomEntry.fetchNullable(entryPda);
+        }
+        if (!entryAccount) {
+          throw new NotFoundError("No on-chain deposit found for this wallet in this room");
+        }
+
+        const depositSol =
+          Number((entryAccount.depositLamports as BN).toString()) /
+          LAMPORTS_PER_SOL;
+        if (!isValidDepositAmount(depositSol)) {
+          throw new ValidationError(
+            `On-chain deposit ${depositSol} SOL not in [${VALID_DEPOSIT_AMOUNTS.join(", ")}]`,
+          );
+        }
+
+        const joinedAtMs =
+          Number((entryAccount.joinedAt as BN).toString()) * 1000;
+        const depositedAt = new Date(joinedAtMs);
+        const activeMonth = depositedAt.toISOString().slice(0, 7);
+        const txSignature =
+          input.txSignature ?? `recovered:${entryPda.toBase58()}`;
+
+        await Player.updateOne(
+          { walletAddress: ctx.walletAddress },
+          {
+            $push: {
+              deposits: {
+                poolId: roomDoc.roomId,
+                amount: depositSol,
+                depositTxSignature: txSignature,
+                activeMonth,
+                depositedAt,
+                expiresAt: roomDoc.closesAt,
+                returned: false,
+              },
+            },
+            $set: { currentPoolId: roomDoc.roomId },
+          },
         );
 
-      const active = player.deposits?.find((d) => !d.returned);
-      if (active) {
+        // Enforce capacity invariants here too so DB can't drift under concurrent
+        // recoveries or manual data fixes (on-chain remains source of truth).
+        const roomUpdate = await Room.updateOne(
+          {
+            roomId: roomDoc.roomId,
+            phase: "entry",
+            "players.walletAddress": { $ne: ctx.walletAddress },
+            depositedSol: { $lte: roomDoc.capacitySol - depositSol },
+            $expr: { $lt: [{ $size: "$players" }, "$maxPlayers"] },
+          },
+          {
+            $push: {
+              players: {
+                walletAddress: ctx.walletAddress,
+                deposit: depositSol,
+                depositTxSignature: txSignature,
+                depositedAt,
+                returned: false,
+              },
+            },
+            $inc: { realPlayerCount: 1, depositedSol: depositSol },
+          },
+        );
+
         await markPriorSessionAbandoned(ctx.walletAddress, roomDoc.roomId);
+
+        // Mid-session depositors need this; auth-time hydration only runs once.
         bindWalletToRoom(ctx.walletAddress, roomDoc.roomId);
+
+        try {
+          await maybeTriggerCapacityOverflow(roomDoc.roomId);
+        } catch (err) {
+          console.error("[capacity-overflow] room creation failed", err);
+        }
+
         return {
-          depositAmount: active.amount,
+          depositAmount: depositSol,
           roomId: roomDoc.roomId,
-          alreadyRecorded: true,
+          alreadyRecorded: false,
+          roomUpdated: roomUpdate.modifiedCount > 0,
         };
-      }
-
-      const loaded = getRoomsProgram();
-      if (!loaded) {
-        throw new TRPCError({
-          code: "PRECONDITION_FAILED",
-          message: "Rooms program unavailable — treasury keypair missing",
-        });
-      }
-
-      const roomPda = getRoomPda(BigInt(input.onChainRoomId));
-      const authorityKey = new PublicKey(ctx.walletAddress);
-      const entryPda = getRoomEntryPda(roomPda, authorityKey);
-
-      let entryAccount =
-        await loaded.program.account.roomEntry.fetchNullable(entryPda);
-      // Brief poll for the 'processed' → 'confirmed' gap.
-      for (let i = 0; i < 6 && !entryAccount; i++) {
-        await new Promise((r) => setTimeout(r, 500));
-        entryAccount =
-          await loaded.program.account.roomEntry.fetchNullable(entryPda);
-      }
-      if (!entryAccount) {
-        throw new TRPCError({
-          code: "NOT_FOUND",
-          message: "No on-chain deposit found for this wallet in this room",
-        });
-      }
-
-      const depositSol =
-        Number((entryAccount.depositLamports as BN).toString()) /
-        LAMPORTS_PER_SOL;
-      if (!isValidDepositAmount(depositSol)) {
-        throw new TRPCError({
-          code: "BAD_REQUEST",
-          message: `On-chain deposit ${depositSol} SOL not in [${VALID_DEPOSIT_AMOUNTS.join(", ")}]`,
-        });
-      }
-
-      const joinedAtMs =
-        Number((entryAccount.joinedAt as BN).toString()) * 1000;
-      const depositedAt = new Date(joinedAtMs);
-      const activeMonth = depositedAt.toISOString().slice(0, 7);
-      const txSignature =
-        input.txSignature ?? `recovered:${entryPda.toBase58()}`;
-
-      await Player.updateOne(
-        { walletAddress: ctx.walletAddress },
-        {
-          $push: {
-            deposits: {
-              poolId: roomDoc.roomId,
-              amount: depositSol,
-              depositTxSignature: txSignature,
-              activeMonth,
-              depositedAt,
-              expiresAt: roomDoc.closesAt,
-              returned: false,
-            },
-          },
-          $set: { currentPoolId: roomDoc.roomId },
-        },
-      );
-
-      // Enforce capacity invariants here too so DB can't drift under concurrent
-      // recoveries or manual data fixes (on-chain remains source of truth).
-      const roomUpdate = await Room.updateOne(
-        {
-          roomId: roomDoc.roomId,
-          phase: "entry",
-          "players.walletAddress": { $ne: ctx.walletAddress },
-          depositedSol: { $lte: roomDoc.capacitySol - depositSol },
-          $expr: { $lt: [{ $size: "$players" }, "$maxPlayers"] },
-        },
-        {
-          $push: {
-            players: {
-              walletAddress: ctx.walletAddress,
-              deposit: depositSol,
-              depositTxSignature: txSignature,
-              depositedAt,
-              returned: false,
-            },
-          },
-          $inc: { realPlayerCount: 1, depositedSol: depositSol },
-        },
-      );
-
-      await markPriorSessionAbandoned(ctx.walletAddress, roomDoc.roomId);
-
-      // Mid-session depositors need this; auth-time hydration only runs once.
-      bindWalletToRoom(ctx.walletAddress, roomDoc.roomId);
-
-      try {
-        await maybeTriggerCapacityOverflow(roomDoc.roomId);
       } catch (err) {
-        console.error("[capacity-overflow] room creation failed", err);
+        mapAppErrorToTRPC(err);
       }
-
-      return {
-        depositAmount: depositSol,
-        roomId: roomDoc.roomId,
-        alreadyRecorded: false,
-        roomUpdated: roomUpdate.modifiedCount > 0,
-      };
     }),
 
   retryBaitIssue: adminSignedProcedure
     .input(
       z.object({
         targetWallet: z.string().regex(/^[1-9A-HJ-NP-Za-km-z]{32,44}$/),
-      }),
+      }).strict(),
     )
     .mutation(async ({ input }) => {
-      const target = input.targetWallet;
-      const player = await Player.findOne({ walletAddress: target }).lean();
-      if (!player) {
-        throw new TRPCError({ code: "NOT_FOUND", message: "Player not found" });
+      try {
+        const target = input.targetWallet;
+        const player = await Player.findOne({ walletAddress: target }).lean();
+        if (!player) throw new NotFoundError("Player not found");
+        const active = player.deposits?.find((d) => !d.returned);
+        if (!active) {
+          throw new ValidationError("No active deposit — cannot issue bait");
+        }
+        await markPriorSessionAbandoned(target, active.poolId);
+        return { ok: true, targetWallet: target };
+      } catch (err) {
+        mapAppErrorToTRPC(err);
       }
-      const active = player.deposits?.find((d) => !d.returned);
-      if (!active) {
-        throw new TRPCError({
-          code: "BAD_REQUEST",
-          message: "No active deposit — cannot issue bait",
-        });
-      }
-      await markPriorSessionAbandoned(target, active.poolId);
-      return { ok: true, targetWallet: target };
     }),
 
   createRoom: adminSignedProcedure.mutation(async ({ ctx }) => {
@@ -377,18 +377,17 @@ export const roomRouter = router({
         message: `On-chain create_room failed: ${(err as Error).message}`,
       });
     }
-    if (!result.ok) {
-      if (result.reason === "treasury-missing") {
-        throw new TRPCError({
-          code: "PRECONDITION_FAILED",
-          message:
+    try {
+      if (!result.ok) {
+        if (result.reason === "treasury-missing") {
+          throw new PreconditionError(
             "TREASURY_KEYPAIR not configured — cannot sign on-chain create_room",
-        });
+          );
+        }
+        throw new ValidationError(`Room creation skipped: ${result.reason}`);
       }
-      throw new TRPCError({
-        code: "BAD_REQUEST",
-        message: `Room creation skipped: ${result.reason}`,
-      });
+    } catch (err) {
+      mapAppErrorToTRPC(err);
     }
     return {
       roomId: result.roomId,
@@ -408,7 +407,7 @@ export const roomRouter = router({
         roomId: z.string(),
         offset: z.number().int().min(0).default(0),
         limit: z.number().int().min(1).max(100).default(50),
-      }),
+      }).strict(),
     )
     .query(async ({ ctx, input }) => {
       // Self-heal: NX-flag seed every depositor with score 0.
@@ -498,7 +497,7 @@ export const roomRouter = router({
     }),
 
   settleRoomNow: adminSignedProcedure
-    .input(z.object({ roomId: z.string() }))
+    .input(z.object({ roomId: z.string() }).strict())
     .mutation(async ({ input }) => {
       try {
         return await settleRoom(input.roomId);
@@ -514,23 +513,19 @@ export const roomRouter = router({
     .input(
       z.object({
         walletAddress: z.string().regex(/^[1-9A-HJ-NP-Za-km-z]{32,44}$/),
-      }),
+      }).strict(),
     )
     .mutation(async ({ input }) => {
+      try {
       const loaded = getRoomsProgram();
       if (!loaded) {
-        throw new TRPCError({
-          code: "PRECONDITION_FAILED",
-          message: "Rooms program unavailable — treasury keypair missing",
-        });
+        throw new PreconditionError("Rooms program unavailable — treasury keypair missing");
       }
 
       const player = await Player.findOne({
         walletAddress: input.walletAddress,
       }).lean();
-      if (!player) {
-        throw new TRPCError({ code: "NOT_FOUND", message: "Player not found" });
-      }
+      if (!player) throw new NotFoundError("Player not found");
 
       const results: Array<{
         poolId: string;
@@ -606,5 +601,8 @@ export const roomRouter = router({
       }
 
       return { walletAddress: input.walletAddress, results };
+      } catch (err) {
+        mapAppErrorToTRPC(err);
+      }
     }),
 });

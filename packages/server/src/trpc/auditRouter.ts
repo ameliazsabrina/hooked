@@ -1,4 +1,3 @@
-import { TRPCError } from "@trpc/server";
 import { createHash } from "node:crypto";
 import { z } from "zod";
 
@@ -7,6 +6,7 @@ import { getDailySeedAudit } from "../services/fishing/dailySeed.js";
 import { computeSessionDigest } from "../services/fishing/sessionEngine.js";
 import { seedForCast } from "../services/fishing/rng.js";
 import { publicProcedure, router } from "./trpc.js";
+import { NotFoundError, mapAppErrorToTRPC } from "../errors/AppError.js";
 
 const ObjectIdString = z
   .string()
@@ -98,39 +98,43 @@ export const auditRouter = router({
     .input(z.object({ sessionId: ObjectIdString }).strict())
     .output(SessionAuditOutput)
     .query(async ({ input }) => {
-      // Hydrated (not .lean()) — Buffer fields don't round-trip through lean.
-      const session = await FishingSession.findById(input.sessionId);
-      if (!session) {
-        throw new TRPCError({ code: "NOT_FOUND", message: "Session not found" });
+      try {
+        // Hydrated (not .lean()) — Buffer fields don't round-trip through lean.
+        const session = await FishingSession.findById(input.sessionId);
+        if (!session) {
+          throw new NotFoundError("Session not found");
+        }
+        const catches = await Catch.find({ sessionId: session._id })
+          .sort({ castIndex: 1 })
+          .lean();
+        const leaves = catches.map((c) => ({
+          castIndex: c.castIndex ?? 0,
+          speciesId: c.speciesId ?? 0,
+          rarity: RARITY_NAME_TO_INT[c.rarity] ?? 0,
+          weightHg: Math.round(c.weightKg * 10),
+          score: c.score,
+        }));
+        const recomputed = computeSessionDigest(leaves);
+        return {
+          sessionId: String(session._id),
+          walletAddress: session.walletAddress,
+          dateKey: session.dateKey,
+          window: session.window as 0 | 1,
+          status: session.status as "active" | "committed" | "abandoned",
+          sessionScore: session.sessionScore,
+          castCount: session.castCount,
+          catchCount: session.catchCount,
+          dailySeedDate: session.dailySeedDate,
+          merkleRoot: session.merkleRoot
+            ? Buffer.from(session.merkleRoot as unknown as Uint8Array).toString("hex")
+            : null,
+          chainScoreTxSignature: session.chainScoreTxSignature ?? null,
+          catches: leaves,
+          recomputedDigest: recomputed.toString("hex"),
+        };
+      } catch (err) {
+        mapAppErrorToTRPC(err);
       }
-      const catches = await Catch.find({ sessionId: session._id })
-        .sort({ castIndex: 1 })
-        .lean();
-      const leaves = catches.map((c) => ({
-        castIndex: c.castIndex ?? 0,
-        speciesId: c.speciesId ?? 0,
-        rarity: RARITY_NAME_TO_INT[c.rarity] ?? 0,
-        weightHg: Math.round(c.weightKg * 10),
-        score: c.score,
-      }));
-      const recomputed = computeSessionDigest(leaves);
-      return {
-        sessionId: String(session._id),
-        walletAddress: session.walletAddress,
-        dateKey: session.dateKey,
-        window: session.window as 0 | 1,
-        status: session.status as "active" | "committed" | "abandoned",
-        sessionScore: session.sessionScore,
-        castCount: session.castCount,
-        catchCount: session.catchCount,
-        dailySeedDate: session.dailySeedDate,
-        merkleRoot: session.merkleRoot
-          ? Buffer.from(session.merkleRoot as unknown as Uint8Array).toString("hex")
-          : null,
-        chainScoreTxSignature: session.chainScoreTxSignature ?? null,
-        catches: leaves,
-        recomputedDigest: recomputed.toString("hex"),
-      };
     }),
 
   /** Currently verifies only against pendingCast.seedHash (live-cast audit). */
@@ -138,33 +142,34 @@ export const auditRouter = router({
     .input(CastVerifyInput)
     .output(CastVerifyOutput)
     .query(async ({ input }) => {
-      const session = await FishingSession.findById(input.sessionId);
-      if (!session) {
-        throw new TRPCError({ code: "NOT_FOUND", message: "Session not found" });
-      }
-      const pending = session.pendingCast;
-      if (!pending || pending.castIndex !== input.castIndex) {
-        throw new TRPCError({
-          code: "NOT_FOUND",
-          message: `No pending cast at castIndex ${input.castIndex}`,
+      try {
+        const session = await FishingSession.findById(input.sessionId);
+        if (!session) {
+          throw new NotFoundError("Session not found");
+        }
+        const pending = session.pendingCast;
+        if (!pending || pending.castIndex !== input.castIndex) {
+          throw new NotFoundError(`No pending cast at castIndex ${input.castIndex}`);
+        }
+
+        const dailySeedBuf = Buffer.from(input.dailySeed, "hex");
+        const recomputed = seedForCast({
+          dailySeed: dailySeedBuf,
+          sessionId: String(session._id),
+          castIndex: input.castIndex,
+          pity: session.pityCounter,
+          playerWallet: session.walletAddress,
         });
+        const recomputedHash = createHash("sha256").update(recomputed).digest();
+        const storedHash = Buffer.from(pending.seedHash as unknown as Uint8Array);
+
+        return {
+          matchesStoredHash: recomputedHash.equals(storedHash),
+          storedSeedHash: storedHash.toString("hex"),
+          recomputedSeedHash: recomputedHash.toString("hex"),
+        };
+      } catch (err) {
+        mapAppErrorToTRPC(err);
       }
-
-      const dailySeedBuf = Buffer.from(input.dailySeed, "hex");
-      const recomputed = seedForCast({
-        dailySeed: dailySeedBuf,
-        sessionId: String(session._id),
-        castIndex: input.castIndex,
-        pity: session.pityCounter,
-        playerWallet: session.walletAddress,
-      });
-      const recomputedHash = createHash("sha256").update(recomputed).digest();
-      const storedHash = Buffer.from(pending.seedHash as unknown as Uint8Array);
-
-      return {
-        matchesStoredHash: recomputedHash.equals(storedHash),
-        storedSeedHash: storedHash.toString("hex"),
-        recomputedSeedHash: recomputedHash.toString("hex"),
-      };
     }),
 });

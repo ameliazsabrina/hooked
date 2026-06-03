@@ -1,7 +1,7 @@
 import { z } from "zod";
-import { TRPCError } from "@trpc/server";
 import { adminSessionProcedure, router } from "../trpc.js";
 import { FishingSession, Player, Room } from "../../db/schema.js";
+import { NotFoundError, mapAppErrorToTRPC } from "../../errors/AppError.js";
 import {
   getRoomsProgram,
   getRoomPda,
@@ -255,7 +255,7 @@ export const adminRoomsRouter = router({
         search: z.string().trim().optional(),
         page: z.number().int().min(1).default(1),
         limit: z.number().int().min(1).max(100).default(25),
-      }),
+      }).strict(),
     )
     .query(async ({ input }) => {
       const filter: Record<string, unknown> = {};
@@ -326,14 +326,12 @@ export const adminRoomsRouter = router({
     }),
 
   get: adminSessionProcedure
-    .input(z.object({ roomId: z.string().min(1) }))
+    .input(z.object({ roomId: z.string().min(1) }).strict())
     .query(async ({ input }) => {
+      try {
       const doc = await Room.findOne({ roomId: input.roomId }).lean();
       if (!doc) {
-        throw new TRPCError({
-          code: "NOT_FOUND",
-          message: `Room ${input.roomId} not found`,
-        });
+        throw new NotFoundError(`Room ${input.roomId} not found`);
       }
       const room = doc as unknown as LeanRoom;
 
@@ -567,5 +565,8 @@ export const adminRoomsRouter = router({
         },
         txTrail,
       };
+      } catch (err) {
+        mapAppErrorToTRPC(err);
+      }
     }),
 });

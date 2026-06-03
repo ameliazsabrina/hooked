@@ -1,7 +1,7 @@
 import { z } from "zod";
-import { TRPCError } from "@trpc/server";
 import { adminSessionProcedure, router } from "../trpc.js";
 import { Catch, FishingSession, Player, ReactionLog } from "../../db/schema.js";
+import { NotFoundError, mapAppErrorToTRPC } from "../../errors/AppError.js";
 
 // Lean() returns mongoose Buffers as BSON Binary, not Node Buffer. Normalize
 // to hex so the wire shape is stable.
@@ -61,7 +61,7 @@ export const adminSessionsRouter = router({
         dateKey: z.number().int().optional(),
         page: z.number().int().min(1).default(1),
         limit: z.number().int().min(1).max(100).default(50),
-      }),
+      }).strict(),
     )
     .query(async ({ input }) => {
       const filter: Record<string, unknown> = {};
@@ -117,14 +117,12 @@ export const adminSessionsRouter = router({
     }),
 
   get: adminSessionProcedure
-    .input(z.object({ sessionId: z.string().min(1) }))
+    .input(z.object({ sessionId: z.string().min(1) }).strict())
     .query(async ({ input }) => {
+      try {
       const session = await FishingSession.findById(input.sessionId).lean();
       if (!session) {
-        throw new TRPCError({
-          code: "NOT_FOUND",
-          message: `Session ${input.sessionId} not found`,
-        });
+        throw new NotFoundError(`Session ${input.sessionId} not found`);
       }
       const [catches, reactionLogs, player] = await Promise.all([
         Catch.find({ sessionId: session._id })
@@ -209,5 +207,8 @@ export const adminSessionsRouter = router({
           createdAt: (r as { createdAt?: Date }).createdAt ?? null,
         })),
       };
+      } catch (err) {
+        mapAppErrorToTRPC(err);
+      }
     }),
 });

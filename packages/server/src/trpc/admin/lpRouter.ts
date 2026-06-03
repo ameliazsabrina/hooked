@@ -16,7 +16,7 @@ export const adminLpRouter = router({
         status: z.enum(STATUS_VALUES).optional(),
         page: z.number().int().min(1).default(1),
         limit: z.number().int().min(1).max(100).default(50),
-      }),
+      }).strict(),
     )
     .query(async ({ input }) => {
       const filter: Record<string, unknown> = {};

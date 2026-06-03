@@ -1,4 +1,5 @@
 import { TRPCError } from "@trpc/server";
+import { AppError, mapAppErrorToTRPC } from "../../errors/AppError.js";
 import { CastEngineError, type CastEngineErrorCode } from "./errors.js";
 
 /**
@@ -26,6 +27,7 @@ const CODE_MAP: Record<CastEngineErrorCode, TRPCError["code"]> = {
 };
 
 export function mapFishingError(err: unknown): never {
+  if (err instanceof AppError) mapAppErrorToTRPC(err);
   if (err instanceof CastEngineError) {
     throw new TRPCError({
       code: CODE_MAP[err.code],

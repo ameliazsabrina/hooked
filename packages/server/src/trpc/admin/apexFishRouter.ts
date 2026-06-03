@@ -8,6 +8,12 @@ import {
 } from "../../db/schema.js";
 import { invalidateApexCatalog } from "../../services/fishing/apexCatalog.js";
 import { adminSessionProcedure, router } from "../trpc.js";
+import {
+  NotFoundError,
+  ConflictError,
+  ValidationError,
+  mapAppErrorToTRPC,
+} from "../../errors/AppError.js";
 
 const ObjectIdString = z
   .string()
@@ -23,7 +29,7 @@ const imagePayloadSchema = z.object({
     .min(1)
     .refine((s) => /^[A-Za-z0-9+/=]+$/.test(s), "imageBase64 must be base64"),
   imageMimeType: imageMimeSchema,
-});
+}).strict();
 
 function decodeImage(input: {
   imageBase64: string;
@@ -34,12 +40,10 @@ function decodeImage(input: {
 } {
   const buffer = Buffer.from(input.imageBase64, "base64");
   if (buffer.length === 0) {
-    throw new TRPCError({
-      code: "BAD_REQUEST",
-      message: "imageBase64 decoded to zero bytes",
-    });
+    throw new ValidationError("imageBase64 decoded to zero bytes");
   }
   if (buffer.length > MAX_IMAGE_BYTES) {
+    // PAYLOAD_TOO_LARGE has no AppError subclass; keep TRPCError directly.
     throw new TRPCError({
       code: "PAYLOAD_TOO_LARGE",
       message: `Image exceeds ${MAX_IMAGE_BYTES} bytes (${buffer.length})`,
@@ -93,7 +97,7 @@ const createInput = z.object({
   weightMinKg: z.number().min(0),
   weightMaxKg: z.number().min(0),
   ...imagePayloadSchema.shape,
-});
+}).strict();
 
 const updateInput = z.object({
   id: ObjectIdString,
@@ -102,7 +106,7 @@ const updateInput = z.object({
   weightMaxKg: z.number().min(0).optional(),
   imageBase64: imagePayloadSchema.shape.imageBase64.optional(),
   imageMimeType: imagePayloadSchema.shape.imageMimeType.optional(),
-});
+}).strict();
 
 /**
  * Admin CRUD for the ApexFish catalog. Image bytes arrive as base64 in the
@@ -122,121 +126,114 @@ export const adminApexFishRouter = router({
   }),
 
   get: adminSessionProcedure
-    .input(z.object({ id: ObjectIdString }))
+    .input(z.object({ id: ObjectIdString }).strict())
     .query(async ({ ctx, input }) => {
-      const doc = await ApexFish.findById(input.id, { imageData: 0 }).lean();
-      if (!doc) {
-        throw new TRPCError({ code: "NOT_FOUND", message: "Apex fish not found" });
+      try {
+        const doc = await ApexFish.findById(input.id, { imageData: 0 }).lean();
+        if (!doc) {
+          throw new NotFoundError("Apex fish not found");
+        }
+        return serialize(doc, ctx.requestOrigin);
+      } catch (err) {
+        mapAppErrorToTRPC(err);
       }
-      return serialize(doc, ctx.requestOrigin);
     }),
 
   create: adminSessionProcedure
     .input(createInput)
     .mutation(async ({ ctx, input }) => {
-      if (input.weightMaxKg < input.weightMinKg) {
-        throw new TRPCError({
-          code: "BAD_REQUEST",
-          message: "weightMaxKg must be ≥ weightMinKg",
-        });
-      }
-      const { buffer, mimeType } = decodeImage(input);
       try {
-        const doc = await ApexFish.create({
-          name: input.name,
-          weightMinKg: input.weightMinKg,
-          weightMaxKg: input.weightMaxKg,
-          imageData: buffer,
-          imageMimeType: mimeType,
-          createdBy: ctx.adminWallet,
-        });
-        invalidateApexCatalog();
-        return serialize(doc.toObject(), ctx.requestOrigin);
-      } catch (err) {
-        if ((err as { code?: number }).code === 11000) {
-          throw new TRPCError({
-            code: "CONFLICT",
-            message: `An apex fish named "${input.name}" already exists`,
-          });
+        if (input.weightMaxKg < input.weightMinKg) {
+          throw new ValidationError("weightMaxKg must be ≥ weightMinKg");
         }
-        throw err;
+        const { buffer, mimeType } = decodeImage(input);
+        try {
+          const doc = await ApexFish.create({
+            name: input.name,
+            weightMinKg: input.weightMinKg,
+            weightMaxKg: input.weightMaxKg,
+            imageData: buffer,
+            imageMimeType: mimeType,
+            createdBy: ctx.adminWallet,
+          });
+          invalidateApexCatalog();
+          return serialize(doc.toObject(), ctx.requestOrigin);
+        } catch (err) {
+          if ((err as { code?: number }).code === 11000) {
+            throw new ConflictError(`An apex fish named "${input.name}" already exists`);
+          }
+          throw err;
+        }
+      } catch (err) {
+        mapAppErrorToTRPC(err);
       }
     }),
 
   update: adminSessionProcedure
     .input(updateInput)
     .mutation(async ({ ctx, input }) => {
-      const existing = await ApexFish.findById(input.id);
-      if (!existing) {
-        throw new TRPCError({
-          code: "NOT_FOUND",
-          message: "Apex fish not found",
-        });
-      }
-      if (input.name !== undefined) existing.name = input.name;
-      if (input.weightMinKg !== undefined) existing.weightMinKg = input.weightMinKg;
-      if (input.weightMaxKg !== undefined) existing.weightMaxKg = input.weightMaxKg;
-      if (existing.weightMaxKg < existing.weightMinKg) {
-        throw new TRPCError({
-          code: "BAD_REQUEST",
-          message: "weightMaxKg must be ≥ weightMinKg",
-        });
-      }
-      if (input.imageBase64 !== undefined) {
-        if (input.imageMimeType === undefined) {
-          throw new TRPCError({
-            code: "BAD_REQUEST",
-            message: "imageMimeType required when uploading new image bytes",
-          });
-        }
-        const { buffer, mimeType } = decodeImage({
-          imageBase64: input.imageBase64,
-          imageMimeType: input.imageMimeType,
-        });
-        existing.imageData = buffer;
-        existing.imageMimeType = mimeType;
-      }
       try {
-        await existing.save();
-      } catch (err) {
-        if ((err as { code?: number }).code === 11000) {
-          throw new TRPCError({
-            code: "CONFLICT",
-            message: `Apex fish name conflicts with an existing record`,
-          });
+        const existing = await ApexFish.findById(input.id);
+        if (!existing) {
+          throw new NotFoundError("Apex fish not found");
         }
-        throw err;
+        if (input.name !== undefined) existing.name = input.name;
+        if (input.weightMinKg !== undefined) existing.weightMinKg = input.weightMinKg;
+        if (input.weightMaxKg !== undefined) existing.weightMaxKg = input.weightMaxKg;
+        if (existing.weightMaxKg < existing.weightMinKg) {
+          throw new ValidationError("weightMaxKg must be ≥ weightMinKg");
+        }
+        if (input.imageBase64 !== undefined) {
+          if (input.imageMimeType === undefined) {
+            throw new ValidationError("imageMimeType required when uploading new image bytes");
+          }
+          const { buffer, mimeType } = decodeImage({
+            imageBase64: input.imageBase64,
+            imageMimeType: input.imageMimeType,
+          });
+          existing.imageData = buffer;
+          existing.imageMimeType = mimeType;
+        }
+        try {
+          await existing.save();
+        } catch (err) {
+          if ((err as { code?: number }).code === 11000) {
+            throw new ConflictError(`Apex fish name conflicts with an existing record`);
+          }
+          throw err;
+        }
+        invalidateApexCatalog();
+        return serialize(existing.toObject(), ctx.requestOrigin);
+      } catch (err) {
+        mapAppErrorToTRPC(err);
       }
-      invalidateApexCatalog();
-      return serialize(existing.toObject(), ctx.requestOrigin);
     }),
 
   delete: adminSessionProcedure
-    .input(z.object({ id: ObjectIdString }))
+    .input(z.object({ id: ObjectIdString }).strict())
     .mutation(async ({ input }) => {
-      const blocking = await FishingEvent.findOne({
-        apexFishIds: input.id,
-        $or: [{ active: true }, { endsAt: { $gt: new Date() } }],
-      })
-        .select({ _id: 1, name: 1 })
-        .lean();
-      if (blocking) {
-        throw new TRPCError({
-          code: "CONFLICT",
-          message:
+      try {
+        const blocking = await FishingEvent.findOne({
+          apexFishIds: input.id,
+          $or: [{ active: true }, { endsAt: { $gt: new Date() } }],
+        })
+          .select({ _id: 1, name: 1 })
+          .lean();
+        if (blocking) {
+          throw new ConflictError(
             `Cannot delete: apex fish is referenced by an active or ` +
             `scheduled event ("${blocking.name}"). Remove it from the ` +
             `event first.`,
-        });
+          );
+        }
+        const result = await ApexFish.deleteOne({ _id: input.id });
+        if (result.deletedCount === 0) {
+          throw new NotFoundError("Apex fish not found");
+        }
+        invalidateApexCatalog();
+        return { ok: true };
+      } catch (err) {
+        mapAppErrorToTRPC(err);
       }
-      const result = await ApexFish.deleteOne({ _id: input.id });
-      if (result.deletedCount === 0) {
-        throw new TRPCError({
-          code: "NOT_FOUND",
-          message: "Apex fish not found",
-        });
-      }
-      invalidateApexCatalog();
-      return { ok: true };
     }),
 });

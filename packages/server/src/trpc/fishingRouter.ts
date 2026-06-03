@@ -1,7 +1,11 @@
-import { TRPCError } from "@trpc/server";
 import { z } from "zod";
 
 import { Player, FishingSession } from "../db/schema.js";
+import {
+  ForbiddenError,
+  NotFoundError,
+  ValidationError,
+} from "../errors/AppError.js";
 import { enqueueScoreBridge } from "../jobs/queue.js";
 import { baitAmountForDeposit } from "../services/baitAmount.js";
 import { getActiveEvent } from "../services/eventConfig.js";
@@ -116,10 +120,10 @@ async function assertOwnedSession(
     .select({ walletAddress: 1 })
     .lean();
   if (!session) {
-    throw new TRPCError({ code: "NOT_FOUND", message: "Session not found" });
+    throw new NotFoundError("Session not found");
   }
   if (session.walletAddress !== walletAddress) {
-    throw new TRPCError({ code: "FORBIDDEN", message: "Not your session" });
+    throw new ForbiddenError("Not your session");
   }
 }
 
@@ -129,25 +133,23 @@ async function deriveBaitForWallet(
 ): Promise<{ baitInitial: number; tier: number; roomId: string }> {
   const player = await Player.findOne({ walletAddress }).lean();
   if (!player) {
-    throw new TRPCError({ code: "NOT_FOUND", message: "Player not found" });
+    throw new NotFoundError("Player not found");
   }
   const active = (player.deposits ?? [])
     .filter((d) => !d.returned)
     .sort((a, b) => b.depositedAt.getTime() - a.depositedAt.getTime())[0];
   if (!active) {
-    throw new TRPCError({
-      code: "BAD_REQUEST",
-      message: "No active room deposit — cannot start a fishing session",
-    });
+    throw new ValidationError(
+      "No active room deposit — cannot start a fishing session",
+    );
   }
   let baitInitial: number;
   try {
     baitInitial = baitAmountForDeposit(active.amount);
   } catch (err) {
-    throw new TRPCError({
-      code: "BAD_REQUEST",
-      message: `Invalid deposit for bait derivation: ${(err as Error).message}`,
-    });
+    throw new ValidationError(
+      `Invalid deposit for bait derivation: ${(err as Error).message}`,
+    );
   }
   // Tier derived from deposit in 0.5 SOL steps.
   const tier = Math.min(4, Math.max(1, Math.round(active.amount / 0.5)));

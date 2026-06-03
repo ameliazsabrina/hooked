@@ -1,5 +1,4 @@
 import { z } from "zod";
-import { TRPCError } from "@trpc/server";
 import { Connection } from "@solana/web3.js";
 import { router, protectedProcedure } from "./trpc.js";
 import {
@@ -15,6 +14,11 @@ import { env } from "../config/env.js";
 import { isValidDepositAmount, VALID_DEPOSIT_AMOUNTS } from "@hooked/shared";
 import { assignWindow } from "../services/fishing/window.js";
 import { baitAmountForDeposit } from "../services/baitAmount.js";
+import {
+  ConflictError,
+  ValidationError,
+  mapAppErrorToTRPC,
+} from "../errors/AppError.js";
 import * as lb from "../services/leaderboard.js";
 
 const BUCKET_TIER = 1;
@@ -149,6 +153,7 @@ export const playerRouter = router({
         .object({
           limit: z.number().int().min(1).max(500).default(200),
         })
+        .strict()
         .optional(),
     )
     .query(async ({ ctx, input }) => {
@@ -318,29 +323,30 @@ export const playerRouter = router({
           .min(3, "Nickname must be at least 3 characters")
           .max(16, "Nickname must be at most 16 characters")
           .regex(/^[a-zA-Z0-9]+$/, "Nickname must be alphanumeric"),
-      })
+      }).strict()
     )
     .mutation(async ({ ctx, input }) => {
-      const taken = await Player.findOne({ nickname: input.nickname }).lean();
-      if (taken && taken.walletAddress !== ctx.walletAddress) {
-        throw new TRPCError({
-          code: "CONFLICT",
-          message: "Nickname already taken",
-        });
+      try {
+        const taken = await Player.findOne({ nickname: input.nickname }).lean();
+        if (taken && taken.walletAddress !== ctx.walletAddress) {
+          throw new ConflictError("Nickname already taken");
+        }
+
+        const player = await Player.findOneAndUpdate(
+          { walletAddress: ctx.walletAddress },
+          { $set: { nickname: input.nickname }, $setOnInsert: { walletAddress: ctx.walletAddress } },
+          { upsert: true, new: true }
+        ).lean();
+
+        return {
+          nickname: player!.nickname,
+          shellBalance: player!.shellBalance,
+          loginStreak: player!.loginStreak,
+          totalCatches: player!.totalCatches,
+        };
+      } catch (err) {
+        mapAppErrorToTRPC(err);
       }
-
-      const player = await Player.findOneAndUpdate(
-        { walletAddress: ctx.walletAddress },
-        { $set: { nickname: input.nickname }, $setOnInsert: { walletAddress: ctx.walletAddress } },
-        { upsert: true, new: true }
-      ).lean();
-
-      return {
-        nickname: player!.nickname,
-        shellBalance: player!.shellBalance,
-        loginStreak: player!.loginStreak,
-        totalCatches: player!.totalCatches,
-      };
     }),
 
   setSkin: protectedProcedure
@@ -350,20 +356,24 @@ export const playerRouter = router({
         shirt: z.number().int().min(1).max(3),
         pants: z.number().int().min(1).max(3),
         shoes: z.number().int().min(1).max(2),
-      })
+      }).strict()
     )
     .mutation(async ({ ctx, input }) => {
-      const existing = await Player.findOne({ walletAddress: ctx.walletAddress }).lean();
-      if (!existing || !existing.nickname) {
-        throw new TRPCError({ code: "BAD_REQUEST", message: "Set nickname first" });
+      try {
+        const existing = await Player.findOne({ walletAddress: ctx.walletAddress }).lean();
+        if (!existing || !existing.nickname) {
+          throw new ValidationError("Set nickname first");
+        }
+
+        await Player.updateOne(
+          { walletAddress: ctx.walletAddress },
+          { $set: { skin: input } }
+        );
+
+        return { skin: input };
+      } catch (err) {
+        mapAppErrorToTRPC(err);
       }
-
-      await Player.updateOne(
-        { walletAddress: ctx.walletAddress },
-        { $set: { skin: input } }
-      );
-
-      return { skin: input };
     }),
 
   confirmDeposit: protectedProcedure
@@ -374,86 +384,90 @@ export const playerRouter = router({
           message: `Deposit must be one of ${VALID_DEPOSIT_AMOUNTS.join(", ")} SOL`,
         }),
         poolId: z.string().optional(),
-      })
+      }).strict()
     )
     .mutation(async ({ ctx, input }) => {
-      const existing = await Player.findOne({ walletAddress: ctx.walletAddress }).lean();
-      if (!existing || !existing.nickname) {
-        throw new TRPCError({ code: "BAD_REQUEST", message: "Complete onboarding first" });
+      try {
+        const existing = await Player.findOne({ walletAddress: ctx.walletAddress }).lean();
+        if (!existing || !existing.nickname) {
+          throw new ValidationError("Complete onboarding first");
+        }
+
+        const activeDeposit = existing.deposits?.find((d) => !d.returned);
+        if (activeDeposit) {
+          throw new ValidationError("Already deposited");
+        }
+
+        const duplicate = await Player.findOne({
+          "deposits.depositTxSignature": input.txSignature,
+        }).lean();
+        if (duplicate) {
+          throw new ConflictError("Transaction already used");
+        }
+
+        const tx = await solanaConnection.getTransaction(input.txSignature, {
+          maxSupportedTransactionVersion: 0,
+        });
+
+        if (!tx) {
+          throw new ValidationError("Transaction not found");
+        }
+
+        if (tx.meta?.err) {
+          throw new ValidationError("Transaction failed on-chain");
+        }
+
+        const staticKeys = tx.transaction.message.staticAccountKeys;
+        const walletInvolved = staticKeys.some(
+          (key) => key.toBase58() === ctx.walletAddress
+        );
+        if (!walletInvolved) {
+          throw new ValidationError("Transaction does not involve your wallet");
+        }
+
+        const now = new Date();
+        const activeMonth = now.toISOString().slice(0, 7);
+        const lpEnabled = env.FEATURES_LP_ENABLED;
+        const serverPoolId = lpEnabled ? `${BUCKET_TIER}_${activeMonth}` : null;
+        const expiresAt = lpEnabled
+          ? new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000)
+          : null;
+
+        const depositEntry = {
+          poolId: serverPoolId ?? "vault",
+          amount: input.depositAmount,
+          depositTxSignature: input.txSignature,
+          activeMonth,
+          depositedAt: now,
+          expiresAt: expiresAt ?? new Date(now.getTime() + 365 * 24 * 60 * 60 * 1000),
+          returned: false,
+        };
+
+        await Player.updateOne(
+          { walletAddress: ctx.walletAddress },
+          {
+            $push: { deposits: depositEntry },
+            $set: { currentPoolId: serverPoolId },
+          },
+        );
+
+        if (lpEnabled) {
+          await PoolTier.findOneAndUpdate(
+            { tier: BUCKET_TIER, activeMonth },
+            { $inc: { realPlayerCount: 1, totalDepositedSol: input.depositAmount } },
+            { upsert: true, new: true }
+          ).lean();
+        }
+
+        return {
+          depositAmount: depositEntry.amount,
+          depositedAt: depositEntry.depositedAt,
+          activeMonth: lpEnabled ? activeMonth : null,
+          expiresAt: expiresAt?.toISOString() ?? null,
+          currentPoolId: serverPoolId,
+        };
+      } catch (err) {
+        mapAppErrorToTRPC(err);
       }
-
-      const activeDeposit = existing.deposits?.find((d) => !d.returned);
-      if (activeDeposit) {
-        throw new TRPCError({ code: "BAD_REQUEST", message: "Already deposited" });
-      }
-
-      const duplicate = await Player.findOne({
-        "deposits.depositTxSignature": input.txSignature,
-      }).lean();
-      if (duplicate) {
-        throw new TRPCError({ code: "CONFLICT", message: "Transaction already used" });
-      }
-
-      const tx = await solanaConnection.getTransaction(input.txSignature, {
-        maxSupportedTransactionVersion: 0,
-      });
-
-      if (!tx) {
-        throw new TRPCError({ code: "BAD_REQUEST", message: "Transaction not found" });
-      }
-
-      if (tx.meta?.err) {
-        throw new TRPCError({ code: "BAD_REQUEST", message: "Transaction failed on-chain" });
-      }
-
-      const staticKeys = tx.transaction.message.staticAccountKeys;
-      const walletInvolved = staticKeys.some(
-        (key) => key.toBase58() === ctx.walletAddress
-      );
-      if (!walletInvolved) {
-        throw new TRPCError({ code: "BAD_REQUEST", message: "Transaction does not involve your wallet" });
-      }
-
-      const now = new Date();
-      const activeMonth = now.toISOString().slice(0, 7);
-      const lpEnabled = env.FEATURES_LP_ENABLED;
-      const serverPoolId = lpEnabled ? `${BUCKET_TIER}_${activeMonth}` : null;
-      const expiresAt = lpEnabled
-        ? new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000)
-        : null;
-
-      const depositEntry = {
-        poolId: serverPoolId ?? "vault",
-        amount: input.depositAmount,
-        depositTxSignature: input.txSignature,
-        activeMonth,
-        depositedAt: now,
-        expiresAt: expiresAt ?? new Date(now.getTime() + 365 * 24 * 60 * 60 * 1000),
-        returned: false,
-      };
-
-      await Player.updateOne(
-        { walletAddress: ctx.walletAddress },
-        {
-          $push: { deposits: depositEntry },
-          $set: { currentPoolId: serverPoolId },
-        },
-      );
-
-      if (lpEnabled) {
-        await PoolTier.findOneAndUpdate(
-          { tier: BUCKET_TIER, activeMonth },
-          { $inc: { realPlayerCount: 1, totalDepositedSol: input.depositAmount } },
-          { upsert: true, new: true }
-        ).lean();
-      }
-
-      return {
-        depositAmount: depositEntry.amount,
-        depositedAt: depositEntry.depositedAt,
-        activeMonth: lpEnabled ? activeMonth : null,
-        expiresAt: expiresAt?.toISOString() ?? null,
-        currentPoolId: serverPoolId,
-      };
     }),
 });

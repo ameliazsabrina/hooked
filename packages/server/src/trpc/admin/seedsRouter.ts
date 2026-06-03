@@ -1,7 +1,7 @@
 import { z } from "zod";
-import { TRPCError } from "@trpc/server";
 import { adminSessionProcedure, router } from "../trpc.js";
 import { FishingDailySeed, FishingSession } from "../../db/schema.js";
+import { NotFoundError, mapAppErrorToTRPC } from "../../errors/AppError.js";
 
 // Mongoose Buffer fields come back as a BSON Binary on lean(). Normalize to
 // hex so the dashboard never has to know which transport flavor it got.
@@ -23,7 +23,7 @@ export const adminSeedsRouter = router({
       z.object({
         page: z.number().int().min(1).default(1),
         limit: z.number().int().min(1).max(100).default(30),
-      }),
+      }).strict(),
     )
     .query(async ({ input }) => {
       const [items, totalCount] = await Promise.all([
@@ -57,30 +57,31 @@ export const adminSeedsRouter = router({
     }),
 
   get: adminSessionProcedure
-    .input(z.object({ date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/) }))
+    .input(z.object({ date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/) }).strict())
     .query(async ({ input }) => {
-      const seed = await FishingDailySeed.findOne({ date: input.date }).lean();
-      if (!seed) {
-        throw new TRPCError({
-          code: "NOT_FOUND",
-          message: `No daily seed for ${input.date}`,
+      try {
+        const seed = await FishingDailySeed.findOne({ date: input.date }).lean();
+        if (!seed) {
+          throw new NotFoundError(`No daily seed for ${input.date}`);
+        }
+        const revealed = new Date(seed.revealAfter).getTime() <= Date.now();
+
+        // How many sessions rolled against this seed (audit reach metric).
+        const sessionCount = await FishingSession.countDocuments({
+          dailySeedDate: input.date,
         });
+
+        return {
+          date: seed.date,
+          seedHashHex: bytesToHex(seed.seedHash),
+          seedHex: revealed ? bytesToHex(seed.seed) : null,
+          revealed,
+          publishedAt: seed.publishedAt,
+          revealAfter: seed.revealAfter,
+          sessionCount,
+        };
+      } catch (err) {
+        mapAppErrorToTRPC(err);
       }
-      const revealed = new Date(seed.revealAfter).getTime() <= Date.now();
-
-      // How many sessions rolled against this seed (audit reach metric).
-      const sessionCount = await FishingSession.countDocuments({
-        dailySeedDate: input.date,
-      });
-
-      return {
-        date: seed.date,
-        seedHashHex: bytesToHex(seed.seedHash),
-        seedHex: revealed ? bytesToHex(seed.seed) : null,
-        revealed,
-        publishedAt: seed.publishedAt,
-        revealAfter: seed.revealAfter,
-        sessionCount,
-      };
     }),
 });

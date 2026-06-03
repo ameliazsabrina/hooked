@@ -5,6 +5,7 @@ import { Player, PoolTier, DailyLeaderboard } from "../db/schema.js";
 import { POOL_TIERS, DEPOSIT_APY_ESTIMATE, YIELD_SPLIT, POOL_DURATION_DAYS } from "@hooked/shared";
 import * as lb from "../services/leaderboard.js";
 import { env } from "../config/env.js";
+import { ValidationError, mapAppErrorToTRPC } from "../errors/AppError.js";
 
 function todayUTC(): string {
   return new Date().toISOString().slice(0, 10);
@@ -24,7 +25,7 @@ const tierInput = z.object({
   tier: z.number().refine((v) => POOL_TIERS.includes(v as any), {
     message: "Invalid pool tier",
   }),
-});
+}).strict();
 
 export const poolRouter = router({
   activePool: protectedProcedure
@@ -76,7 +77,7 @@ export const poolRouter = router({
       z.object({
         tier: z.number().refine((v) => POOL_TIERS.includes(v as any)),
         date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
-      })
+      }).strict()
     )
     .query(async ({ ctx, input }) => {
       if (!env.FEATURES_LP_ENABLED) {
@@ -160,52 +161,56 @@ export const poolRouter = router({
     }),
 
   myRank: protectedProcedure.query(async ({ ctx }) => {
-    if (!env.FEATURES_LP_ENABLED) {
-      return { rank: null, dailyScore: 0, totalEntries: 0, estimatedPrize: null };
+    try {
+      if (!env.FEATURES_LP_ENABLED) {
+        return { rank: null, dailyScore: 0, totalEntries: 0, estimatedPrize: null };
+      }
+      const player = await Player.findOne(
+        { walletAddress: ctx.walletAddress },
+        { _id: 1, currentPoolId: 1 }
+      ).lean();
+
+      if (!player?.currentPoolId) {
+        throw new ValidationError("Not deposited in any pool");
+      }
+
+      const tier = parseTierFromPoolId(player.currentPoolId);
+      if (!tier) {
+        throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Invalid pool ID" });
+      }
+
+      const date = todayUTC();
+      const playerId = player._id.toString();
+
+      const [rank, score, totalEntries] = await Promise.all([
+        lb.getPlayerRank(ctx.redis, tier, date, playerId),
+        lb.getPlayerScore(ctx.redis, tier, date, playerId),
+        lb.getEntryCount(ctx.redis, tier, date),
+      ]);
+
+      const poolTierDoc = await PoolTier.findOne({
+        tier,
+        activeMonth: currentMonth(),
+      }).lean();
+
+      const realCount = poolTierDoc?.realPlayerCount ?? 0;
+      const grossPoolYield = tier * realCount * DEPOSIT_APY_ESTIMATE * (POOL_DURATION_DAYS / 365);
+      const splits = [YIELD_SPLIT.first, YIELD_SPLIT.second, YIELD_SPLIT.third];
+
+      let estimatedPrize: number | null = null;
+      if (rank !== null && rank < 3) {
+        estimatedPrize = Math.round(grossPoolYield * splits[rank] * 1e9) / 1e9;
+      }
+
+      return {
+        rank: rank !== null ? rank + 1 : null,
+        dailyScore: score ?? 0,
+        totalEntries,
+        estimatedPrize,
+      };
+    } catch (err) {
+      mapAppErrorToTRPC(err);
     }
-    const player = await Player.findOne(
-      { walletAddress: ctx.walletAddress },
-      { _id: 1, currentPoolId: 1 }
-    ).lean();
-
-    if (!player?.currentPoolId) {
-      throw new TRPCError({ code: "BAD_REQUEST", message: "Not deposited in any pool" });
-    }
-
-    const tier = parseTierFromPoolId(player.currentPoolId);
-    if (!tier) {
-      throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Invalid pool ID" });
-    }
-
-    const date = todayUTC();
-    const playerId = player._id.toString();
-
-    const [rank, score, totalEntries] = await Promise.all([
-      lb.getPlayerRank(ctx.redis, tier, date, playerId),
-      lb.getPlayerScore(ctx.redis, tier, date, playerId),
-      lb.getEntryCount(ctx.redis, tier, date),
-    ]);
-
-    const poolTierDoc = await PoolTier.findOne({
-      tier,
-      activeMonth: currentMonth(),
-    }).lean();
-
-    const realCount = poolTierDoc?.realPlayerCount ?? 0;
-    const grossPoolYield = tier * realCount * DEPOSIT_APY_ESTIMATE * (POOL_DURATION_DAYS / 365);
-    const splits = [YIELD_SPLIT.first, YIELD_SPLIT.second, YIELD_SPLIT.third];
-
-    let estimatedPrize: number | null = null;
-    if (rank !== null && rank < 3) {
-      estimatedPrize = Math.round(grossPoolYield * splits[rank] * 1e9) / 1e9;
-    }
-
-    return {
-      rank: rank !== null ? rank + 1 : null,
-      dailyScore: score ?? 0,
-      totalEntries,
-      estimatedPrize,
-    };
   }),
 
   info: protectedProcedure
@@ -239,7 +244,7 @@ export const poolRouter = router({
         poolId: z.string(),
         offset: z.number().int().min(0).default(0),
         limit: z.number().int().min(1).max(100).default(50),
-      })
+      }).strict()
     )
     .query(async ({ ctx, input }) => {
       if (!env.FEATURES_LP_ENABLED) {
@@ -286,7 +291,7 @@ export const poolRouter = router({
       z.object({
         tier: z.number().refine((v) => POOL_TIERS.includes(v as any)),
         days: z.number().int().min(1).max(30).default(7),
-      })
+      }).strict()
     )
     .query(async ({ ctx, input }) => {
       if (!env.FEATURES_LP_ENABLED) return [];
