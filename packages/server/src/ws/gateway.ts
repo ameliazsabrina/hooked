@@ -142,10 +142,7 @@ interface SessionContext {
   // Fixed-timestep accumulator (seconds). Both sides MUST step at
   // PHYSICS_FIXED_DT or the shared mulberry32 RNG state diverges.
   physicsAccumS: number;
-  // Lag-comp: first input sample's `t_ms` defines simTimeS=0. Both sides
-  // step physics up to (wallNow - physicsServerOriginMs)/1000 - INPUT_DELAY_S,
-  // looking up the input active at each step's simTimeS so the bar trajectory
-  // is deterministic modulo the clock-skew offset baked into origin.
+  // Lag-comp: simTimeS=0 at the first sample's t_ms; both sides step to (wallNow - serverOrigin)/1000 - INPUT_DELAY_S, deterministic modulo clock skew.
   physicsClientOriginMs: number | null;
   physicsServerOriginMs: number;
   simTimeS: number;
@@ -224,11 +221,7 @@ interface Socket {
   session: SessionContext | null;
   roomId: string | null;
   send: (m: ServerMessage) => void;
-  // Adaptive lag-comp telemetry, persisted across casts on this connection.
-  // netMinOffsetMs ≈ (clock skew + best-case one-way latency); subtracting it
-  // from each sample's (arrival - t_ms) cancels the skew and yields the live
-  // network jitter we must buffer. netJitterMs is a decaying max so a single
-  // spike raises the buffer then relaxes.
+  // Adaptive lag-comp telemetry across casts: netMinOffsetMs cancels clock skew, netJitterMs is a decaying max of observed jitter.
   netMinOffsetMs: number | null;
   netJitterMs: number;
   // Heartbeat: consecutive 25s ticks without a pong; terminate at 2.
@@ -252,11 +245,7 @@ function computeAdaptiveDelayMs(socket: Socket): number {
 const sockets = new Map<string, Socket>();
 const socketsByWallet = new Map<string, Set<string>>();
 
-// Nonce store lives in Redis, not process memory: the WS upgrade and the
-// preceding /ws/claim-nonce HTTP call may land on different Fly machines
-// when min_machines_running > 1 or during rolling deploys. In-memory state
-// produced split-brain "unknown or expired nonce" failures and triggered
-// the client's auth_failed → re-sign → loop.
+// Nonce in Redis (not memory): WS upgrade and /ws/claim-nonce can hit different Fly machines, which caused split-brain auth_failed → re-sign loops.
 const NONCE_TTL_MS = 2 * 60 * 1000;
 
 function nonceRedisKey(wallet: string, nonce: string): string {
@@ -632,13 +621,7 @@ function ensureEventCacheBound(): void {
   startEventPolling();
 }
 
-// LAG-COMP MODEL. Bar physics depends on input timing; running against
-// `heldLatest` drifts trajectory by the network jitter on each transition.
-// Instead we replay inputs at client-stamped simTime:
-//   simTimeS(sample) = (sample.t_ms - physicsClientOriginMs) / 1000
-//   server steps physics up to (now - physicsServerOriginMs)/1000 - INPUT_DELAY_S
-// INPUT_DELAY_S buffers behind wallclock so most samples land before their
-// step is processed — late samples (RTT/2 > INPUT_DELAY) are dropped.
+// Lag-comp: replay inputs at client simTime ((t_ms - clientOrigin)/1000); server steps to (now - serverOrigin)/1000 - INPUT_DELAY_S; late samples (RTT/2 > delay) dropped.
 
 const PHYSICS_TICK_MS = 33;
 
@@ -1514,10 +1497,7 @@ export default fp(async (fastify) => {
               return;
             }
             for (const s of msg.samples) ctx.samples.push(s);
-            // Update the socket's network-jitter estimate (drives the next
-            // cast's adaptive lag-comp buffer). (arrival - t_ms) folds in clock
-            // skew + one-way latency; subtracting the rolling min cancels the
-            // skew, leaving live jitter. Decaying max so a spike relaxes later.
+            // Update the jitter estimate for the next cast's lag-comp buffer: (arrival - t_ms) minus the rolling min cancels skew; decaying max so spikes relax.
             const arrivalNow = Date.now();
             for (const s of msg.samples) {
               const offset = arrivalNow - s.t_ms;
@@ -1533,10 +1513,7 @@ export default fp(async (fastify) => {
                 socket.netJitterMs * NET_JITTER_DECAY,
               );
             }
-            // Simulation-time origin = `t_ms` of the FIRST held=true sample.
-            // Pre-tap keep-alives are absorbed so client/server origins land
-            // on the same wallclock instant. Late arrivals are clamped forward
-            // to the earliest simTime the server can absorb.
+            // simTime origin = first held=true sample's t_ms; pre-tap keep-alives absorbed; late arrivals clamped forward.
             for (const s of msg.samples) {
               if (ctx.physicsClientOriginMs === null) {
                 if (!s.held) continue;
@@ -1617,12 +1594,7 @@ export default fp(async (fastify) => {
             console.log(
               `[finalize] cast=${ctx.activeCastId} progress=${ctx.game.progress.toFixed(3)} peak=${ctx.peakProgress.toFixed(3)} rejects=${ctx.rejectedFinalCount} clamped=${ctx.clampedCount} maxClampMs=${ctx.maxClampMs.toFixed(0)} delayMs=${(ctx.inputDelayS * 1000).toFixed(0)} -> ${ctx.rejectedFinalCount >= DESYNC_REJECT_THRESHOLD ? "ESCAPE" : "REJECT(retry)"}`,
             );
-            // On divergence, resolve as escaped instead of looping. Previously
-            // we emitted desync_correction and kept retrying; in practice the
-            // input timeline can be permanently diverged (late transitions
-            // clamped server-side), so the cast would spiral until the 30s
-            // safety timeout. Server is authoritative — progress didn't reach
-            // the floor, so the catch isn't earned.
+            // On divergence resolve as escaped, not loop: the timeline can be permanently diverged, and server-authoritative progress didn't reach the floor.
             if (
               ctx.rejectedFinalCount === DESYNC_REJECT_THRESHOLD &&
               ctx.desyncDetectedAt === null

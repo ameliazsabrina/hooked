@@ -66,8 +66,7 @@ export interface CastAcceptedMessage {
   castTimestamp: number;
 }
 
-// `serverTs` is authoritative for reaction-time validation; clientTs is
-// recorded for cheat telemetry only.
+// serverTs is authoritative for reaction-time validation; clientTs is cheat telemetry only.
 export interface NibbleEventMessage {
   type: "nibble_event";
   sessionId: string;
@@ -103,11 +102,7 @@ export interface InputSamplesMessage {
   samples: InputSample[];
 }
 
-/**
- * Verdict claim separated from input_samples — prevents phantom
- * input-history transitions from retried "final" messages. Server-side
- * floor check is authoritative; client state is not trusted.
- */
+// Separate from input_samples so a retried final can't inject phantom input; server floor check is authoritative.
 export interface CastFinalizeMessage {
   type: "cast_finalize";
   sessionId: string;
@@ -133,12 +128,7 @@ export interface FishHookedMessage {
   castTimestamp: number;
   /** Same seed the server uses, so client visuals match resolution. */
   rngSeed: number;
-  /**
-   * Adaptive lag-comp buffer (ms) the server chose for this cast based on the
-   * socket's measured network jitter. The client MUST step its local physics
-   * to `wallSinceOrigin - inputDelayMs/1000` with this exact value so its
-   * simulation tracks the server's. Falls back to INPUT_DELAY_MS if absent.
-   */
+  // Adaptive lag-comp buffer (ms); client MUST step physics with this exact value, else falls back to INPUT_DELAY_MS.
   inputDelayMs: number;
 }
 
@@ -203,8 +193,7 @@ export interface CircularTapInputMsg {
   msSinceTapStart: number;
 }
 
-// Server replays taps through its own spinner physics — verdict is
-// server-authoritative.
+// Server replays taps through its own spinner physics; verdict is server-authoritative.
 export interface CircularTapCompleteMessage {
   type: "circular_tap_complete";
   sessionId: string;
