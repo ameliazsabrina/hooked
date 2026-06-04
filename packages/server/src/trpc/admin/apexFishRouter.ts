@@ -108,12 +108,7 @@ const updateInput = z.object({
   imageMimeType: imagePayloadSchema.shape.imageMimeType.optional(),
 }).strict();
 
-/**
- * Admin CRUD for the ApexFish catalog. Image bytes arrive as base64 in the
- * JSON payload (cap ~2MB after decode) so the tRPC transport stays pure;
- * the dashboard reads images via the public `GET /admin/apex-fish/:id/image`
- * Fastify route.
- */
+// Admin CRUD for the ApexFish catalog; images arrive as base64 (cap ~2MB), served via GET /admin/apex-fish/:id/image.
 export const adminApexFishRouter = router({
   list: adminSessionProcedure.query(async ({ ctx }) => {
     const docs = await ApexFish.find(

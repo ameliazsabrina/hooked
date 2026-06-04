@@ -65,8 +65,7 @@ export const adminStatsRouter = router({
           createdByAdmin: 1,
         })
         .lean(),
-      // Fishing telemetry — added after the on-chain hooked_fishing program
-      // was retired and sessions moved to MongoDB.
+      // Fishing telemetry — added after hooked_fishing was retired and sessions moved to MongoDB.
       FishingSession.countDocuments({ status: "active" }),
       FishingSession.countDocuments({ startedAt: { $gte: since24h } }),
       Catch.countDocuments({ caughtAt: { $gte: since24h } }),
@@ -78,8 +77,7 @@ export const adminStatsRouter = router({
         createdAt: { $gte: since24h },
         reactionTimeMs: { $gt: 0, $lt: SUSPICIOUS_REACTION_MS },
       }),
-      // Sessions that committed but haven't been score-bridged yet — keeper
-      // job stuck or RPC down.
+      // Committed but not yet score-bridged — keeper job stuck or RPC down.
       FishingSession.countDocuments({
         status: "committed",
         chainScoreTxSignature: null,

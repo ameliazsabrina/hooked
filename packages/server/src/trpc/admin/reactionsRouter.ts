@@ -9,8 +9,7 @@ const OUTCOME_VALUES = [
   "cancelled",
 ] as const;
 
-// Reflexes faster than this are physically implausible; surface them so an
-// admin can investigate (matches the threshold used by the gateway logger).
+// Reflexes faster than this are implausible; surface for admin review (matches the gateway logger threshold).
 const SUSPICIOUS_REACTION_MS = 100;
 
 export const adminReactionsRouter = router({

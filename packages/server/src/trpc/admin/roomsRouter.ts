@@ -248,9 +248,7 @@ export const adminRoomsRouter = router({
         phase: z.enum(PHASE_VALUES).optional(),
         // Filter rooms by `lp.status`. Combine with phase if needed.
         lpStatus: z.enum(LP_STATUS_VALUES).optional(),
-        // Surface only rooms with at least one player whose principal hasn't
-        // been returned yet. Implies phase=closed (return only happens after
-        // settling).
+        // Only rooms with an unreturned principal; implies phase=closed (return happens after settling).
         stuckReturns: z.boolean().optional(),
         search: z.string().trim().optional(),
         page: z.number().int().min(1).default(1),
@@ -495,9 +493,7 @@ export const adminRoomsRouter = router({
 
       const txTrail = buildTxTrail(room, players);
 
-      // Score bridge txs: each player's session writes a memo to
-      // hooked_rooms.update_room_entry_score after commit. Surface them
-      // alongside the room so admins can confirm scores landed on-chain.
+      // Score-bridge txs: each session memos update_room_entry_score after commit; surfaced so admins can confirm on-chain.
       const scoreBridges = playerWallets.length
         ? await FishingSession.find({
             walletAddress: { $in: playerWallets },

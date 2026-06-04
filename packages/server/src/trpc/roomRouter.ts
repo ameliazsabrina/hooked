@@ -296,8 +296,7 @@ export const roomRouter = router({
           },
         );
 
-        // Enforce capacity invariants here too so DB can't drift under concurrent
-        // recoveries or manual data fixes (on-chain remains source of truth).
+        // Enforce capacity invariants here too so DB can't drift under concurrent recoveries (on-chain stays source of truth).
         const roomUpdate = await Room.updateOne(
           {
             roomId: roomDoc.roomId,

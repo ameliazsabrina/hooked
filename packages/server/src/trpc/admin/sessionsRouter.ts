@@ -3,8 +3,7 @@ import { adminSessionProcedure, router } from "../trpc.js";
 import { Catch, FishingSession, Player, ReactionLog } from "../../db/schema.js";
 import { NotFoundError, mapAppErrorToTRPC } from "../../errors/AppError.js";
 
-// Lean() returns mongoose Buffers as BSON Binary, not Node Buffer. Normalize
-// to hex so the wire shape is stable.
+// lean() returns Buffers as BSON Binary, not Node Buffer; normalize to hex for a stable wire shape.
 function bytesToHex(value: unknown): string | null {
   if (!value) return null;
   if (Buffer.isBuffer(value)) return value.toString("hex");
@@ -19,9 +18,7 @@ function bytesToHex(value: unknown): string | null {
 
 const STATUS_VALUES = ["active", "committed", "abandoned"] as const;
 
-// Exported for tRPC type inference: when a procedure returns a value typed
-// as a private interface, the generated router type can't be named in the
-// dashboard's typecheck and inference collapses to `never`.
+// Exported for tRPC inference — a private return interface collapses the generated router type to never.
 export interface SessionListItem {
   id: string;
   walletAddress: string;

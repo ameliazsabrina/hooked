@@ -3,8 +3,7 @@ import { adminSessionProcedure, router } from "../trpc.js";
 import { FishingDailySeed, FishingSession } from "../../db/schema.js";
 import { NotFoundError, mapAppErrorToTRPC } from "../../errors/AppError.js";
 
-// Mongoose Buffer fields come back as a BSON Binary on lean(). Normalize to
-// hex so the dashboard never has to know which transport flavor it got.
+// Mongoose Buffer fields come back as BSON Binary on lean(); normalize to hex.
 function bytesToHex(value: unknown): string | null {
   if (!value) return null;
   if (Buffer.isBuffer(value)) return value.toString("hex");
@@ -42,8 +41,7 @@ export const adminSeedsRouter = router({
           return {
             date: s.date,
             seedHashHex: bytesToHex(s.seedHash),
-            // Only expose the raw seed after revealAfter has passed — same
-            // policy as the public audit endpoint, applied here for safety.
+            // Only expose the raw seed after revealAfter (same policy as the public audit endpoint).
             seedHex: revealed ? bytesToHex(s.seed) : null,
             revealed,
             publishedAt: s.publishedAt,

@@ -28,9 +28,7 @@ export const adminCatchesRouter = router({
         };
       }
 
-      // wallet filter requires a join via Player; do it via populate path.
-      // Cheaper: keep wallet on Catch as a denorm if the volume grows. For
-      // now we filter via aggregate when wallet is supplied.
+      // wallet filter joins via Player (aggregate); denorm wallet onto Catch if volume grows.
       type Stage = Record<string, unknown>;
       const pipeline: Stage[] = [
         { $match: filter },

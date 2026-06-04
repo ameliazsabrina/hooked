@@ -94,21 +94,13 @@ export const playerRouter = router({
       return { exists: false as const };
     }
 
-    // Active = SOL still on-chain. `returned` flips exactly when keeper's
-    // return_principal lands. expiresAt is informational; gating on it
-    // would prompt redeposits before SOL has actually returned.
+    // Active = SOL still on-chain; `returned` flips when keeper's return_principal lands (expiresAt is informational).
     const activeDeposit =
       player.deposits?.find((d) => !d.returned) ?? null;
 
     const lpEnabled = env.FEATURES_LP_ENABLED;
 
-    // States driven from room.phase + closesAt (B4):
-    //   "deposit"  — no active deposit
-    //   "active"   — entry/active + closesAt future; cast enabled
-    //   "closing"  — closesAt passed, lifecycle tick hasn't run
-    //   "settling" — close_room may have run, SOL returning
-    //   "closed"   — finalized but deposit.returned race not flipped
-    //   "missing"  — deposit references a deleted room (defensive)
+    // windowState from room.phase + closesAt; only "active" (entry/active + closesAt future) enables casting.
     let windowState:
       | "deposit"
       | "active"
@@ -189,8 +181,7 @@ export const playerRouter = router({
 
       const activeDeposit = player.deposits?.find((d) => !d.returned);
 
-      // Fall back to deposit-projected bait so the first cast can fire
-      // before ensureActiveSession lazy-creates the session row.
+      // Fall back to deposit-projected bait so the first cast can fire before the session row exists.
       let bait = 0;
       try {
         const session = await FishingSession.findOne(
@@ -214,8 +205,7 @@ export const playerRouter = router({
         ? await Room.findOne({ roomId: activeDeposit.poolId }).lean()
         : null;
 
-      // Room window state (mirrors player.me) so the client can gate casting
-      // off a read-only, poll-safe query. Only "active" allows casting.
+      // Room window state (mirrors player.me) for a poll-safe cast gate; only "active" allows casting.
       let windowState:
         | "deposit"
         | "active"
@@ -239,8 +229,7 @@ export const playerRouter = router({
 
       const playerId = player._id as Types.ObjectId;
 
-      // Room-scoped score from Redis sorted set lb:room:<roomId>. New rooms
-      // show 0 immediately rather than leaking score from a prior overlapping room.
+      // Room-scoped score from Redis lb:room:<roomId>; new rooms show 0, not leaked score from a prior room.
       let score = 0;
       if (activeRoom) {
         try {

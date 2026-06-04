@@ -147,8 +147,7 @@ export const authRouter = router({
           Math.max(1, Math.floor((delegation.expiresAt - Date.now()) / 1000)),
         );
 
-        // Idempotent re-exchange — abuse surface is bounded by rate limit,
-        // session TTL, and logout-revokes-binding.
+        // Idempotent re-exchange — bounded by rate limit, session TTL, and logout-revokes-binding.
         const priorToken = await ctx.redis.get(bindingKey);
         if (priorToken) {
           const priorTtlSec = await ctx.redis.ttl(sessionKey(priorToken));
