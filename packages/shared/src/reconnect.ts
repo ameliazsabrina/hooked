@@ -1,8 +1,3 @@
-// Client-side guard for terminal cast outcomes across the WS reconnect boundary.
-// catch_resolved is money-critical (debits bait, credits score), so it is
-// deduped against replays. fish_escaped has no money side effect, so it is only
-// gated to the active or recovering cast — and the server may send both for the
-// same cast (no-tap miss), so they must NOT share a dedup set.
 export class TerminalGuard {
   private readonly resolvedSeen = new Set<string>();
   private pendingRecovery: string | null = null;

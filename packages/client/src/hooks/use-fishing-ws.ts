@@ -22,10 +22,12 @@ import { vibrate } from "../utils/haptics";
 import { trpc } from "../utils/trpc";
 import { useSessionAuth } from "../providers/session-auth-provider";
 import {
-  clearDelegation,
-  loadDelegation,
-  signNonceWithSessionKey,
-} from "../utils/ws-delegation";
+  CAST_ANIMATION_MS,
+  HOOK_ANIMATION_MS,
+  NIBBLE_WINDOW_MS,
+  type ServerMessage,
+} from "./fishing-ws/protocol";
+import { useFishingSocket } from "./fishing-ws/use-fishing-socket";
 
 export type FishingState =
   | "idle"
@@ -40,10 +42,6 @@ export type FishingState =
   | "circular_tap"
   | "caught"
   | "missed";
-
-const CAST_ANIMATION_MS = 700;
-const HOOK_ANIMATION_MS = 350;
-const NIBBLE_WINDOW_MS = 2000;
 
 export interface CaughtFish {
   id: string;
@@ -69,131 +67,9 @@ export interface RoomLeaderboardSnapshot {
   updatedAt: number;
 }
 
-const DEFAULT_GATEWAY_HTTP = "http://localhost:3001";
-const RECONNECT_DELAY_MS = 1500;
-
-type ServerMessage =
-  | { type: "authenticated"; wallet: string; sessionPda?: string }
-  | { type: "auth_failed"; reason: string }
-  | {
-      type: "cast_accepted";
-      sessionId: string;
-      clientCastId: string;
-      castTimestamp: number;
-    }
-  | {
-      type: "nibble_event";
-      sessionId: string;
-      clientCastId: string;
-      serverTs: number;
-    }
-  | {
-      type: "fish_escaped";
-      sessionId: string;
-      clientCastId: string;
-      reason: "no_tap" | "early_tap";
-    }
-  | {
-      type: "fish_hooked";
-      sessionId: string;
-      clientCastId: string;
-      speciesId: number;
-      apexFishId: string | null;
-      apexAssetUrl: string | null;
-      speciesName: string;
-      rarity: number;
-      mechanic: number;
-      greenZoneStart: number;
-      greenZoneWidth: number;
-      weightHg: number;
-      castTimestamp: number;
-      rngSeed: number;
-      // Server-chosen adaptive lag-comp buffer for this cast. Optional so an
-      // older server still parses; client falls back to INPUT_DELAY_MS.
-      inputDelayMs?: number;
-    }
-  | {
-      type: "fishing_state";
-      sessionId: string;
-      clientCastId: string;
-      barY: number;
-      fishY: number;
-      progress: number;
-      tickIndex: number;
-    }
-  | {
-      type: "desync_correction";
-      sessionId: string;
-      clientCastId: string;
-      barY: number;
-      fishY: number;
-      progress: number;
-      tickIndex: number;
-    }
-  | {
-      type: "catch_resolved";
-      sessionId: string;
-      clientCastId: string;
-      hit: boolean;
-      speciesId: number;
-      apexFishId: string | null;
-      apexAssetUrl: string | null;
-      speciesName: string;
-      rarity: number;
-      weightHg: number;
-      score: number;
-      roomId?: string;
-    }
-  | {
-      type: "leaderboard_update";
-      roomId?: string;
-      date: string;
-      entries: Array<{
-        wallet: string;
-        displayName?: string;
-        score: number;
-        catchCount: number;
-      }>;
-    }
-  | { type: "bait_refilled"; bait: number; window: number; date: number }
-  | {
-      type: "event_status";
-      active: boolean;
-      name: string;
-      startsAt: number;
-      endsAt: number;
-      apexBp: number;
-      prizePoolSol: number;
-      apexFishes: Array<{
-        id: string;
-        name: string;
-        weightMinKg: number;
-        weightMaxKg: number;
-        assetUrl: string;
-      }>;
-    }
-  | { type: "error"; code: string; message: string }
-  | { type: "pong"; t: number };
-
-function httpBase(): string {
-  const override = import.meta.env.VITE_GATEWAY_HTTP as string | undefined;
-  return override ?? DEFAULT_GATEWAY_HTTP;
-}
-
-function wsUrl(): string {
-  const override = import.meta.env.VITE_WS_URL as string | undefined;
-  if (override) return override;
-  const http = httpBase();
-  return http.replace(/^http/, "ws") + "/ws/gateway";
-}
-
 export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
   const { publicKey } = useWallet();
   const { ready: authReady, retry: sessionRetry } = useSessionAuth();
-  const sessionRetryRef = useRef(sessionRetry);
-  useEffect(() => {
-    sessionRetryRef.current = sessionRetry;
-  }, [sessionRetry]);
 
   const [state, setState] = useState<FishingState>("idle");
   const [bait, setBait] = useState(0);
@@ -256,7 +132,6 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
   const [roomLeaderboard, setRoomLeaderboard] =
     useState<RoomLeaderboardSnapshot | null>(null);
 
-  const wsRef = useRef<WebSocket | null>(null);
   const activeCastIdRef = useRef<string | null>(null);
   const biteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const castAnimTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -265,12 +140,8 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
     null,
   );
   const nibbleServerTsRef = useRef<number | null>(null);
-  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Mirrors the socket's authed flag for non-reactive reads (e.g. cast()).
   const authedRef = useRef(false);
-  const connectingRef = useRef(false);
-  const [authed, setAuthed] = useState(false);
-  const reconnectAttemptsRef = useRef(0);
-  const MAX_RECONNECT_ATTEMPTS = 5;
   // Dedups money-critical catch_resolved and tracks the cast to recover on
   // reconnect; see TerminalGuard.
   const guardRef = useRef(new TerminalGuard());
@@ -300,9 +171,7 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
   useEffect(() => {
     const data = sessionStateQuery.data;
     if (!data) return;
-    // Hydrate bait once per (wallet, date, window) — same-window reconnects
-    // preserve local optimistic decrements; wallet switch or window rotation
-    // re-hydrates from on-chain state.
+    // Hydrate bait once per (wallet, date, window); same-window reconnects keep local decrements, rotation re-hydrates.
     const baitKey = walletStr
       ? `${walletStr}:${data.date}:${data.window}`
       : null;
@@ -345,153 +214,41 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
     setDiscoveredApexFish([]);
   }, [walletStr]);
 
-  const connect = useCallback(async () => {
-    if (!walletStr) return;
-    if (wsRef.current || connectingRef.current) return;
-    // SessionAuthProvider owns the signMessage prompt; WS only reads delegation.
-    if (!authReady) return;
-    connectingRef.current = true;
-
-    try {
-      const bundle = loadDelegation(walletStr);
-      if (!bundle) {
-        console.warn(
-          "[ws] no cached delegation; SessionAuthProvider must complete first.",
-        );
-        return;
+  // Gameplay-state cleanup when the socket drops; the controller stashes the
+  // in-flight cast for recovery before calling this.
+  const onReset = useCallback(() => {
+    heldRef.current = false;
+    activeCastIdRef.current = null;
+    for (const t of [
+      biteTimerRef,
+      nibbleWindowTimerRef,
+      castAnimTimerRef,
+      hookAnimTimerRef,
+    ]) {
+      if (t.current) {
+        clearTimeout(t.current);
+        t.current = null;
       }
-
-      const nonceRes = await fetch(`${httpBase()}/ws/nonce`);
-      const { nonce } = (await nonceRes.json()) as {
-        nonce: string;
-        message: string;
-      };
-
-      const signature = signNonceWithSessionKey(bundle.sessionSecret, nonce);
-
-      const claimRes = await fetch(`${httpBase()}/ws/claim-nonce`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ wallet: walletStr, nonce }),
-      });
-      if (!claimRes.ok) throw new Error("nonce claim failed");
-
-      const ws = new WebSocket(wsUrl());
-      wsRef.current = ws;
-
-      ws.addEventListener("open", () => {
-        ws.send(
-          JSON.stringify({
-            type: "authenticate",
-            wallet: walletStr,
-            nonce,
-            signature,
-            delegation: bundle.delegation,
-            recoverCastId: guardRef.current.recoverCastId(),
-          }),
-        );
-      });
-
-      ws.addEventListener("message", (ev) => {
-        let msg: ServerMessage;
-        try {
-          msg = JSON.parse(ev.data as string) as ServerMessage;
-        } catch {
-          return;
-        }
-        handleMessage(msg);
-      });
-
-      ws.addEventListener("close", () => {
-        const wasAuthed = authedRef.current;
-        wsRef.current = null;
-        authedRef.current = false;
-        setAuthed(false);
-        // Clear cast bookkeeping; otherwise a mid-reel drop wedges heldRef and
-        // setHeld silently no-ops the next cast's first press.
-        heldRef.current = false;
-        // Remember the in-flight cast so reconnect can recover its outcome.
-        guardRef.current.stashRecovery(activeCastIdRef.current);
-        activeCastIdRef.current = null;
-        if (biteTimerRef.current) {
-          clearTimeout(biteTimerRef.current);
-          biteTimerRef.current = null;
-        }
-        if (nibbleWindowTimerRef.current) {
-          clearTimeout(nibbleWindowTimerRef.current);
-          nibbleWindowTimerRef.current = null;
-        }
-        if (castAnimTimerRef.current) {
-          clearTimeout(castAnimTimerRef.current);
-          castAnimTimerRef.current = null;
-        }
-        if (hookAnimTimerRef.current) {
-          clearTimeout(hookAnimTimerRef.current);
-          hookAnimTimerRef.current = null;
-        }
-        setState((prev) =>
-          prev === "casting" ||
-          prev === "cast_animating" ||
-          prev === "idle_waiting" ||
-          prev === "nibble_window" ||
-          prev === "hooking" ||
-          prev === "biting" ||
-          prev === "reeling"
-            ? "idle"
-            : prev,
-        );
-        if (wasAuthed) {
-          reconnectAttemptsRef.current = 0;
-        }
-        if (reconnectAttemptsRef.current >= MAX_RECONNECT_ATTEMPTS) {
-          console.warn("[ws] max reconnect attempts reached — forcing re-auth");
-          reconnectAttemptsRef.current = 0;
-          sessionRetryRef.current();
-          return;
-        }
-        reconnectAttemptsRef.current++;
-        if (!reconnectTimerRef.current) {
-          reconnectTimerRef.current = setTimeout(() => {
-            reconnectTimerRef.current = null;
-            connect();
-          }, RECONNECT_DELAY_MS);
-        }
-      });
-
-      ws.addEventListener("error", () => {
-        try {
-          ws.close();
-        } catch {}
-      });
-    } catch (err) {
-      console.warn("[ws] connect failed:", err);
-    } finally {
-      connectingRef.current = false;
     }
-  }, [walletStr, authReady]);
+    setState((prev) =>
+      prev === "casting" ||
+      prev === "cast_animating" ||
+      prev === "idle_waiting" ||
+      prev === "nibble_window" ||
+      prev === "hooking" ||
+      prev === "biting" ||
+      prev === "reeling"
+        ? "idle"
+        : prev,
+    );
+  }, []);
+
+  const onSession = useCallback((sessionPda: string | null) => {
+    if (sessionPda) setSessionId(sessionPda);
+  }, []);
 
   const handleMessage = useCallback((msg: ServerMessage) => {
     switch (msg.type) {
-      case "authenticated": {
-        authedRef.current = true;
-        setAuthed(true);
-        reconnectAttemptsRef.current = 0;
-        if (msg.sessionPda) setSessionId(msg.sessionPda);
-        return;
-      }
-      case "auth_failed": {
-        console.warn("[ws] auth failed:", msg.reason);
-        authedRef.current = false;
-        setAuthed(false);
-        const wallet = walletStrRef.current;
-        if (wallet) clearDelegation(wallet);
-        try {
-          wsRef.current?.close();
-        } catch {}
-        wsRef.current = null;
-        sessionRetryRef.current();
-        return;
-      }
       case "bait_refilled": {
         // Align hydration key so a subsequent sessionStateQuery can't clobber.
         setBait(msg.bait);
@@ -710,19 +467,13 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
       }
       case "error": {
         console.warn("[ws] server error:", msg.code, msg.message);
-        // "no_active_cast" is a race: server resolved the cast and cleared the
-        // slot while a keep-alive sample was in-flight. Ignore — catch_resolved
-        // is on its way; clearing castId here would strand onTimingBarResolve.
+        // no_active_cast is a race (server resolved while a keep-alive was in-flight); ignore, catch_resolved is coming.
         if (msg.code === "no_active_cast") {
           return;
         }
-        // Room stopped accepting casts (settling/closed). Refresh room state so
-        // the Cast button disables + the settling notice shows immediately,
-        // rather than waiting for the next player.me poll.
+        // Room stopped accepting casts; refresh room state so the Cast button disables immediately.
         if (msg.code === "window_closed") {
-          // Refresh both: sessionState (poll-safe, new field) and me (carries
-          // windowState on already-deployed servers). me's streak recompute is
-          // idempotent within a UTC day, so a one-off invalidate here is safe.
+          // Refresh sessionState + me; me's streak recompute is idempotent within a UTC day.
           void utils.player.sessionState.invalidate();
           void utils.player.me.invalidate();
         }
@@ -756,41 +507,41 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
     }
   }, []);
 
+  const { authed, send } = useFishingSocket({
+    walletStr,
+    authReady,
+    guard: guardRef.current,
+    onMessage: handleMessage,
+    onSession,
+    onReset,
+    getActiveCastId: () => activeCastIdRef.current,
+    sessionRetry,
+  });
   useEffect(() => {
-    connect();
+    authedRef.current = authed;
+  }, [authed]);
+
+  // Socket lifecycle lives in useFishingSocket; just clear gameplay timers on unmount.
+  useEffect(() => {
     return () => {
-      if (reconnectTimerRef.current) {
-        clearTimeout(reconnectTimerRef.current);
-        reconnectTimerRef.current = null;
+      for (const t of [
+        biteTimerRef,
+        castAnimTimerRef,
+        hookAnimTimerRef,
+        nibbleWindowTimerRef,
+      ]) {
+        if (t.current) {
+          clearTimeout(t.current);
+          t.current = null;
+        }
       }
-      if (biteTimerRef.current) {
-        clearTimeout(biteTimerRef.current);
-        biteTimerRef.current = null;
-      }
-      if (castAnimTimerRef.current) {
-        clearTimeout(castAnimTimerRef.current);
-        castAnimTimerRef.current = null;
-      }
-      if (hookAnimTimerRef.current) {
-        clearTimeout(hookAnimTimerRef.current);
-        hookAnimTimerRef.current = null;
-      }
-      if (nibbleWindowTimerRef.current) {
-        clearTimeout(nibbleWindowTimerRef.current);
-        nibbleWindowTimerRef.current = null;
-      }
-      const ws = wsRef.current;
-      if (ws && ws.readyState === WebSocket.OPEN) ws.close();
-      wsRef.current = null;
     };
-  }, [connect]);
+  }, []);
 
   // Global tap-to-hook listener, mounted only during nibble_window so resting
   // taps (e.g. opening the shop) don't consume the hook.
   useEffect(() => {
     if (state !== "nibble_window") return;
-    const ws = wsRef.current;
-    if (!ws) return;
 
     const handleTap = (ev: Event) => {
       // preventDefault stops mobile double-tap zoom + text selection.
@@ -800,14 +551,12 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
       const castId = activeCastIdRef.current;
       if (!castId) return;
       const clientTs = Date.now();
-      ws.send(
-        JSON.stringify({
-          type: "nibble_response",
-          sessionId: sessionId ?? "",
-          clientCastId: castId,
-          clientTs,
-        }),
-      );
+      send({
+        type: "nibble_response",
+        sessionId: sessionId ?? "",
+        clientCastId: castId,
+        clientTs,
+      });
       setState("hooking");
       if (hookAnimTimerRef.current) clearTimeout(hookAnimTimerRef.current);
       // Timer exists only for cleanup; fish_hooked is what advances state.
@@ -841,8 +590,6 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
 
   const cast = useCallback(async () => {
     if (state !== "idle" || bait <= 0 || !authedRef.current) return;
-    const ws = wsRef.current;
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
 
     const clientCastId = crypto.randomUUID();
     activeCastIdRef.current = clientCastId;
@@ -850,40 +597,32 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
     gameRef.current?.events.emit("castLine");
     playSfx("castRod");
 
-    ws.send(
-      JSON.stringify({ type: "cast_initiate", power: 100, clientCastId }),
-    );
+    send({ type: "cast_initiate", power: 100, clientCastId });
   }, [state, bait, gameRef]);
 
   const sendInputSamples = useCallback(
     (samples: Array<{ held: boolean; index: number; t_ms: number }>) => {
-      const ws = wsRef.current;
       const castId = activeCastIdRef.current;
-      if (!ws || ws.readyState !== WebSocket.OPEN || !castId) return;
-      ws.send(
-        JSON.stringify({
-          type: "input_samples",
-          sessionId: sessionId ?? "",
-          clientCastId: castId,
-          samples,
-        }),
-      );
+      if (!castId) return;
+      send({
+        type: "input_samples",
+        sessionId: sessionId ?? "",
+        clientCastId: castId,
+        samples,
+      });
     },
     [sessionId],
   );
 
   /** Idempotent finalize; server decides catch vs miss using its own progress. */
   const sendCastFinalize = useCallback(() => {
-    const ws = wsRef.current;
     const castId = activeCastIdRef.current;
-    if (!ws || ws.readyState !== WebSocket.OPEN || !castId) return;
-    ws.send(
-      JSON.stringify({
-        type: "cast_finalize",
-        sessionId: sessionId ?? "",
-        clientCastId: castId,
-      }),
-    );
+    if (!castId) return;
+    send({
+      type: "cast_finalize",
+      sessionId: sessionId ?? "",
+      clientCastId: castId,
+    });
   }, [sessionId]);
 
   const holdIndexRef = useRef(0);
@@ -937,17 +676,14 @@ export function useFishingWs(gameRef: React.RefObject<Phaser.Game | null>) {
         tapIndex: i,
         msSinceTapStart: r.msSinceTapStart,
       }));
-      const ws = wsRef.current;
       const castId = activeCastIdRef.current;
-      if (ws && ws.readyState === WebSocket.OPEN && castId) {
-        ws.send(
-          JSON.stringify({
-            type: "circular_tap_complete",
-            sessionId: sessionId ?? "",
-            clientCastId: castId,
-            taps,
-          }),
-        );
+      if (castId) {
+        send({
+          type: "circular_tap_complete",
+          sessionId: sessionId ?? "",
+          clientCastId: castId,
+          taps,
+        });
       }
 
       // Optimistically mount phase two; server's catch_resolved is canonical.
