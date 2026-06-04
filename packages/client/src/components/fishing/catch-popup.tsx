@@ -24,12 +24,8 @@ export function CatchPopup({ fish, onDismiss }: CatchPopupProps) {
   }, [fish.rarity, onDismiss]);
 
   return (
-    <div className="catch-popup-overlay" onClick={onDismiss}>
-      <div
-        className="catch-popup"
-        style={{ borderColor: rarityColor }}
-        onClick={(e) => e.stopPropagation()}
-      >
+    <div className="catch-popup-overlay">
+      <div className="catch-popup" style={{ borderColor: rarityColor }}>
         <div
           className="catch-popup-rarity-badge"
           style={{ background: rarityColor }}
@@ -71,7 +67,7 @@ export function MissPopup({ onDismiss }: MissPopupProps) {
   }, [onDismiss]);
 
   return (
-    <div className="catch-popup-overlay miss-overlay" onClick={onDismiss}>
+    <div className="catch-popup-overlay miss-overlay">
       <div className="miss-popup">
         <div className="miss-text">It got away!</div>
       </div>
