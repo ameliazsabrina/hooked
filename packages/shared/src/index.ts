@@ -9,3 +9,4 @@ export * from "./equipment.js";
 export * from "./fishing-game.js";
 export * from "./circularTap.js";
 export * from "./reconnect.js";
+export * from "./validation.js";

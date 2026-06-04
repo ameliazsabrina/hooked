@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { isValidNickname, sanitizeNickname, NICKNAME_MAX } from "@hooked/shared";
 import { trpc } from "~/utils/trpc";
 import "./onboarding.css";
 
@@ -21,11 +22,10 @@ export function NicknameScreen() {
     },
   });
 
-  const isValid = /^[a-zA-Z0-9]{3,16}$/.test(nickname);
+  const isValid = isValidNickname(nickname);
 
   function handleChange(value: string) {
-    const filtered = value.replace(/[^a-zA-Z0-9]/g, "").slice(0, 16);
-    setNickname(filtered);
+    setNickname(sanitizeNickname(value));
     setError("");
   }
 
@@ -50,7 +50,9 @@ export function NicknameScreen() {
             onKeyDown={(e) => e.key === "Enter" && handleSubmit()}
             autoFocus
           />
-          <span className="onboarding-char-count">{nickname.length} / 16</span>
+          <span className="onboarding-char-count">
+            {nickname.length} / {NICKNAME_MAX}
+          </span>
         </div>
 
         <div className="onboarding-preview">

@@ -11,7 +11,14 @@ import {
 } from "../db/schema.js";
 import type { Types } from "mongoose";
 import { env } from "../config/env.js";
-import { isValidDepositAmount, VALID_DEPOSIT_AMOUNTS } from "@hooked/shared";
+import {
+  isValidDepositAmount,
+  VALID_DEPOSIT_AMOUNTS,
+  NICKNAME_MIN,
+  NICKNAME_MAX,
+  NICKNAME_REGEX,
+  NICKNAME_ERRORS,
+} from "@hooked/shared";
 import { assignWindow } from "../services/fishing/window.js";
 import { baitAmountForDeposit } from "../services/baitAmount.js";
 import {
@@ -317,13 +324,15 @@ export const playerRouter = router({
 
   setNickname: protectedProcedure
     .input(
-      z.object({
-        nickname: z
-          .string()
-          .min(3, "Nickname must be at least 3 characters")
-          .max(16, "Nickname must be at most 16 characters")
-          .regex(/^[a-zA-Z0-9]+$/, "Nickname must be alphanumeric"),
-      }).strict()
+      z
+        .object({
+          nickname: z
+            .string()
+            .min(NICKNAME_MIN, NICKNAME_ERRORS.min)
+            .max(NICKNAME_MAX, NICKNAME_ERRORS.max)
+            .regex(NICKNAME_REGEX, NICKNAME_ERRORS.charset),
+        })
+        .strict(),
     )
     .mutation(async ({ ctx, input }) => {
       try {
