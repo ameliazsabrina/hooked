@@ -27,7 +27,6 @@ describe("WebSocket — heartbeat & auth timeout", () => {
   }
 
   it("closes an unauthenticated socket after the auth timeout (4001)", async () => {
-    // Floored auth timeout; keep heartbeat long so it doesn't interfere.
     process.env.WS_AUTH_TIMEOUT_MS = "1000";
     process.env.WS_HEARTBEAT_MS = "100000";
 
