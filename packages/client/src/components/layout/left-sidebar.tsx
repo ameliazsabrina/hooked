@@ -1,5 +1,5 @@
 import { useWallet } from "@solana/wallet-adapter-react";
-import { trpc } from "~/utils/trpc";
+import { usePlayer } from "~/hooks/use-player";
 import { useSessionAuth } from "~/providers/session-auth-provider";
 import { BountyList } from "./bounty-list";
 
@@ -12,7 +12,7 @@ const STREAK_CYCLE = 7;
 export function LeftSidebar({ nickname }: LeftSidebarProps) {
   const { connected } = useWallet();
   const { ready: authReady } = useSessionAuth();
-  const playerQuery = trpc.player.me.useQuery(undefined, {
+  const playerQuery = usePlayer({
     enabled: connected && authReady,
   });
   const streak = playerQuery.data?.exists ? playerQuery.data.loginStreak : 0;

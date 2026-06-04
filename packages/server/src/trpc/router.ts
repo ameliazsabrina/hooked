@@ -37,3 +37,7 @@ export const appRouter = router({
 });
 
 export type AppRouter = typeof appRouter;
+
+import type { inferRouterInputs, inferRouterOutputs } from "@trpc/server";
+export type RouterInputs = inferRouterInputs<AppRouter>;
+export type RouterOutputs = inferRouterOutputs<AppRouter>;

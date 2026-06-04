@@ -1,5 +1,5 @@
 import { useWallet } from "@solana/wallet-adapter-react";
-import { trpc } from "~/utils/trpc";
+import { useBounties } from "~/hooks/use-bounties";
 import { useSessionAuth } from "~/providers/session-auth-provider";
 
 interface BountyListProps {
@@ -79,7 +79,7 @@ export function BountyList({ variant = "sidebar" }: BountyListProps) {
   const { connected } = useWallet();
   const { ready: authReady } = useSessionAuth();
 
-  const bountiesQuery = trpc.bounty.active.useQuery(undefined, {
+  const bountiesQuery = useBounties({
     enabled: connected && authReady,
     refetchInterval: 30_000,
   });

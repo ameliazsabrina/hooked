@@ -1,17 +1,13 @@
 import { useState } from "react";
 import { isValidNickname, sanitizeNickname, NICKNAME_MAX } from "@hooked/shared";
-import { trpc } from "~/utils/trpc";
+import { useSetNickname } from "~/hooks/use-player";
 import "./onboarding.css";
 
 export function NicknameScreen() {
   const [nickname, setNickname] = useState("");
   const [error, setError] = useState("");
-  const utils = trpc.useUtils();
 
-  const mutation = trpc.player.setNickname.useMutation({
-    onSuccess: () => {
-      utils.player.me.invalidate();
-    },
+  const mutation = useSetNickname({
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     onError: (err: any) => {
       if (err.data?.code === "CONFLICT") {

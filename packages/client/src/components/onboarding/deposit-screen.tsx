@@ -17,7 +17,7 @@ import {
   getRoomVaultPda,
   getRoomEntryPda,
 } from "~/utils/anchor";
-import { trpc } from "~/utils/trpc";
+import { useActiveRoom, useRecoverEntry } from "~/hooks/use-room";
 import { useProgramPaused } from "~/hooks/use-program-paused";
 import "./onboarding.css";
 
@@ -78,11 +78,8 @@ export function DepositScreen() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
-  const activeRoom = trpc.room.active.useQuery(undefined, {
-    refetchInterval: 15_000,
-  });
-  const trpcUtils = trpc.useUtils();
-  const recoverEntry = trpc.room.recoverEntry.useMutation();
+  const activeRoom = useActiveRoom({ refetchInterval: 15_000 });
+  const recoverEntry = useRecoverEntry();
   const programPaused = useProgramPaused();
 
   const openRoom =
@@ -140,10 +137,6 @@ export function DepositScreen() {
         onChainRoomId: openRoomId,
         txSignature,
       });
-
-      await trpcUtils.room.active.invalidate();
-      await trpcUtils.player.me.invalidate();
-      await trpcUtils.player.sessionState.invalidate();
 
       window.location.reload();
     } catch (err) {

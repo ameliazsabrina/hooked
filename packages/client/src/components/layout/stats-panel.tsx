@@ -1,5 +1,5 @@
 import { useWallet } from "@solana/wallet-adapter-react";
-import { trpc } from "~/utils/trpc";
+import { usePlayer } from "~/hooks/use-player";
 import { useSessionAuth } from "~/providers/session-auth-provider";
 
 type WindowState =
@@ -37,7 +37,7 @@ function getWindowTimerLabel(
 export function StatsPanel() {
   const { connected } = useWallet();
   const { ready: authReady } = useSessionAuth();
-  const playerQuery = trpc.player.me.useQuery(undefined, {
+  const playerQuery = usePlayer({
     enabled: connected && authReady,
   });
 

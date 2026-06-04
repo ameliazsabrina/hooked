@@ -23,7 +23,7 @@ import { useFishingWs } from "~/hooks/use-fishing-ws";
 import { useWallet } from "@solana/wallet-adapter-react";
 import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
 import { baitsPerSession } from "@hooked/shared";
-import { trpc } from "~/utils/trpc";
+import { usePlayer } from "~/hooks/use-player";
 import { useSessionAuth } from "~/providers/session-auth-provider";
 import {
   setMusicVolume,
@@ -63,7 +63,7 @@ export function GameLayout({ nickname, ready }: GameLayoutProps) {
 
   const { connected } = useWallet();
   const { ready: authReady } = useSessionAuth();
-  const playerQuery = trpc.player.me.useQuery(undefined, {
+  const playerQuery = usePlayer({
     enabled: connected && authReady,
   });
   const meWindowState =

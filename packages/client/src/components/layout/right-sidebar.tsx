@@ -3,7 +3,8 @@ import { createPortal } from "react-dom";
 import { useWallet } from "@solana/wallet-adapter-react";
 import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
 import { RARITY_COLORS, type FishRarity } from "@hooked/shared";
-import { trpc } from "~/utils/trpc";
+import { usePlayer } from "~/hooks/use-player";
+import { useRoomLeaderboard } from "~/hooks/use-room";
 import { useSessionAuth } from "~/providers/session-auth-provider";
 import { playSfx } from "~/utils/audio";
 import { SettingsButton } from "~/components/settings/settings-button";
@@ -79,19 +80,16 @@ export function RightSidebar({
   const [selling, setSelling] = useState(false);
   const cardRef = useRef<HTMLDivElement>(null);
 
-  const playerQuery = trpc.player.me.useQuery(undefined, {
+  const playerQuery = usePlayer({
     enabled: connected && authReady,
   });
   const roomId = playerQuery.data?.exists ? playerQuery.data.roomId : null;
 
-  const leaderboardQuery = trpc.room.leaderboard.useQuery(
-    { roomId: roomId ?? "" },
-    {
-      enabled: connected && !!roomId,
-      // WS broadcasts drive freshness; this is the first-paint fallback.
-      refetchInterval: 60000,
-    },
-  );
+  const leaderboardQuery = useRoomLeaderboard(roomId, {
+    enabled: connected && !!roomId,
+    // WS broadcasts drive freshness; this is the first-paint fallback.
+    refetchInterval: 60000,
+  });
 
   const walletStr = publicKey?.toBase58() ?? null;
   const liveFresh =

@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { useWallet } from "@solana/wallet-adapter-react";
 import { RODS, BAITS, type RodDef, type BaitDef } from "@hooked/shared";
-import { trpc } from "~/utils/trpc";
+import { usePlayer } from "~/hooks/use-player";
 import { useSessionAuth } from "~/providers/session-auth-provider";
 import {
   useBuyRod,
@@ -34,7 +34,7 @@ export function ShopScreen({ onClose, ready: readyProp }: ShopScreenProps) {
   const [selectedRodSlug, setSelectedRodSlug] = useState<string | null>(null);
   const [selectedBaitSlug, setSelectedBaitSlug] = useState<string | null>(null);
 
-  const playerQuery = trpc.player.me.useQuery(undefined, {
+  const playerQuery = usePlayer({
     enabled: connected && authReady,
   });
 

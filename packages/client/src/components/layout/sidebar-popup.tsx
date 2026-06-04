@@ -1,6 +1,7 @@
 import { useWallet } from "@solana/wallet-adapter-react";
 import type { FishRarity } from "@hooked/shared";
-import { trpc } from "~/utils/trpc";
+import { usePlayer } from "~/hooks/use-player";
+import { useRoomLeaderboard } from "~/hooks/use-room";
 import { useSessionAuth } from "~/providers/session-auth-provider";
 import { FishIndex } from "~/components/collections/fish-index";
 import { BountyList } from "./bounty-list";
@@ -102,19 +103,16 @@ interface LeaderboardPanelProps {
 function LeaderboardPanel({ roomLeaderboard }: LeaderboardPanelProps) {
   const { connected, publicKey } = useWallet();
   const { ready: authReady } = useSessionAuth();
-  const playerQuery = trpc.player.me.useQuery(undefined, {
+  const playerQuery = usePlayer({
     enabled: connected && authReady,
   });
   const roomId = playerQuery.data?.exists ? playerQuery.data.roomId : null;
 
-  const leaderboardQuery = trpc.room.leaderboard.useQuery(
-    { roomId: roomId ?? "" },
-    {
-      enabled: connected && !!roomId,
-      // WS broadcasts drive freshness; this is the first-paint fallback.
-      refetchInterval: 60000,
-    },
-  );
+  const leaderboardQuery = useRoomLeaderboard(roomId, {
+    enabled: connected && !!roomId,
+    // WS broadcasts drive freshness; this is the first-paint fallback.
+    refetchInterval: 60000,
+  });
 
   const walletStr = publicKey?.toBase58() ?? null;
   const liveFresh =

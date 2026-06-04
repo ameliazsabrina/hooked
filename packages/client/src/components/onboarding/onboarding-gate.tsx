@@ -1,5 +1,5 @@
 import { useWallet } from "@solana/wallet-adapter-react";
-import { trpc } from "~/utils/trpc";
+import { usePlayer } from "~/hooks/use-player";
 import { useSessionAuth } from "~/providers/session-auth-provider";
 import { GameLayout } from "~/components/layout/game-layout";
 import { NicknameScreen } from "./nickname-screen";
@@ -14,7 +14,7 @@ export function OnboardingGate() {
     error: authError,
   } = useSessionAuth();
 
-  const playerQuery = trpc.player.me.useQuery(undefined, {
+  const playerQuery = usePlayer({
     enabled: connected && authReady,
     retry: 1,
     staleTime: 0,

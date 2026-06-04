@@ -2,7 +2,7 @@ import { useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useWallet } from "@solana/wallet-adapter-react";
 import { getRod, getBait, type RodDef, type BaitDef } from "@hooked/shared";
-import { trpc } from "~/utils/trpc";
+import { usePlayer } from "~/hooks/use-player";
 import { useSessionAuth } from "~/providers/session-auth-provider";
 
 type SlotKind = "rod" | "bait";
@@ -62,7 +62,7 @@ function BaitCardBody({ bait }: { bait: BaitDef }) {
 export function EquippedGear() {
   const { connected } = useWallet();
   const { ready: authReady } = useSessionAuth();
-  const playerQuery = trpc.player.me.useQuery(undefined, {
+  const playerQuery = usePlayer({
     enabled: connected && authReady,
   });
 
