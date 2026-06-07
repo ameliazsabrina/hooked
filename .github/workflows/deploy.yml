@@ -1,0 +1,39 @@
+name: deploy-server
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "packages/server/**"
+      - "packages/shared/**"
+      - "Dockerfile"
+      - "docker-compose.staging.yml"
+      - "pnpm-lock.yaml"
+      - ".github/workflows/deploy.yml"
+  workflow_dispatch: {}
+
+concurrency:
+  group: deploy-server
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_KEY }}
+          script_stop: true # abort on first failed command
+          command_timeout: 20m # Docker build needs headroom
+          script: |
+            set -euo pipefail
+            cd /opt/hooked
+            git fetch --all --prune
+            git reset --hard origin/main        # box mirrors main exactly (keeps untracked .env + compose)
+            docker compose -f docker-compose.staging.yml up -d --build
+            docker image prune -f
+            sleep 5
+            curl -fsS http://127.0.0.1:3001/health && echo " <- deploy healthy"

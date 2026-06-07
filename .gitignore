@@ -74,5 +74,4 @@ packages/server/tests/fixtures/
 packages/programs/runbooks/
 packages/programs/txtx.yml
 
-.github
 .vercel
