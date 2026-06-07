@@ -1,6 +1,11 @@
 import { Queue } from "bullmq";
 import { buildBullMqConnection } from "../plugins/redisFactory.js";
 
+const JOB_RETENTION = {
+  removeOnComplete: 200,
+  removeOnFail: 1000,
+} as const;
+
 let dailyResetQueue: Queue | null = null;
 let payoutQueue: Queue | null = null;
 let poolLifecycleQueue: Queue | null = null;
@@ -28,27 +33,39 @@ export function getQueues() {
 export function registerJobs(redisUrl: string) {
   const connection = buildBullMqConnection(redisUrl);
 
-  dailyResetQueue = new Queue("daily-reset", { connection });
-  payoutQueue = new Queue("payout", { connection });
+  dailyResetQueue = new Queue("daily-reset", {
+    connection,
+    defaultJobOptions: { ...JOB_RETENTION },
+  });
+  payoutQueue = new Queue("payout", {
+    connection,
+    defaultJobOptions: { ...JOB_RETENTION },
+  });
 
   dailyResetQueue.upsertJobScheduler(
     "daily-reset-scheduler",
     { pattern: "0 0 * * *", tz: "UTC" },
-    { name: "daily-reset" },
+    { name: "daily-reset", opts: { ...JOB_RETENTION } },
   );
 
-  poolLifecycleQueue = new Queue("pool-lifecycle", { connection });
+  poolLifecycleQueue = new Queue("pool-lifecycle", {
+    connection,
+    defaultJobOptions: { ...JOB_RETENTION },
+  });
   poolLifecycleQueue.upsertJobScheduler(
     "pool-lifecycle-scheduler",
     { every: 15 * 60 * 1000 },
-    { name: "pool-lifecycle" },
+    { name: "pool-lifecycle", opts: { ...JOB_RETENTION } },
   );
 
-  roomLifecycleQueue = new Queue("room-lifecycle", { connection });
+  roomLifecycleQueue = new Queue("room-lifecycle", {
+    connection,
+    defaultJobOptions: { ...JOB_RETENTION },
+  });
   roomLifecycleQueue.upsertJobScheduler(
     "room-lifecycle-scheduler",
     { every: 15 * 60 * 1000 },
-    { name: "room-lifecycle" },
+    { name: "room-lifecycle", opts: { ...JOB_RETENTION } },
   );
 
   import("./dailyReset.js").then(({ createDailyResetWorker }) => {
@@ -81,20 +98,26 @@ export function registerJobs(redisUrl: string) {
   roomCreateQueue.upsertJobScheduler(
     "room-create-window",
     { pattern: "0 2,14 * * *", tz: "UTC" },
-    { name: "room-create" },
+    { name: "room-create", opts: { removeOnComplete: 100, removeOnFail: 200 } },
   );
   import("./roomCreate.js").then(({ createRoomCreateWorker }) => {
     createRoomCreateWorker(connection);
   });
 
-  bountyWeeklyResetQueue = new Queue("bounty-weekly-reset", { connection });
+  bountyWeeklyResetQueue = new Queue("bounty-weekly-reset", {
+    connection,
+    defaultJobOptions: { ...JOB_RETENTION },
+  });
   bountyWeeklyResetQueue.upsertJobScheduler(
     "bounty-weekly-reset-mon",
     { pattern: "0 0 * * 1", tz: "UTC" },
-    { name: "bounty-weekly-reset" },
+    { name: "bounty-weekly-reset", opts: { ...JOB_RETENTION } },
   );
 
-  bountySolPayoutQueue = new Queue("bounty-sol-payout", { connection });
+  bountySolPayoutQueue = new Queue("bounty-sol-payout", {
+    connection,
+    defaultJobOptions: { ...JOB_RETENTION },
+  });
 
   import("./bountyReset.js").then(({ createBountyWeeklyResetWorker }) => {
     createBountyWeeklyResetWorker(connection);
@@ -105,17 +128,23 @@ export function registerJobs(redisUrl: string) {
   });
 
   // Triggered per-session by sessionCommit; no scheduled poller.
-  scoreBridgeQueue = new Queue("score-bridge", { connection });
+  scoreBridgeQueue = new Queue("score-bridge", {
+    connection,
+    defaultJobOptions: { ...JOB_RETENTION },
+  });
   import("./scoreBridge.js").then(({ createScoreBridgeWorker }) => {
     createScoreBridgeWorker(connection);
   });
 
   // 1-min tick; race-safe via partial unique index on FishingEvent.active.
-  eventLifecycleQueue = new Queue("event-lifecycle", { connection });
+  eventLifecycleQueue = new Queue("event-lifecycle", {
+    connection,
+    defaultJobOptions: { ...JOB_RETENTION },
+  });
   eventLifecycleQueue.upsertJobScheduler(
     "event-lifecycle-tick",
     { every: 60 * 1000 },
-    { name: "event-lifecycle" },
+    { name: "event-lifecycle", opts: { ...JOB_RETENTION } },
   );
   import("./eventLifecycle.js").then(({ createEventLifecycleWorker }) => {
     createEventLifecycleWorker(connection);
